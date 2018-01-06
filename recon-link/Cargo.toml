@@ -1,0 +1,21 @@
+[package]
+authors = ["Chris Dawes <cmsd2@cantab.net>"]
+name = "recon-link"
+version = "0.1.0"
+
+[dependencies]
+bytes = "0.4.5"
+futures = "0.1.17"
+log = "0.4.1"
+state_machine_future = "0.1.5"
+tokio-core = "0.1.11"
+tokio-io = "0.1.4"
+tokio-retry = "0.1.1"
+tokio-timer = "0.1.2"
+
+[dependencies.env_logger]
+optional = true
+version = "0.4.3"
+
+[features]
+logger = ["env_logger"]

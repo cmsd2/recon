@@ -1,0 +1,9 @@
+[package]
+name = "recon"
+version = "0.1.0"
+authors = ["Chris Dawes <cmsd2@cantab.net>"]
+
+[lib]
+
+[dependencies]
+recon-link = { version = "0.1", path = "../recon-link" }
