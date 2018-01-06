@@ -9,8 +9,10 @@ extern crate recon_link;
 
 use std::io;
 use std::time::Duration;
+use futures::{Async, AsyncSink, Poll, StartSend};
 use futures::future::Future;
 use futures::stream::{self, Stream};
+use futures::sink::{Sink};
 use tokio_core::reactor::Core;
 use tokio_timer::Timer;
 use recon_link::conn::Connection;
@@ -42,7 +44,24 @@ fn main() {
                 })
         });
 
-    let conn = Connection::new(addr, core.handle(), stream);
+    let conn = Connection::new(addr, core.handle(), stream, PrinterSink);
 
     core.run(conn).unwrap();
+}
+
+struct PrinterSink;
+
+impl Sink for PrinterSink {
+    type SinkItem = Vec<u8>;
+    type SinkError = io::Error;
+
+    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        let s = String::from_utf8_lossy(&item[..]);
+        println!("{}", s);
+        Ok(AsyncSink::Ready)
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(Async::Ready(()))
+    }
 }
