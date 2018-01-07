@@ -2,6 +2,7 @@
 authors = ["Chris Dawes <cmsd2@cantab.net>"]
 name = "recon-link"
 version = "0.1.0"
+license = "Apache-2.0"
 
 [dependencies]
 bytes = "0.4.5"
