@@ -15,8 +15,30 @@ use bytes::{Bytes, BytesMut, Buf, IntoBuf};
 
 pub type ConnectionError = io::Error;
 
+#[derive(Clone, PartialEq, Debug)]
+pub struct Message {
+    pub session_id: u32,
+    pub content: Vec<u8>,
+}
+
+impl Message {
+    pub fn new(session_id: u32) -> Message {
+        Message {
+            session_id: session_id,
+            content: vec![],
+        }
+    }
+
+    pub fn from_bytes(session_id: u32, content: Vec<u8>) -> Message {
+        Message {
+            session_id: session_id,
+            content: content,
+        }
+    }
+}
+
 #[derive(StateMachineFuture)]
-pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Vec<u8>,SinkError=io::Error>> {
+pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message,SinkError=io::Error>> {
     #[state_machine_future(start, transitions(Connecting, Finished, Error))]
     NotConnected {
         addr: SocketAddr,
@@ -24,6 +46,7 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
         stream: S,
         sink: K,
         error_count: u32,
+        session_id: u32,
     },
 
     #[state_machine_future(transitions(NotConnected, Connected, Finished, Error))]
@@ -34,6 +57,7 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
         sink: K,
         tcp_future: Box<Future<Item=TcpStream,Error=io::Error>>,
         error_count: u32,
+        session_id: u32,
     },
 
     #[state_machine_future(transitions(Connected, NotConnected, Finished, Error))]
@@ -44,9 +68,10 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
         sink: K,
         tcp: TcpStream,
         outbound: Option<Bytes>,
-        inbound: Option<Bytes>,
+        inbound: Option<Message>,
         inbound_inflight: u32,
         error_count: u32,
+        session_id: u32,
     },
 
     #[state_machine_future(ready)]
@@ -56,14 +81,14 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
     Error(ConnectionError),
 }
 
-impl <Item, S, K> Connection<Item, S, K> where Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Vec<u8>,SinkError=io::Error> {
+impl <Item, S, K> Connection<Item, S, K> where Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message,SinkError=io::Error> {
     pub fn new(addr: SocketAddr, handle: Handle, stream: S, sink: K) -> ConnectionFuture<Item, S, K> {
         debug!("constructing new connection future");
-        Connection::start(addr, handle, stream, sink, 0)
+        Connection::start(addr, handle, stream, sink, 0, 0)
     }
 }
 
-impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Vec<u8>,SinkError=io::Error> {
+impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message,SinkError=io::Error> {
     fn poll_not_connected<'a>(not_connected: &'a mut RentToOwn<'a, NotConnected<Item, S, K>>) -> Poll<AfterNotConnected<Item, S, K>, ConnectionError> {
         trace!("not connected to {}", not_connected.addr);
         
@@ -91,6 +116,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             sink: not_connected.sink,
             tcp_future: tcp_future,
             error_count: not_connected.error_count,
+            session_id: not_connected.session_id,
         }.into()))
     }
 
@@ -110,6 +136,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             inbound_inflight: 0,
             outbound: None,
             error_count: connecting.error_count,
+            session_id: connecting.session_id,
         }.into()))
     }
 
@@ -128,7 +155,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                 Ok(Async::Ready(len)) => {
                     trace!("tcpstream received {} bytes", len);
                     progress = true;
-                    Some(receiving_buf.freeze())
+                    Some(Message::from_bytes(connected.session_id, receiving_buf.freeze().to_vec()))
                 },
                 Ok(Async::NotReady) => {
                     trace!("tcpstream not ready to read");
@@ -144,6 +171,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                         stream: connected.stream,
                         sink: connected.sink,
                         error_count: connected.error_count + 1,
+                        session_id: connected.session_id + 1,
                     }.into()));
                 }
             };
@@ -199,21 +227,22 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                         stream: connected.stream,
                         sink: connected.sink,
                         error_count: connected.error_count + 1,
+                        session_id: connected.session_id + 1,
                     }.into()));
                 }
             }
         }
 
-        if let Some(buf) = received {
-            match try!(connected.sink.start_send(buf.to_vec())) {
+        if let Some(msg) = received {
+            match try!(connected.sink.start_send(msg)) {
                 AsyncSink::Ready => {
                     trace!("sink started send");
                     progress = true;
                     connected.inbound_inflight += 1;
                 },
-                AsyncSink::NotReady(buf) => {
+                AsyncSink::NotReady(msg) => {
                     trace!("sink not ready");
-                    set_bytes(&mut connected.inbound, buf);
+                    connected.inbound = Some(msg);
                 },
             }
         }
@@ -247,6 +276,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                 inbound_inflight: connected.inbound_inflight,
                 outbound: connected.outbound,
                 error_count: connected.error_count,
+                session_id: connected.session_id,
             }.into()));
         } else {
             trace!("did not make progress");

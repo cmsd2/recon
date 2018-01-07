@@ -15,7 +15,7 @@ use futures::stream::{self, Stream};
 use futures::sink::{Sink};
 use tokio_core::reactor::Core;
 use tokio_timer::Timer;
-use recon_link::conn::Connection;
+use recon_link::conn::{Connection, Message};
 
 fn init_logger() {
     if cfg!(feature="logger") {
@@ -52,11 +52,11 @@ fn main() {
 struct PrinterSink;
 
 impl Sink for PrinterSink {
-    type SinkItem = Vec<u8>;
+    type SinkItem = Message;
     type SinkError = io::Error;
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        let s = String::from_utf8_lossy(&item[..]);
+        let s = String::from_utf8_lossy(&item.content[..]);
         println!("{}", s);
         Ok(AsyncSink::Ready)
     }
