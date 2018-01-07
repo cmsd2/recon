@@ -3,6 +3,10 @@ authors = ["Chris Dawes <cmsd2@cantab.net>"]
 name = "recon-link"
 version = "0.1.0"
 license = "Apache-2.0"
+description = "Persistent tcp connections"
+repository = "https://github.com/cmsd2/recon"
+keywords = ["reconnect", "async", "tokio", "futures", "tcp"]
+categories = ["asynchronous", "network-programming"]
 
 [dependencies]
 bytes = "0.4.5"
