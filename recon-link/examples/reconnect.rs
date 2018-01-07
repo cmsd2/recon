@@ -17,14 +17,20 @@ use tokio_core::reactor::Core;
 use tokio_timer::Timer;
 use recon_link::conn::{Connection, Message};
 
-fn init_logger() {
-    if cfg!(feature="logger") {
+#[cfg(feature="logger")]
+mod logging {
+    pub fn init_logger() {
         env_logger::init().unwrap();
     }
 }
 
+#[cfg(not(feature="logger"))]
+mod logging {
+    pub fn init_logger() {}
+}
+
 fn main() {
-    init_logger();
+    logging::init_logger();
 
     info!("hello, world!");
 
