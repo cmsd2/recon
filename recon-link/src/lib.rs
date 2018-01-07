@@ -11,6 +11,7 @@ extern crate state_machine_future;
 extern crate bytes;
 
 pub mod conn;
+pub mod framing;
 
 #[cfg(test)]
 mod tests {

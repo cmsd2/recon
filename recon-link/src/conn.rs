@@ -3,75 +3,85 @@ use futures::stream::Stream;
 use futures::sink::Sink;
 use state_machine_future::RentToOwn;
 use tokio_core::reactor::Handle;
-use tokio_core::net::TcpStream;
-use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_retry::{self, Retry};
 use tokio_retry::strategy::{FibonacciBackoff, jitter};
-use std::ops::Deref;
-use std::net::SocketAddr;
 use std::io;
+use std::error;
 use std::time::Duration;
-use bytes::{Bytes, BytesMut, Buf, IntoBuf};
+use std::fmt;
 
 pub type ConnectionError = io::Error;
 
-#[derive(Clone, PartialEq, Debug)]
-pub struct Message {
+pub struct Message<Item> {
     pub session_id: u32,
-    pub content: Vec<u8>,
+    pub content: Item
 }
 
-impl Message {
-    pub fn new(session_id: u32) -> Message {
+impl <Item> Message<Item> {
+    pub fn new(session_id: u32, item: Item) -> Message<Item> {
         Message {
             session_id: session_id,
-            content: vec![],
+            content: item,
         }
     }
+}
 
-    pub fn from_bytes(session_id: u32, content: Vec<u8>) -> Message {
-        Message {
-            session_id: session_id,
-            content: content,
-        }
+impl <Item> Clone for Message<Item> where Item: Clone {
+    fn clone(&self) -> Message<Item> {
+        Message::new(self.session_id, self.content.clone())
     }
+}
+
+impl <Item> fmt::Debug for Message<Item> where Item: fmt::Debug {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Message<session_id={}, content={:?}>", self.session_id, self.content)
+    }
+}
+
+pub trait NewTransport {
+    type Future: Future<Item=Self::Transport,Error=Self::Error>;
+    type Transport;
+    type Error: error::Error + Sync + Send;
+
+    fn new_transport(&self) -> Self::Future;
 }
 
 #[derive(StateMachineFuture)]
-pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message,SinkError=io::Error>> {
+pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
     #[state_machine_future(start, transitions(Connecting, Finished, Error))]
     NotConnected {
-        addr: SocketAddr,
         handle: Handle,
         stream: S,
         sink: K,
         error_count: u32,
         session_id: u32,
+        new_transport: N,
     },
 
     #[state_machine_future(transitions(NotConnected, Connected, Finished, Error))]
     Connecting {
-        addr: SocketAddr,
         handle: Handle,
         stream: S,
         sink: K,
-        tcp_future: Box<Future<Item=TcpStream,Error=io::Error>>,
+        tcp_future: Box<Future<Item=T,Error=io::Error>>,
         error_count: u32,
         session_id: u32,
+        new_transport: N,
     },
 
     #[state_machine_future(transitions(Connected, NotConnected, Finished, Error))]
     Connected {
-        addr: SocketAddr,
         handle: Handle,
         stream: S,
         sink: K,
-        tcp: TcpStream,
-        outbound: Option<Bytes>,
-        inbound: Option<Message>,
+        tcp: T,
+        outbound: Option<Item>,
+        outbound_inflight: u32,
+        inbound: Option<Message<Item>>,
         inbound_inflight: u32,
         error_count: u32,
         session_id: u32,
+        new_transport: N,
     },
 
     #[state_machine_future(ready)]
@@ -81,53 +91,52 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
     Error(ConnectionError),
 }
 
-impl <Item, S, K> Connection<Item, S, K> where Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message,SinkError=io::Error> {
-    pub fn new(addr: SocketAddr, handle: Handle, stream: S, sink: K) -> ConnectionFuture<Item, S, K> {
+impl <Item, S, K, T, N> Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
+    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N) -> ConnectionFuture<Item, S, K, T, N> {
         debug!("constructing new connection future");
-        Connection::start(addr, handle, stream, sink, 0, 0)
+        Connection::start(handle, stream, sink, 0, 0, new_transport)
     }
 }
 
-impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message,SinkError=io::Error> {
-    fn poll_not_connected<'a>(not_connected: &'a mut RentToOwn<'a, NotConnected<Item, S, K>>) -> Poll<AfterNotConnected<Item, S, K>, ConnectionError> {
-        trace!("not connected to {}", not_connected.addr);
+impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
+    fn poll_not_connected<'a>(not_connected: &'a mut RentToOwn<'a, NotConnected<Item, S, K, T, N>>) -> Poll<AfterNotConnected<Item, S, K, T, N>, ConnectionError> {
+        trace!("not connected");
         
         let retry_strategy = FibonacciBackoff ::from_millis(1)
             .max_delay(Duration::from_millis(2000))
             .map(jitter);
         
-        let addr = not_connected.addr.clone();
         let handle = not_connected.handle.clone();
+        let new_transport = not_connected.new_transport.clone();
 
-        let tcp_future = Box::new(Retry::spawn(not_connected.handle.clone(), retry_strategy, move || {
-            TcpStream::connect(&addr, &handle)
+        let tcp_future = Box::new(Retry::spawn(handle, retry_strategy, move || {
+            new_transport.new_transport()
         }).map_err(|e| {
             match e {
-                tokio_retry::Error::OperationError(e) => e,
+                tokio_retry::Error::OperationError(e) => io::Error::new(io::ErrorKind::Other, e),
                 tokio_retry::Error::TimerError(e) => e,
             }
-        })) as Box<Future<Item=TcpStream,Error=io::Error>>;
+        })) as (Box<Future<Item=T,Error=io::Error>>);
 
         let not_connected = not_connected.take();
         Ok(Async::Ready(Connecting {
-            addr: not_connected.addr,
             handle: not_connected.handle,
             stream: not_connected.stream,
             sink: not_connected.sink,
             tcp_future: tcp_future,
             error_count: not_connected.error_count,
             session_id: not_connected.session_id,
+            new_transport: not_connected.new_transport,
         }.into()))
     }
 
-    fn poll_connecting<'a>(connecting: &'a mut RentToOwn<'a, Connecting<Item, S, K>>) -> Poll<AfterConnecting<Item, S, K>, ConnectionError> {
-        trace!("connecting to {}", connecting.addr);
+    fn poll_connecting<'a>(connecting: &'a mut RentToOwn<'a, Connecting<Item, S, K, T, N>>) -> Poll<AfterConnecting<Item, S, K, T, N>, ConnectionError> {
+        trace!("connecting");
 
         let tcp = try_ready!(connecting.tcp_future.poll());
 
         let connecting = connecting.take();
         Ok(Async::Ready(Connected {
-            addr: connecting.addr,
             handle: connecting.handle,
             stream: connecting.stream,
             sink: connecting.sink,
@@ -135,13 +144,15 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             inbound: None,
             inbound_inflight: 0,
             outbound: None,
+            outbound_inflight: 0,
             error_count: connecting.error_count,
             session_id: connecting.session_id,
+            new_transport: connecting.new_transport,
         }.into()))
     }
 
-    fn poll_connected<'a>(connected: &'a mut RentToOwn<'a, Connected<Item, S, K>>) -> Poll<AfterConnected<Item, S, K>, ConnectionError> {
-        trace!("connected to {}", connected.addr);
+    fn poll_connected<'a>(connected: &'a mut RentToOwn<'a, Connected<Item, S, K, T, N>>) -> Poll<AfterConnected<Item, S, K, T, N>, ConnectionError> {
+        trace!("connected");
 
         // we make progress if any poll returns Ready
         // if we make progress then we return a state or state change
@@ -150,44 +161,53 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
         
         let mut received = connected.inbound.take();
         if received.is_none() && connected.inbound_inflight == 0 {
-            let mut receiving_buf = BytesMut::new();
-            received = match connected.tcp.read_buf(&mut receiving_buf) {
-                Ok(Async::Ready(len)) => {
-                    trace!("tcpstream received {} bytes", len);
+            received = match connected.tcp.poll() {
+                Ok(Async::Ready(Some(msg))) => {
+                    trace!("transport received msg");
                     progress = true;
-                    Some(Message::from_bytes(connected.session_id, receiving_buf.freeze().to_vec()))
+                    Some(Message::new(connected.session_id, msg))
                 },
-                Ok(Async::NotReady) => {
-                    trace!("tcpstream not ready to read");
-                    None
-                },
-                Err(e) => {
-                    trace!("tcpstream read error: {:?}", e);
+                Ok(Async::Ready(None)) => {
+                    trace!("transport returned end of stream");
+
                     let connected = connected.take();
 
                     return Ok(Async::Ready(NotConnected {
-                        addr: connected.addr,
+                        handle: connected.handle,
+                        stream: connected.stream,
+                        sink: connected.sink,
+                        error_count: connected.error_count,
+                        session_id: connected.session_id + 1,
+                        new_transport: connected.new_transport,
+                    }.into()));
+                },
+                Ok(Async::NotReady) => {
+                    trace!("transport not ready to read");
+                    None
+                },
+                Err(e) => {
+                    trace!("transport read error: {:?}", e);
+                    let connected = connected.take();
+
+                    return Ok(Async::Ready(NotConnected {
                         handle: connected.handle,
                         stream: connected.stream,
                         sink: connected.sink,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
+                        new_transport: connected.new_transport,
                     }.into()));
                 }
             };
         }
 
-        let mut sending_buf = connected.outbound.take();
-        if sending_buf.is_none() {
-            sending_buf = match try!(connected.stream.poll()) {
+        let mut sending = connected.outbound.take();
+        if sending.is_none() {
+            sending = match try!(connected.stream.poll()) {
                 Async::Ready(Some(msg)) => {
                     progress = true;
-                    let mut buf = Some(Bytes::new());
-                    let msg_vec: Vec<u8> = msg.into();
-                    trace!("stream received new message of length {}", msg_vec.len());
-                    set_bytes(&mut buf, msg_vec);
-
-                    buf
+                    
+                    Some(msg)
                 },
                 Async::Ready(None) => {
                     trace!("stream finished");
@@ -200,34 +220,28 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             };
         }
 
-        if let Some(buf) = sending_buf {
-            let total_len = buf.len();
-            let mut buf = buf.into_buf();
-            match connected.tcp.write_buf(&mut buf) {
-                Ok(Async::Ready(len)) => {
-                    trace!("tcpstream wrote {} of {} bytes", len, total_len);
+        if let Some(sending) = sending {
+            match connected.tcp.start_send(sending) {
+                Ok(AsyncSink::Ready) => {
+                    trace!("transport wrote message");
                     progress = true;
-                    if buf.has_remaining() {
-                        set_bytes(&mut connected.outbound, buf.bytes());
-                    }
+                    connected.outbound_inflight += 1;
                 },
-                Ok(Async::NotReady) => {
+                Ok(AsyncSink::NotReady(sending)) => {
                     trace!("tcpstream not ready to write");
-                    set_bytes(&mut connected.outbound, buf.bytes());
+                    connected.outbound = Some(sending);
                 },
                 Err(err) => {
-                    trace!("tcpstream write error: {:?}", err);
-                    set_bytes(&mut connected.outbound, buf.bytes());
-                    
+                    trace!("transport write error: {:?}", err);                    
                     let connected = connected.take();
 
                     return Ok(Async::Ready(NotConnected {
-                        addr: connected.addr,
                         handle: connected.handle,
                         stream: connected.stream,
                         sink: connected.sink,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
+                        new_transport: connected.new_transport,
                     }.into()));
                 }
             }
@@ -261,13 +275,26 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             }
         }
 
+        if connected.outbound_inflight != 0 {
+            match try!(connected.tcp.poll_complete()) {
+                Async::Ready(()) => {
+                    trace!("transport poll complete");
+                    progress = true;
+                    connected.outbound_inflight = 0;
+                },
+                Async::NotReady => {
+                    trace!("transport sink polled not ready");
+                    // do nothing
+                }
+            }
+        }
+
         if progress {
             trace!("made progress");
 
             let connected = connected.take();
 
             return Ok(Async::Ready(Connected {
-                addr: connected.addr,
                 handle: connected.handle,
                 stream: connected.stream,
                 sink: connected.sink,
@@ -275,8 +302,10 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                 inbound: connected.inbound,
                 inbound_inflight: connected.inbound_inflight,
                 outbound: connected.outbound,
+                outbound_inflight: connected.outbound_inflight,
                 error_count: connected.error_count,
                 session_id: connected.session_id,
+                new_transport: connected.new_transport,
             }.into()));
         } else {
             trace!("did not make progress");
@@ -284,10 +313,4 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             return Ok(Async::NotReady);
         }
     }
-}
-
-fn set_bytes<'a, B>(maybe_buffer: &mut Option<Bytes>, content: B) where B: Deref<Target=[u8]> {
-     let mut buf_remaining = Bytes::new();
-    buf_remaining.extend_from_slice(&content);
-    *maybe_buffer = Some(buf_remaining);
 }
