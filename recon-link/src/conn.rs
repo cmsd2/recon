@@ -5,9 +5,9 @@ use state_machine_future::RentToOwn;
 use tokio_core::reactor::Handle;
 use tokio_core::net::TcpStream;
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_io::io::read;
 use tokio_retry::{self, Retry};
 use tokio_retry::strategy::{FibonacciBackoff, jitter};
+use std::ops::Deref;
 use std::net::SocketAddr;
 use std::io;
 use std::time::Duration;
@@ -33,6 +33,7 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
         stream: S,
         sink: K,
         tcp_future: Box<Future<Item=TcpStream,Error=io::Error>>,
+        error_count: u32,
     },
 
     #[state_machine_future(transitions(Connected, NotConnected, Finished, Error))]
@@ -45,6 +46,7 @@ pub enum Connection<Item: Into<Vec<u8>>, S: Stream<Item=Item,Error=io::Error>, K
         outbound: Option<Bytes>,
         inbound: Option<Bytes>,
         inbound_inflight: u32,
+        error_count: u32,
     },
 
     #[state_machine_future(ready)]
@@ -88,6 +90,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             stream: not_connected.stream,
             sink: not_connected.sink,
             tcp_future: tcp_future,
+            error_count: not_connected.error_count,
         }.into()))
     }
 
@@ -106,29 +109,16 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             inbound: None,
             inbound_inflight: 0,
             outbound: None,
+            error_count: connecting.error_count,
         }.into()))
     }
 
     fn poll_connected<'a>(connected: &'a mut RentToOwn<'a, Connected<Item, S, K>>) -> Poll<AfterConnected<Item, S, K>, ConnectionError> {
         trace!("connected to {}", connected.addr);
-        // use std::io::Read;
 
-        // let buf = try_ready!(
-        //         connected
-        //             .stream
-        //             .by_ref()
-        //             .take(1)
-        //             .map(|msg| msg.into())
-        //             .concat2()
-        //             .select(
-        //                 read(connected.tcp.by_ref(), vec![])
-        //                 .map(|(tcp, buf, len)| {
-        //                     buf
-        //                 })
-        //             )
-        //             .poll()
-        //         );
-
+        // we make progress if any poll returns Ready
+        // if we make progress then we return a state or state change
+        // otherwise return NotReady
         let mut progress = false;
         
         let mut received = connected.inbound.take();
@@ -153,7 +143,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                         handle: connected.handle,
                         stream: connected.stream,
                         sink: connected.sink,
-                        error_count: 0,
+                        error_count: connected.error_count + 1,
                     }.into()));
                 }
             };
@@ -164,12 +154,12 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             sending_buf = match try!(connected.stream.poll()) {
                 Async::Ready(Some(msg)) => {
                     progress = true;
-                    let mut buf = Bytes::new();
+                    let mut buf = Some(Bytes::new());
                     let msg_vec: Vec<u8> = msg.into();
                     trace!("stream received new message of length {}", msg_vec.len());
-                    buf.extend_from_slice(&msg_vec[..]);
+                    set_bytes(&mut buf, msg_vec);
 
-                    Some(buf)
+                    buf
                 },
                 Async::Ready(None) => {
                     trace!("stream finished");
@@ -190,20 +180,26 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                     trace!("tcpstream wrote {} of {} bytes", len, total_len);
                     progress = true;
                     if buf.has_remaining() {
-                        let mut buf_remaining = Bytes::new();
-                        buf_remaining.extend_from_slice(buf.bytes());
-                        connected.outbound = Some(buf_remaining);
+                        set_bytes(&mut connected.outbound, buf.bytes());
                     }
                 },
                 Ok(Async::NotReady) => {
                     trace!("tcpstream not ready to write");
-                    let mut buf_remaining = Bytes::new();
-                    buf_remaining.extend_from_slice(buf.bytes());
-                    connected.outbound = Some(buf_remaining);
+                    set_bytes(&mut connected.outbound, buf.bytes());
                 },
                 Err(err) => {
                     trace!("tcpstream write error: {:?}", err);
-                    unimplemented!();
+                    set_bytes(&mut connected.outbound, buf.bytes());
+                    
+                    let connected = connected.take();
+
+                    return Ok(Async::Ready(NotConnected {
+                        addr: connected.addr,
+                        handle: connected.handle,
+                        stream: connected.stream,
+                        sink: connected.sink,
+                        error_count: connected.error_count + 1,
+                    }.into()));
                 }
             }
         }
@@ -217,9 +213,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                 },
                 AsyncSink::NotReady(buf) => {
                     trace!("sink not ready");
-                    let mut buf_remaining = Bytes::new();
-                    buf_remaining.extend_from_slice(&buf[..]);
-                    connected.inbound = Some(buf_remaining);
+                    set_bytes(&mut connected.inbound, buf);
                 },
             }
         }
@@ -233,7 +227,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                 },
                 Async::NotReady => {
                     trace!("sink polled not ready");
-                    //
+                    // do nothing
                 }
             }
         }
@@ -252,6 +246,7 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
                 inbound: connected.inbound,
                 inbound_inflight: connected.inbound_inflight,
                 outbound: connected.outbound,
+                error_count: connected.error_count,
             }.into()));
         } else {
             trace!("did not make progress");
@@ -259,67 +254,10 @@ impl <Item, S, K> PollConnection<Item, S, K> for Connection<Item, S, K> where It
             return Ok(Async::NotReady);
         }
     }
+}
 
-    // fn poll_connected_sending<'a>(connected: &'a mut RentToOwn<'a, ConnectedSending<Item, S>>) -> Poll<AfterConnectedSending<Item, S>, ConnectionError> {
-    //     let mut buf = connected.buf.take().unwrap().into_buf();
-
-    //     trace!("trying to write {} bytes", buf.remaining());
-    //     match connected.tcp.write_buf(&mut buf) {
-    //         Ok(Async::Ready(len)) => {
-    //             trace!("wrote {} bytes", len);
-
-    //             let mut connected = connected.take();
-
-    //             if buf.has_remaining() {
-    //                 let mut buf_remaining = Bytes::new();
-    //                 buf_remaining.extend_from_slice(buf.bytes());
-    //                 connected.buf = Some(buf_remaining);
-
-    //                 return Ok(Async::Ready(ConnectedSending {
-    //                     addr: connected.addr,
-    //                     handle: connected.handle,
-    //                     stream: connected.stream,
-    //                     tcp: connected.tcp,
-    //                     buf: connected.buf,
-    //                 }.into()));
-    //             } else if (connected.inbound.is_some()) {
-    //                 return Ok(Async::Ready(ConnectedReceiving {
-    //                     addr: connected.addr,
-    //                     handle: connected.handle,
-    //                     stream: connected.stream,
-    //                     tcp: connected.tcp,
-    //                 }.into()));
-    //             } else {
-    //                 return Ok(Async::Ready(Connected {
-    //                     addr: connected.addr,
-    //                     handle: connected.handle,
-    //                     stream: connected.stream,
-    //                     tcp: connected.tcp,
-    //                 }.into()));
-    //             }
-    //         },
-    //         Ok(Async::NotReady) => {
-    //             trace!("not ready");
-    //             let mut buf_remaining = Bytes::new();
-    //             buf_remaining.extend_from_slice(buf.bytes());
-    //             connected.buf = Some(buf_remaining);
-    //             return Ok(Async::NotReady);
-    //         },
-    //         Err(err) => {
-    //             debug!("error writing to socket {:?}", err);
-    //             let connected = connected.take();
-
-    //             return Ok(Async::Ready(NotConnected {
-    //                 addr: connected.addr,
-    //                 handle: connected.handle,
-    //                 stream: connected.stream,
-    //                 error_count: 0,
-    //             }.into()));
-    //         }
-    //     }
-    // }
-
-    // fn poll_connected_receiving<'a>(connected: &'a mut RentToOwn<'a, ConnectedReceiving<Item, S>>) -> Poll<AfterConnectedReceiving<Item, S>, ConnectionError> {
-
-    // }
+fn set_bytes<'a, B>(maybe_buffer: &mut Option<Bytes>, content: B) where B: Deref<Target=[u8]> {
+     let mut buf_remaining = Bytes::new();
+    buf_remaining.extend_from_slice(&content);
+    *maybe_buffer = Some(buf_remaining);
 }
