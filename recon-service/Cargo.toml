@@ -1,0 +1,12 @@
+[package]
+authors = ["Chris Dawes <cmsd2@cantab.net>"]
+name = "recon-service"
+version = "0.1.0"
+license = "Apache-2.0"
+description = "Asynchronous service types for Tokio"
+repository = "https://github.com/cmsd2/recon"
+keywords = ["reconnect", "async", "tokio", "futures", "service"]
+categories = ["asynchronous", "network-programming"]
+
+[dependencies]
+futures = "0.1.17"

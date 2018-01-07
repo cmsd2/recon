@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "recon",
-    "recon-link"
+    "recon-link",
+    "recon-service",
 ]
 
