@@ -16,14 +16,12 @@ implementing asynchronous messaging algorithms between nodes.
 ### recon-link
 
 This is an abstraction that sits on top of a TcpStream.
-It will aggressively connect and re-connect to a SocketAddr to maintain
-a working open connection.
+It will persistently connect and re-connect to a SocketAddr to maintain a working open connection.
 
-Bytes are sent and received using a Stream and a Sink pair which work with
-chunks of Vec<u8>.
+Messages are sent and received using a Stream and a Sink pair locally and remotely. A framed TcpStream works with the remote side.
 
-Message delivery is not guaranteed. Messages will be dropped when the tcp
-session is restarted.
+Message delivery is not guaranteed: within a tcp session any suffix of the stream of Messages may be dropped.
 
-Within a single tcp session messages will arrive in order as per Tcp's
-message ordering guarantees.
+Within a single tcp session messages will arrive in order as per Tcp's message ordering guarantees.
+
+Upon reconnection a control message is sent to the local side with an incremented session id. Messages sent to the local side are tagged with the session id.
