@@ -7,4 +7,4 @@ license = "Apache-2.0"
 [lib]
 
 [dependencies]
-recon-link = { version = "0.1", path = "../recon-link" }
+recon-link = { version = "0.2.1-alpha.0", path = "../recon-link" }
