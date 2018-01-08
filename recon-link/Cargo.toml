@@ -1,7 +1,7 @@
 [package]
 authors = ["Chris Dawes <cmsd2@cantab.net>"]
 name = "recon-link"
-version = "0.3.0"
+version = "0.3.1-alpha.0"
 license = "Apache-2.0"
 description = "Persistent tcp connections"
 repository = "https://github.com/cmsd2/recon"
