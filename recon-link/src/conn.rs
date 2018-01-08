@@ -165,7 +165,13 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             stream: connecting.stream,
             sink: connecting.sink,
             tcp: tcp,
-            inbound: VecDeque::new(),
+            inbound: VecDeque::from(vec![
+                Message::Control {
+                    event: Event::Connected {
+                        session_id: connecting.session_id
+                    }
+                }
+            ]),
             inbound_inflight: 0,
             outbound: None,
             outbound_inflight: 0,
