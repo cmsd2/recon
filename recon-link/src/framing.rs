@@ -39,7 +39,8 @@ impl Decoder for Parser {
 
     fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<ReconFrame>, io::Error> {
         if buf.len() == 0 {
-            Ok(Some(ReconFrame::Done))
+            //Ok(Some(ReconFrame::Done))
+            Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stream eof"))
         } else {
             Err(io::Error::new(io::ErrorKind::InvalidData, "trailing data found"))
         }

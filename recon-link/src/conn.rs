@@ -9,6 +9,7 @@ use std::io;
 use std::error;
 use std::time::Duration;
 use std::fmt;
+use std::collections::VecDeque;
 
 pub type ConnectionError = io::Error;
 pub type SessionId = u32;
@@ -100,7 +101,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         tcp: T,
         outbound: Option<Item>,
         outbound_inflight: u32,
-        inbound: Option<Message<Item>>,
+        inbound: VecDeque<Message<Item>>,
         inbound_inflight: u32,
         error_count: u32,
         session_id: u32,
@@ -164,7 +165,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             stream: connecting.stream,
             sink: connecting.sink,
             tcp: tcp,
-            inbound: None,
+            inbound: VecDeque::new(),
             inbound_inflight: 0,
             outbound: None,
             outbound_inflight: 0,
@@ -182,7 +183,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         // otherwise return NotReady
         let mut progress = false;
         
-        let mut received = connected.inbound.take();
+        let mut received = connected.inbound.pop_front();
         if received.is_none() && connected.inbound_inflight == 0 {
             received = match connected.tcp.poll() {
                 Ok(Async::Ready(Some(msg))) => {
@@ -279,7 +280,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 },
                 AsyncSink::NotReady(msg) => {
                     trace!("sink not ready");
-                    connected.inbound = Some(msg);
+                    connected.inbound.insert(0, msg);
                 },
             }
         }

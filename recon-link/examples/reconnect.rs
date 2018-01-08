@@ -59,7 +59,9 @@ fn main() {
 
     let conn = Connection::new(core.handle(), stream, PrinterSink, NewTcpTransport(addr, handle));
 
-    core.run(conn).unwrap();
+    let result = core.run(conn);
+
+    println!("event loop terminated: {:?}", result);
 }
 
 struct PrinterSink;
