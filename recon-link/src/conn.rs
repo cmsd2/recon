@@ -80,6 +80,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         error_count: u32,
         session_id: u32,
         new_transport: N,
+        outbound_max: usize,
     },
 
     #[state_machine_future(transitions(NotConnected, Connected, Finished, Error))]
@@ -91,6 +92,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         error_count: u32,
         session_id: u32,
         new_transport: N,
+        outbound_max: usize,
     },
 
     #[state_machine_future(transitions(Connected, NotConnected, Finished, Error))]
@@ -99,7 +101,8 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         stream: S,
         sink: K,
         tcp: T,
-        outbound: Option<Item>,
+        outbound: VecDeque<Item>,
+        outbound_max: usize,
         outbound_inflight: u32,
         inbound: VecDeque<Message<Item>>,
         inbound_inflight: u32,
@@ -116,9 +119,9 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
 }
 
 impl <Item, S, K, T, N> Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
-    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N) -> ConnectionFuture<Item, S, K, T, N> {
+    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N, outbound_max: usize) -> ConnectionFuture<Item, S, K, T, N> {
         debug!("constructing new connection future");
-        Connection::start(handle, stream, sink, 0, 0, new_transport)
+        Connection::start(handle, stream, sink, 0, 0, new_transport, outbound_max)
     }
 }
 
@@ -151,6 +154,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             error_count: not_connected.error_count,
             session_id: not_connected.session_id,
             new_transport: not_connected.new_transport,
+            outbound_max: not_connected.outbound_max,
         }.into()))
     }
 
@@ -173,8 +177,9 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 }
             ]),
             inbound_inflight: 0,
-            outbound: None,
+            outbound: VecDeque::new(),
             outbound_inflight: 0,
+            outbound_max: connecting.outbound_max,
             error_count: connecting.error_count,
             session_id: connecting.session_id,
             new_transport: connecting.new_transport,
@@ -209,6 +214,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
+                        outbound_max: connected.outbound_max,
                     }.into()));
                 },
                 Ok(Async::NotReady) => {
@@ -226,18 +232,17 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
+                        outbound_max: connected.outbound_max,
                     }.into()));
                 }
             };
         }
 
-        let mut sending = connected.outbound.take();
-        if sending.is_none() {
-            sending = match try!(connected.stream.poll()) {
+        while connected.outbound.len() < connected.outbound_max {
+            match try!(connected.stream.poll()) {
                 Async::Ready(Some(msg)) => {
                     progress = true;
-                    
-                    Some(msg)
+                    connected.outbound.push_back(msg);
                 },
                 Async::Ready(None) => {
                     trace!("stream finished");
@@ -245,12 +250,12 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 },
                 Async::NotReady => {
                     trace!("stream not ready to read");
-                    None
+                    break;
                 }
             };
         }
 
-        if let Some(sending) = sending {
+        if let Some(sending) = connected.outbound.pop_front() {
             match connected.tcp.start_send(sending) {
                 Ok(AsyncSink::Ready) => {
                     trace!("transport wrote message");
@@ -259,7 +264,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 },
                 Ok(AsyncSink::NotReady(sending)) => {
                     trace!("tcpstream not ready to write");
-                    connected.outbound = Some(sending);
+                    connected.outbound.push_front(sending);
                 },
                 Err(err) => {
                     trace!("transport write error: {:?}", err);                    
@@ -272,6 +277,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
+                        outbound_max: connected.outbound_max,
                     }.into()));
                 }
             }
@@ -332,6 +338,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 inbound: connected.inbound,
                 inbound_inflight: connected.inbound_inflight,
                 outbound: connected.outbound,
+                outbound_max: connected.outbound_max,
                 outbound_inflight: connected.outbound_inflight,
                 error_count: connected.error_count,
                 session_id: connected.session_id,

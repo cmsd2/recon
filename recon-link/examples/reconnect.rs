@@ -57,7 +57,7 @@ fn main() {
                 })
         });
 
-    let conn = Connection::new(core.handle(), stream, PrinterSink, NewTcpTransport(addr, handle));
+    let conn = Connection::new(core.handle(), stream, PrinterSink, NewTcpTransport(addr, handle), 10);
 
     let result = core.run(conn);
 
