@@ -11,30 +11,53 @@ use std::time::Duration;
 use std::fmt;
 
 pub type ConnectionError = io::Error;
+pub type SessionId = u32;
 
-pub struct Message<Item> {
-    pub session_id: u32,
-    pub content: Item
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    Connected {
+        session_id: SessionId,
+    }
 }
 
-impl <Item> Message<Item> {
-    pub fn new(session_id: u32, item: Item) -> Message<Item> {
-        Message {
-            session_id: session_id,
-            content: item,
-        }
+pub enum Message<Item> {
+    Packet {
+        session_id: SessionId,
+        content: Item,
+    },
+    Control {
+        event: Event,
     }
 }
 
 impl <Item> Clone for Message<Item> where Item: Clone {
     fn clone(&self) -> Message<Item> {
-        Message::new(self.session_id, self.content.clone())
+        match self {
+            &Message::Packet { session_id, ref content } => {
+                Message::Packet {
+                    session_id: session_id,
+                    content: content.clone()
+                }
+            },
+            &Message::Control { ref event } => {
+                Message::Control {
+                    event: event.clone()
+                }
+            }
+        }
     }
 }
 
 impl <Item> fmt::Debug for Message<Item> where Item: fmt::Debug {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Message<session_id={}, content={:?}>", self.session_id, self.content)
+        match self {
+            &Message::Packet { session_id, ref content } => {
+                write!(f, "Message::Packet<session_id={:?}, content={:?}>", session_id, content)
+            },
+            &Message::Control { ref event } => {
+                write!(f, "Message::Control<event={:?}>", event)
+            }
+        }
     }
 }
 
@@ -165,7 +188,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 Ok(Async::Ready(Some(msg))) => {
                     trace!("transport received msg");
                     progress = true;
-                    Some(Message::new(connected.session_id, msg))
+                    Some(Message::Packet{session_id: connected.session_id, content: msg})
                 },
                 Ok(Async::Ready(None)) => {
                     trace!("transport returned end of stream");
