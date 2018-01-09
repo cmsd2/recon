@@ -15,6 +15,13 @@ pub type ConnectionError = io::Error;
 pub type SessionId = u32;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    inbound_max: usize,
+    outbound_max: usize,
+    outbound_max_age: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Connected {
         session_id: SessionId,
@@ -102,9 +109,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         error_count: u32,
         session_id: u32,
         new_transport: N,
-        inbound_max: usize,
-        outbound_max: usize,
-        outbound_max_age: Duration,
+        config: Config,
     },
 
     #[state_machine_future(transitions(NotConnected, Connected, Finished, Error))]
@@ -116,9 +121,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         error_count: u32,
         session_id: u32,
         new_transport: N,
-        inbound_max: usize,
-        outbound_max: usize,
-        outbound_max_age: Duration,
+        config: Config,
     },
 
     #[state_machine_future(transitions(Connected, NotConnected, Finished, Error))]
@@ -128,15 +131,13 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         sink: K,
         tcp: T,
         outbound: VecDeque<TimestampedItem<Item>>,
-        outbound_max: usize,
-        outbound_max_age: Duration,
         outbound_inflight: bool,
         inbound: VecDeque<Message<Item>>,
-        inbound_max: usize,
         inbound_inflight: bool,
         error_count: u32,
         session_id: u32,
         new_transport: N,
+        config: Config,
     },
 
     #[state_machine_future(ready)]
@@ -147,9 +148,9 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
 }
 
 impl <Item, S, K, T, N> Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
-    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N, inbound_max: usize, outbound_max: usize, outbound_max_age: Duration) -> ConnectionFuture<Item, S, K, T, N> {
+    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N, config: Config) -> ConnectionFuture<Item, S, K, T, N> {
         debug!("constructing new connection future");
-        Connection::start(handle, stream, sink, 0, 0, new_transport, inbound_max, outbound_max, outbound_max_age)
+        Connection::start(handle, stream, sink, 0, 0, new_transport, config)
     }
 }
 
@@ -182,9 +183,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             error_count: not_connected.error_count,
             session_id: not_connected.session_id,
             new_transport: not_connected.new_transport,
-            inbound_max: not_connected.inbound_max,
-            outbound_max: not_connected.outbound_max,
-            outbound_max_age: not_connected.outbound_max_age,
+            config: not_connected.config,
         }.into()))
     }
 
@@ -206,15 +205,13 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                     }
                 }
             ]),
-            inbound_max: connecting.inbound_max,
             inbound_inflight: false,
             outbound: VecDeque::new(),
             outbound_inflight: false,
-            outbound_max: connecting.outbound_max,
-            outbound_max_age: connecting.outbound_max_age,
             error_count: connecting.error_count,
             session_id: connecting.session_id,
             new_transport: connecting.new_transport,
+            config: connecting.config,
         }.into()))
     }
 
@@ -227,7 +224,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         let mut progress = false;
         let session_id = connected.session_id;
 
-        while connected.inbound.len() < connected.inbound_max {
+        while connected.inbound.len() < connected.config.inbound_max {
             match connected.tcp.poll() {
                 Ok(Async::Ready(Some(msg))) => {
                     trace!("transport received msg");
@@ -246,9 +243,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
-                        inbound_max: connected.inbound_max,
-                        outbound_max: connected.outbound_max,
-                        outbound_max_age: connected.outbound_max_age,
+                        config: connected.config,
                     }.into()));
                 },
                 Ok(Async::NotReady) => {
@@ -266,15 +261,13 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
-                        inbound_max: connected.inbound_max,
-                        outbound_max: connected.outbound_max,
-                        outbound_max_age: connected.outbound_max_age,
+                        config: connected.config,
                     }.into()));
                 }
             };
         }
 
-        while connected.outbound.len() < connected.outbound_max {
+        while connected.outbound.len() < connected.config.outbound_max {
             match try!(connected.stream.poll()) {
                 Async::Ready(Some(msg)) => {
                     progress = true;
@@ -302,7 +295,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                     trace!("tcpstream not ready to write");
 
                     let timestamped_msg = TimestampedItem { timestamp: timestamp, item: sending };
-                    if timestamped_msg.older_than(connected.outbound_max_age) {
+                    if timestamped_msg.older_than(connected.config.outbound_max_age) {
                         trace!("message older than max age {:?}. reconnecting", timestamped_msg.age());
 
                         let connected = connected.take();
@@ -314,9 +307,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                             error_count: connected.error_count,
                             session_id: connected.session_id + 1,
                             new_transport: connected.new_transport,
-                            inbound_max: connected.inbound_max,
-                            outbound_max: connected.outbound_max,
-                            outbound_max_age: connected.outbound_max_age,
+                            config: connected.config,
                         }.into()));
                     } else {
                         connected.outbound.push_front(timestamped_msg);
@@ -333,9 +324,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
-                        inbound_max: connected.inbound_max,
-                        outbound_max: connected.outbound_max,
-                        outbound_max_age: connected.outbound_max_age,
+                        config: connected.config,
                     }.into()));
                 }
             }
@@ -394,15 +383,13 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 sink: connected.sink,
                 tcp: connected.tcp,
                 inbound: connected.inbound,
-                inbound_max: connected.inbound_max,
                 inbound_inflight: connected.inbound_inflight,
                 outbound: connected.outbound,
-                outbound_max: connected.outbound_max,
-                outbound_max_age: connected.outbound_max_age,
                 outbound_inflight: connected.outbound_inflight,
                 error_count: connected.error_count,
                 session_id: connected.session_id,
                 new_transport: connected.new_transport,
+                config: connected.config,
             }.into()));
         } else {
             trace!("did not make progress");
