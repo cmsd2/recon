@@ -102,6 +102,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         error_count: u32,
         session_id: u32,
         new_transport: N,
+        inbound_max: usize,
         outbound_max: usize,
         outbound_max_age: Duration,
     },
@@ -115,6 +116,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         error_count: u32,
         session_id: u32,
         new_transport: N,
+        inbound_max: usize,
         outbound_max: usize,
         outbound_max_age: Duration,
     },
@@ -128,9 +130,10 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         outbound: VecDeque<TimestampedItem<Item>>,
         outbound_max: usize,
         outbound_max_age: Duration,
-        outbound_inflight: u32,
+        outbound_inflight: bool,
         inbound: VecDeque<Message<Item>>,
-        inbound_inflight: u32,
+        inbound_max: usize,
+        inbound_inflight: bool,
         error_count: u32,
         session_id: u32,
         new_transport: N,
@@ -144,9 +147,9 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
 }
 
 impl <Item, S, K, T, N> Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
-    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N, outbound_max: usize, outbound_max_age: Duration) -> ConnectionFuture<Item, S, K, T, N> {
+    pub fn new(handle: Handle, stream: S, sink: K, new_transport: N, inbound_max: usize, outbound_max: usize, outbound_max_age: Duration) -> ConnectionFuture<Item, S, K, T, N> {
         debug!("constructing new connection future");
-        Connection::start(handle, stream, sink, 0, 0, new_transport, outbound_max, outbound_max_age)
+        Connection::start(handle, stream, sink, 0, 0, new_transport, inbound_max, outbound_max, outbound_max_age)
     }
 }
 
@@ -179,6 +182,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             error_count: not_connected.error_count,
             session_id: not_connected.session_id,
             new_transport: not_connected.new_transport,
+            inbound_max: not_connected.inbound_max,
             outbound_max: not_connected.outbound_max,
             outbound_max_age: not_connected.outbound_max_age,
         }.into()))
@@ -202,9 +206,10 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                     }
                 }
             ]),
-            inbound_inflight: 0,
+            inbound_max: connecting.inbound_max,
+            inbound_inflight: false,
             outbound: VecDeque::new(),
-            outbound_inflight: 0,
+            outbound_inflight: false,
             outbound_max: connecting.outbound_max,
             outbound_max_age: connecting.outbound_max_age,
             error_count: connecting.error_count,
@@ -220,14 +225,14 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         // if we make progress then we return a state or state change
         // otherwise return NotReady
         let mut progress = false;
-        
-        let mut received = connected.inbound.pop_front();
-        if received.is_none() && connected.inbound_inflight == 0 {
-            received = match connected.tcp.poll() {
+        let session_id = connected.session_id;
+
+        while connected.inbound.len() < connected.inbound_max {
+            match connected.tcp.poll() {
                 Ok(Async::Ready(Some(msg))) => {
                     trace!("transport received msg");
                     progress = true;
-                    Some(Message::Packet{session_id: connected.session_id, content: msg})
+                    connected.inbound.push_back(Message::Packet{session_id, content: msg});
                 },
                 Ok(Async::Ready(None)) => {
                     trace!("transport returned end of stream");
@@ -241,13 +246,13 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
+                        inbound_max: connected.inbound_max,
                         outbound_max: connected.outbound_max,
                         outbound_max_age: connected.outbound_max_age,
                     }.into()));
                 },
                 Ok(Async::NotReady) => {
                     trace!("transport not ready to read");
-                    None
                 },
                 Err(e) => {
                     trace!("transport read error: {:?}", e);
@@ -260,6 +265,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
+                        inbound_max: connected.inbound_max,
                         outbound_max: connected.outbound_max,
                         outbound_max_age: connected.outbound_max_age,
                     }.into()));
@@ -289,7 +295,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 Ok(AsyncSink::Ready) => {
                     trace!("transport wrote message");
                     progress = true;
-                    connected.outbound_inflight += 1;
+                    connected.outbound_inflight = true;
                 },
                 Ok(AsyncSink::NotReady(sending)) => {
                     trace!("tcpstream not ready to write");
@@ -297,7 +303,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                     let timestamped_msg = TimestampedItem { timestamp: timestamp, item: sending };
                     if timestamped_msg.older_than(connected.outbound_max_age) {
                         trace!("message older than max age {:?}. reconnecting", timestamped_msg.age());
-                        
+
                         let connected = connected.take();
 
                         return Ok(Async::Ready(NotConnected {
@@ -307,6 +313,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                             error_count: connected.error_count,
                             session_id: connected.session_id + 1,
                             new_transport: connected.new_transport,
+                            inbound_max: connected.inbound_max,
                             outbound_max: connected.outbound_max,
                             outbound_max_age: connected.outbound_max_age,
                         }.into()));
@@ -325,6 +332,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                         error_count: connected.error_count + 1,
                         session_id: connected.session_id + 1,
                         new_transport: connected.new_transport,
+                        inbound_max: connected.inbound_max,
                         outbound_max: connected.outbound_max,
                         outbound_max_age: connected.outbound_max_age,
                     }.into()));
@@ -332,26 +340,26 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             }
         }
 
-        if let Some(msg) = received {
+        if let Some(msg) = connected.inbound.pop_front() {
             match try!(connected.sink.start_send(msg)) {
                 AsyncSink::Ready => {
                     trace!("sink started send");
                     progress = true;
-                    connected.inbound_inflight += 1;
+                    connected.inbound_inflight = true;
                 },
                 AsyncSink::NotReady(msg) => {
                     trace!("sink not ready");
-                    connected.inbound.insert(0, msg);
+                    connected.inbound.push_front(msg);
                 },
             }
         }
 
-        if connected.inbound_inflight != 0 {
+        if connected.inbound_inflight {
             match try!(connected.sink.poll_complete()) {
                 Async::Ready(()) => {
                     trace!("sink polled complete");
                     progress = true;
-                    connected.inbound_inflight = 0;
+                    connected.inbound_inflight = false;
                 },
                 Async::NotReady => {
                     trace!("sink polled not ready");
@@ -360,12 +368,12 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
             }
         }
 
-        if connected.outbound_inflight != 0 {
+        if connected.outbound_inflight {
             match try!(connected.tcp.poll_complete()) {
                 Async::Ready(()) => {
                     trace!("transport poll complete");
                     progress = true;
-                    connected.outbound_inflight = 0;
+                    connected.outbound_inflight = false;
                 },
                 Async::NotReady => {
                     trace!("transport sink polled not ready");
@@ -385,6 +393,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 sink: connected.sink,
                 tcp: connected.tcp,
                 inbound: connected.inbound,
+                inbound_max: connected.inbound_max,
                 inbound_inflight: connected.inbound_inflight,
                 outbound: connected.outbound,
                 outbound_max: connected.outbound_max,
