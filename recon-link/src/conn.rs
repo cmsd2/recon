@@ -253,6 +253,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
                 },
                 Ok(Async::NotReady) => {
                     trace!("transport not ready to read");
+                    break;
                 },
                 Err(e) => {
                     trace!("transport read error: {:?}", e);
