@@ -3,5 +3,6 @@ members = [
     "recon",
     "recon-link",
     "recon-service",
+    "recon-util",
 ]
 

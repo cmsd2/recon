@@ -9,6 +9,8 @@ extern crate tokio_timer;
 #[macro_use]
 extern crate state_machine_future;
 extern crate bytes;
+extern crate uuid;
+extern crate recon_util;
 
 pub mod conn;
 pub mod framing;

@@ -1,0 +1,19 @@
+[package]
+name = "recon-util"
+version = "0.1.0"
+authors = ["Chris Dawes <cmsd2@cantab.net>"]
+
+[dependencies]
+futures = "0.1.17"
+log = "0.4.1"
+uuid = { version="0.5.1", features=["v4"] }
+
+[dependencies.env_logger]
+optional = true
+version = "0.4.3"
+
+[dev-dependencies]
+tokio-core = "0.1.11"
+
+[features]
+logger = ["env_logger"]

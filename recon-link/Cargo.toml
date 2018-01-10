@@ -17,10 +17,15 @@ tokio-core = "0.1.11"
 tokio-io = "0.1.4"
 tokio-retry = "0.1.1"
 tokio-timer = "0.1.2"
+uuid = { version = "0.5", features = ["v4"] }
 
 [dependencies.env_logger]
 optional = true
 version = "0.4.3"
+
+[dependencies.recon-util]
+version = "0.1.0"
+path = "../recon-util"
 
 [features]
 logger = ["env_logger"]
