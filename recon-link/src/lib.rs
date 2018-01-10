@@ -14,6 +14,7 @@ extern crate recon_util;
 
 pub mod conn;
 pub mod framing;
+pub mod link;
 
 #[cfg(test)]
 mod tests {

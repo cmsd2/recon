@@ -1,10 +1,13 @@
 use std::io;
+use std::result;
 use std::collections::{BTreeMap,VecDeque,BTreeSet};
-use futures::{Async, AsyncSink, Poll, StartSend};
+use futures::{Async, AsyncSink, Poll};
 use futures::future::Future;
 use futures::sink::Sink;
+use futures::stream::Stream;
+use futures::sync::mpsc::{channel, Sender, Receiver};
 use tokio_core::reactor::Handle;
-use codec::Codec;
+use recon_util::codec::Codec;
 
 pub type Id = String;
 pub type OutboundError = io::Error;
@@ -13,6 +16,10 @@ pub type Result<I> = io::Result<I>;
 pub type Error = io::Error;
 
 pub enum Command<M> {
+    AddConnection {
+        id: Id,
+
+    },
     Broadcast {
         message: M,
     },
@@ -30,6 +37,8 @@ struct OutboundMessage<O> {
 pub struct Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
     _handle: Handle,
     pub id: Id,
+    tx: Sender<Command<M>>,
+    rx: Receiver<Command<M>>,
     connections: BTreeMap<String, ConnectionImpl<O>>,
     outbound: VecDeque<OutboundMessage<O>>,
     outbound_max: usize,
@@ -38,9 +47,12 @@ pub struct Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Int
 }
 
 impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
-    pub fn new(handle: Handle, id: String, queue: usize, codec: C) -> Link<M,O,C,E> {
+    pub fn new(handle: Handle, id: String, queue: usize, codec: C, buffering: usize) -> Link<M,O,C,E> {
+        let (tx, rx) = channel(buffering);
         Link {
             _handle: handle,
+            tx: tx,
+            rx: rx,
             id: id,
             connections: BTreeMap::new(),
             outbound: VecDeque::new(),
@@ -50,12 +62,20 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
         }
     }
 
+    pub fn sender(&self) -> Sender<Command<M>> {
+        self.tx.clone()
+    }
+
     pub fn connection_ids(&self) -> Vec<String> {
         self.connections.keys().map(|s| s.to_owned()).collect()
     }
 
+    pub fn ready(&self) -> bool {
+        return self.outbound.len() < self.outbound_max;
+    }
+
     pub fn unicast(&mut self, recipient: &Id, msg: M) -> Result<AsyncSink<M>> {
-        if self.outbound.len() >= self.outbound_max {
+        if !self.ready() {
             return Ok(AsyncSink::NotReady(msg));
         }
 
@@ -70,7 +90,7 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
     }
 
     pub fn broadcast(&mut self, msg: M) -> Result<AsyncSink<M>> {
-        if self.outbound.len() >= self.outbound_max {
+        if !self.ready() {
             return Ok(AsyncSink::NotReady(msg));
         }
 
@@ -140,31 +160,58 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
             Ok(Async::NotReady)
         }
     }
-}
 
-impl <M,O,C,E> Sink for Link<M,O,C,E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
-    type SinkItem = Command<M>;
-    type SinkError = Error;
-
-    fn start_send(
-        &mut self, 
-        item: Self::SinkItem
-    ) -> StartSend<Self::SinkItem, Self::SinkError> {
-        match item {
+    fn handle_command(&mut self, command: Command<M>) -> Result<()> {
+        match command {
+            Command::AddConnection { id } => {
+                debug!("received command add_connection {}", id);
+            },
             Command::Broadcast { message } => {
-                let result = try!(self.broadcast(message));
-                Ok(result.map(|message| Command::Broadcast { message }))
+                debug!("received command broadcast message");
+                match try!(self.broadcast(message)) {
+                    AsyncSink::NotReady(_message) => {
+                        panic!("tried to queue message when not ready");
+                    },
+                    AsyncSink::Ready => {}
+                }
             },
             Command::Unicast { recipient, message } => {
-                let result = try!(self.unicast(&recipient, message));
-                Ok(result.map(|message| Command::Unicast { recipient, message }))
+                debug!("received command unicast message to {}", recipient);
+                match try!(self.unicast(&recipient, message)) {
+                    AsyncSink::NotReady(_message) => {
+                        panic!("tried to queue message when not ready");
+                    },
+                    AsyncSink::Ready => {}
+                }
             }
         }
-    }
 
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        Ok(())
+    }
+}
+
+impl <M,O,C,E> Future for Link<M,O,C,E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
+    type Item = ();
+    type Error = Error;
+
+    fn poll(&mut self) -> result::Result<Async<Self::Item>,Self::Error> {
+        if self.ready() {
+            match try!(self.rx.poll().map_err(|()| io::Error::new(io::ErrorKind::Other, "receiver poll error"))) {
+                Async::Ready(Some(command)) => {
+                    try!(self.handle_command(command));
+                },
+                Async::Ready(None) => {
+                    debug!("received end of stream");
+                    return Ok(Async::Ready(()));
+                },
+                Async::NotReady => {}
+            }
+        }
+
         try!(self.send_all_outbound());
 
-        self.poll_inflight()
+        try!(self.poll_inflight());
+
+        Ok(Async::NotReady)
     }
 }
