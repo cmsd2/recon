@@ -2,7 +2,12 @@ use recon_util;
 
 error_chain! {
     errors {
-
+        ReceiveError
+        SendError
+        TransportError(s: &'static str) {
+            description("transport error")
+            display("transport error: {}", s)
+        }
     }
 
     links {

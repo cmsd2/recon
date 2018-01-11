@@ -1,6 +1,8 @@
 use std::io;
 use std::result;
 use std::collections::{BTreeMap,VecDeque,BTreeSet};
+use std::net::SocketAddr;
+use std::time::Duration;
 use futures::{Async, AsyncSink, Poll};
 use futures::future::Future;
 use futures::sink::Sink;
@@ -8,17 +10,25 @@ use futures::stream::Stream;
 use futures::sync::mpsc::{channel, Sender, Receiver};
 use tokio_core::reactor::Handle;
 use recon_util::codec::Codec;
+use errors::*;
+use conn;
+use transport;
+use framing;
 
 pub type Id = String;
-pub type OutboundError = io::Error;
-pub type ConnectionImpl<O> = Box<Sink<SinkItem=O,SinkError=OutboundError>>;
-pub type Result<I> = io::Result<I>;
-pub type Error = io::Error;
+pub type NetworkMessage = framing::Frame;
+pub type Transport = transport::NewTcpLineTransport;
+
+struct ConnectionImpl<M> {
+    pub fut: Box<Future<Item=(),Error=Error>>,
+    pub tx: Sender<M>,
+    pub rx: Receiver<conn::Message<M>>,
+}
 
 pub enum Command<M> {
     AddConnection {
         id: Id,
-
+        addr: SocketAddr,
     },
     Broadcast {
         message: M,
@@ -34,23 +44,23 @@ struct OutboundMessage<O> {
     pub encoded_message: O,
 }
 
-pub struct Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
-    _handle: Handle,
+pub struct Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Error=E>, E: Into<Error> {
+    handle: Handle,
     pub id: Id,
     tx: Sender<Command<M>>,
     rx: Receiver<Command<M>>,
-    connections: BTreeMap<String, ConnectionImpl<O>>,
-    outbound: VecDeque<OutboundMessage<O>>,
+    connections: BTreeMap<String, ConnectionImpl<NetworkMessage>>,
+    outbound: VecDeque<OutboundMessage<NetworkMessage>>,
     outbound_max: usize,
     inflight: BTreeSet<Id>,
     codec: C,
 }
 
-impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
-    pub fn new(handle: Handle, id: String, queue: usize, codec: C, buffering: usize) -> Link<M,O,C,E> {
+impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Error=E>, E: Into<Error> {
+    pub fn new(handle: Handle, id: String, queue: usize, codec: C, buffering: usize) -> Link<M,C,E> {
         let (tx, rx) = channel(buffering);
         Link {
-            _handle: handle,
+            handle: handle,
             tx: tx,
             rx: rx,
             id: id,
@@ -106,7 +116,7 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
         Ok(AsyncSink::Ready)
     }
 
-    pub fn encode(&self, msg: M) -> Result<O> {
+    pub fn encode(&self, msg: M) -> Result<NetworkMessage> {
         self.codec.encode(msg).map_err(|e| e.into())
     }
 
@@ -126,11 +136,13 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
         Ok(Async::Ready(()))
     }
 
-    fn send_one_outbound(&mut self, id: &Id, msg: O) -> Result<AsyncSink<O>> {
+    fn send_one_outbound(&mut self, id: &Id, msg: NetworkMessage) -> Result<AsyncSink<NetworkMessage>> {
         if let Some(ref mut conn) = self.connections.get_mut(id) {
-            conn.start_send(msg)
+            conn.tx.start_send(msg).map_err(|e| Error::with_chain(e, "error sending message to connection"))
         } else {
-            Err(io::Error::new(io::ErrorKind::Other, format!("no such connection with id {}", id)))
+            // TODO: should we raise an error here or not?
+            info!("dropping message destined for {}. not connection", id);
+            Ok(AsyncSink::Ready)
         }
     }
 
@@ -139,7 +151,7 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
 
         for id in self.inflight.iter() {
             if let Some(ref mut conn) = self.connections.get_mut(id) {
-                match try!(conn.poll_complete()) {
+                match try!(conn.tx.poll_complete().map_err(|e| Error::with_chain(e, "error waiting for message delivery to connection"))) {
                     Async::Ready(()) => {},
                     Async::NotReady => {
                         new_inflight.insert(id.to_owned());
@@ -149,7 +161,7 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
         }
 
         for (ref _id, ref mut conn) in self.connections.iter_mut() {
-            try!(conn.poll_complete());
+            try!(conn.tx.poll_complete().map_err(|e| Error::with_chain(e, "error waiting for delivery to connections")));
         }
 
         self.inflight = new_inflight;
@@ -163,8 +175,28 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
 
     fn handle_command(&mut self, command: Command<M>) -> Result<()> {
         match command {
-            Command::AddConnection { id } => {
-                debug!("received command add_connection {}", id);
+            Command::AddConnection { id, addr } => {
+                debug!("received command add_connection {} to {}", id, addr);
+                let (tx_outbound,rx_outbound) = channel(0);
+                let (tx_inbound,rx_inbound) = channel(0);
+                let config = conn::Config {
+                    outbound_max: 1,
+                    outbound_max_age: Duration::from_millis(2000),
+                    inbound_max: 1,
+                };
+                let new_transport = Transport::new(addr, self.handle.clone());
+                let conn = Box::new(conn::Connection::new(
+                    self.handle.clone(),
+                    rx_outbound.map_err(|()| Error::from_kind(ErrorKind::ReceiveError)),
+                    tx_inbound,
+                    new_transport,
+                    config
+                )) as Box<Future<Item=(),Error=Error>>;
+                self.connections.insert(id, ConnectionImpl {
+                    fut: conn,
+                    tx: tx_outbound,
+                    rx: rx_inbound,
+                });
             },
             Command::Broadcast { message } => {
                 debug!("received command broadcast message");
@@ -190,13 +222,13 @@ impl <M, O, C, E> Link<M, O, C, E> where C: Codec<Item=M,EncodedItem=O,Error=E>,
     }
 }
 
-impl <M,O,C,E> Future for Link<M,O,C,E> where C: Codec<Item=M,EncodedItem=O,Error=E>, E: Into<Error>, O: Clone {
+impl <M,C,E> Future for Link<M,C,E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Error=E>, E: Into<Error> {
     type Item = ();
     type Error = Error;
 
     fn poll(&mut self) -> result::Result<Async<Self::Item>,Self::Error> {
         if self.ready() {
-            match try!(self.rx.poll().map_err(|()| io::Error::new(io::ErrorKind::Other, "receiver poll error"))) {
+            match try!(self.rx.poll().map_err(|()| Error::from_kind(ErrorKind::ReceiveError))) {
                 Async::Ready(Some(command)) => {
                     try!(self.handle_command(command));
                 },

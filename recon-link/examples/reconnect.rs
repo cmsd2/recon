@@ -7,20 +7,18 @@ extern crate tokio_core;
 extern crate tokio_timer;
 extern crate recon_link;
 
-use std::io;
-use std::net::SocketAddr;
 use std::time::Duration;
-use futures::{Async, AsyncSink, Poll, StartSend};
 use futures::future::Future;
 use futures::stream::{self, Stream};
-use futures::sink::{Sink};
-use tokio_core::reactor::{Core, Handle};
-use tokio_core::net::TcpStream;
+use futures::sync::mpsc::{channel};
+use tokio_core::reactor::Core;
 use tokio_timer::Timer;
-use recon_link::conn::{Config, Connection, Message, NewTransport};
-use recon_link::framing::{FramedLineTransport, new_line_transport, ReconFrame};
+use recon_link::conn::{Config, Connection};
+use recon_link::transport::{NewTcpLineTransport};
+use recon_link::framing::Frame;
+use recon_link::errors::*;
 
-pub type MessageContent = ReconFrame;
+pub type NetworkMessage = Frame;
 
 #[cfg(feature="logger")]
 mod logging {
@@ -46,54 +44,31 @@ fn main() {
 
     let addr = "127.0.0.1:6666".parse().unwrap();
 
-    let stream = stream::iter_ok((1..1000).map(|n| ReconFrame::Message(format!("{}", n))))
+    let stream = stream::iter_ok((1..1000).map(|n| Frame::Message(format!("{}", n))))
         .and_then(|value| {
             debug!("next value is {:?}", value);
             timer.sleep(Duration::from_millis(500))
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+                .map_err(|e| Error::with_chain(e, "timer error"))
                 .map(|_| {
                     debug!("producing delayed value {:?}", value);
                     value
                 })
         });
 
+    let (tx, rx) = channel(0);
+
+    let printer = rx.map(|i| println!("{:?}", i)).collect().map(|_| ());
+    handle.spawn(printer);
+
     let config = Config {
         outbound_max: 10,
         inbound_max: 10,
         outbound_max_age: Duration::from_millis(1000)
     };
-    let conn = Connection::new(core.handle(), stream, PrinterSink, NewTcpTransport(addr, handle), config);
+
+    let conn = Connection::new(core.handle(), stream, tx, NewTcpLineTransport { addr, handle }, config);
 
     let result = core.run(conn);
 
     println!("event loop terminated: {:?}", result);
-}
-
-struct PrinterSink;
-
-impl Sink for PrinterSink {
-    type SinkItem = Message<MessageContent>;
-    type SinkError = io::Error;
-
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        println!("{:?}", item);
-        Ok(AsyncSink::Ready)
-    }
-
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        Ok(Async::Ready(()))
-    }
-}
-
-#[derive(Clone)]
-struct NewTcpTransport(SocketAddr, Handle);
-
-impl NewTransport for NewTcpTransport {
-    type Transport = FramedLineTransport<TcpStream>;
-    type Error = io::Error;
-    type Future = Box<Future<Item=Self::Transport,Error=Self::Error>>;
-
-    fn new_transport(&self) -> Self::Future {
-        Box::new(TcpStream::connect(&self.0, &self.1).map(|stream| new_line_transport(stream))) as Self::Future
-    }
 }

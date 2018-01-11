@@ -18,6 +18,7 @@ pub mod conn;
 pub mod framing;
 pub mod link;
 pub mod errors;
+pub mod transport;
 
 #[cfg(test)]
 mod tests {

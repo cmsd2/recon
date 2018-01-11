@@ -4,7 +4,7 @@ use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::codec::{Framed, Encoder, Decoder};
 
 #[derive(Debug, Clone)]
-pub enum ReconFrame {
+pub enum Frame {
     Message(String),
     Done,
 }
@@ -12,10 +12,10 @@ pub enum ReconFrame {
 pub struct Parser;
 
 impl Decoder for Parser {
-    type Item=ReconFrame;
+    type Item=Frame;
     type Error=io::Error;
 
-    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<ReconFrame>, io::Error> {
+    fn decode(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>, io::Error> {
         trace!("buffer has {} bytes available for decoding", buf.len());
 
         if let Some(n) = buf.iter().position(|b| *b == b'\n') {
@@ -28,7 +28,7 @@ impl Decoder for Parser {
             // Turn this data into a UTF string and return it in a Frame.
             return match str::from_utf8(&line[..]) {
                 Ok(msg) => {
-                    Ok(Some(ReconFrame::Message(msg.to_string())))
+                    Ok(Some(Frame::Message(msg.to_string())))
                 },
                 Err(_) => Err(io::Error::new(io::ErrorKind::Other, "invalid string"))
            }
@@ -37,9 +37,9 @@ impl Decoder for Parser {
         Ok(None)
     }
 
-    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<ReconFrame>, io::Error> {
+    fn decode_eof(&mut self, buf: &mut BytesMut) -> Result<Option<Frame>, io::Error> {
         if buf.len() == 0 {
-            //Ok(Some(ReconFrame::Done))
+            //Ok(Some(Frame::Done))
             Err(io::Error::new(io::ErrorKind::UnexpectedEof, "stream eof"))
         } else {
             Err(io::Error::new(io::ErrorKind::InvalidData, "trailing data found"))
@@ -48,12 +48,12 @@ impl Decoder for Parser {
 }
 
 impl Encoder for Parser {
-    type Item=ReconFrame;
+    type Item=Frame;
     type Error=io::Error;
 
-    fn encode(&mut self, msg: ReconFrame, buf: &mut BytesMut) -> Result<(), io::Error> {
+    fn encode(&mut self, msg: Frame, buf: &mut BytesMut) -> Result<(), io::Error> {
         match msg {
-            ReconFrame::Message(text) => {
+            Frame::Message(text) => {
                 if text.contains('\n') {
                     return Err(io::Error::new(io::ErrorKind::Other, "line transport can't handle newlines"));
                 }
@@ -61,7 +61,7 @@ impl Encoder for Parser {
                 buf.extend_from_slice(&text.as_bytes());
                 buf.extend_from_slice(&['\n' as u8]);
             }
-            ReconFrame::Done => {}
+            Frame::Done => {}
         }
 
         Ok(())
