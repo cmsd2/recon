@@ -1,7 +1,7 @@
 use futures::{Async, AsyncSink, Future, Poll};
 use futures::stream::Stream;
 use futures::sink::Sink;
-use futures::sync::mpsc::{Sender,Receiver};
+use futures::sync::mpsc::Sender;
 use state_machine_future::RentToOwn;
 use tokio_core::reactor::Handle;
 use tokio_retry::Retry;
@@ -335,7 +335,7 @@ impl <Item, S, T, N> PollConnection<Item, S, T, N> for Connection<Item, S, T, N>
         }
 
         if connected.inbound_inflight {
-            match try!(connected.sink.poll_complete().map_err(|e| Error::from_kind(ErrorKind::SendError))) {
+            match try!(connected.sink.poll_complete().map_err(|_e| Error::from_kind(ErrorKind::SendError))) {
                 Async::Ready(()) => {
                     trace!("sink polled complete");
                     progress = true;

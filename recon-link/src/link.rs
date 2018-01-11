@@ -1,4 +1,3 @@
-use std::io;
 use std::result;
 use std::collections::{BTreeMap,VecDeque,BTreeSet};
 use std::net::SocketAddr;
@@ -16,7 +15,8 @@ use transport;
 use framing;
 
 pub type Id = String;
-pub type NetworkMessage = framing::Frame;
+pub type EncodedMessage = String;
+pub type TransportMessage = framing::Frame;
 pub type Transport = transport::NewTcpLineTransport;
 
 struct ConnectionImpl<M> {
@@ -44,21 +44,26 @@ struct OutboundMessage<O> {
     pub encoded_message: O,
 }
 
-pub struct Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Error=E>, E: Into<Error> {
+pub struct Config {
+    pub outbound_max: usize,
+    pub buffering: usize,
+}
+
+pub struct Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Error=E>, E: Into<Error> {
     handle: Handle,
     pub id: Id,
     tx: Sender<Command<M>>,
     rx: Receiver<Command<M>>,
-    connections: BTreeMap<String, ConnectionImpl<NetworkMessage>>,
-    outbound: VecDeque<OutboundMessage<NetworkMessage>>,
+    connections: BTreeMap<String, ConnectionImpl<TransportMessage>>,
+    outbound: VecDeque<OutboundMessage<TransportMessage>>,
     outbound_max: usize,
     inflight: BTreeSet<Id>,
     codec: C,
 }
 
-impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Error=E>, E: Into<Error> {
-    pub fn new(handle: Handle, id: String, queue: usize, codec: C, buffering: usize) -> Link<M,C,E> {
-        let (tx, rx) = channel(buffering);
+impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Error=E>, E: Into<Error> {
+    pub fn new(handle: Handle, id: String, codec: C, config: Config) -> Link<M,C,E> {
+        let (tx, rx) = channel(config.buffering);
         Link {
             handle: handle,
             tx: tx,
@@ -66,7 +71,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Er
             id: id,
             connections: BTreeMap::new(),
             outbound: VecDeque::new(),
-            outbound_max: queue,
+            outbound_max: config.outbound_max,
             inflight: BTreeSet::new(),
             codec: codec,
         }
@@ -116,8 +121,37 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Er
         Ok(AsyncSink::Ready)
     }
 
-    pub fn encode(&self, msg: M) -> Result<NetworkMessage> {
-        self.codec.encode(msg).map_err(|e| e.into())
+    pub fn add_connection(&mut self, id: Id, addr: SocketAddr) -> Result<()> {
+        debug!("received command add_connection {} to {}", id, addr);
+        let (tx_outbound,rx_outbound) = channel(0);
+        let (tx_inbound,rx_inbound) = channel(0);
+        
+        let config = conn::Config {
+            outbound_max: 1,
+            outbound_max_age: Duration::from_millis(2000),
+            inbound_max: 1,
+        };
+        
+        let new_transport = Transport::new(addr, self.handle.clone());
+        let conn = Box::new(conn::Connection::new(
+            self.handle.clone(),
+            rx_outbound.map_err(|()| Error::from_kind(ErrorKind::ReceiveError)),
+            tx_inbound,
+            new_transport,
+            config
+        )) as Box<Future<Item=(),Error=Error>>;
+        
+        self.connections.insert(id, ConnectionImpl {
+            fut: conn,
+            tx: tx_outbound,
+            rx: rx_inbound,
+        });
+
+        Ok(())
+    }
+
+    pub fn encode(&self, msg: M) -> Result<TransportMessage> {
+        self.codec.encode(msg).map_err(|e| e.into()).map(|msg| framing::Frame::Message(msg))
     }
 
     fn send_all_outbound(&mut self) -> Poll<(),Error> {
@@ -136,7 +170,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Er
         Ok(Async::Ready(()))
     }
 
-    fn send_one_outbound(&mut self, id: &Id, msg: NetworkMessage) -> Result<AsyncSink<NetworkMessage>> {
+    fn send_one_outbound(&mut self, id: &Id, msg: TransportMessage) -> Result<AsyncSink<TransportMessage>> {
         if let Some(ref mut conn) = self.connections.get_mut(id) {
             conn.tx.start_send(msg).map_err(|e| Error::with_chain(e, "error sending message to connection"))
         } else {
@@ -176,27 +210,8 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Er
     fn handle_command(&mut self, command: Command<M>) -> Result<()> {
         match command {
             Command::AddConnection { id, addr } => {
-                debug!("received command add_connection {} to {}", id, addr);
-                let (tx_outbound,rx_outbound) = channel(0);
-                let (tx_inbound,rx_inbound) = channel(0);
-                let config = conn::Config {
-                    outbound_max: 1,
-                    outbound_max_age: Duration::from_millis(2000),
-                    inbound_max: 1,
-                };
-                let new_transport = Transport::new(addr, self.handle.clone());
-                let conn = Box::new(conn::Connection::new(
-                    self.handle.clone(),
-                    rx_outbound.map_err(|()| Error::from_kind(ErrorKind::ReceiveError)),
-                    tx_inbound,
-                    new_transport,
-                    config
-                )) as Box<Future<Item=(),Error=Error>>;
-                self.connections.insert(id, ConnectionImpl {
-                    fut: conn,
-                    tx: tx_outbound,
-                    rx: rx_inbound,
-                });
+                debug!("received add connection command {} {}", id, addr);
+                try!(self.add_connection(id, addr));
             },
             Command::Broadcast { message } => {
                 debug!("received command broadcast message");
@@ -222,7 +237,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Er
     }
 }
 
-impl <M,C,E> Future for Link<M,C,E> where C: Codec<Item=M,EncodedItem=NetworkMessage,Error=E>, E: Into<Error> {
+impl <M,C,E> Future for Link<M,C,E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Error=E>, E: Into<Error> {
     type Item = ();
     type Error = Error;
 
