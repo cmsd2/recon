@@ -261,6 +261,7 @@ impl <Item, S, T, N> PollConnection<Item, S, T, N> for Connection<Item, S, T, N>
             match try!(connected.stream.poll().chain_err(|| "error waiting for messages to send")) {
                 Async::Ready(Some(msg)) => {
                     progress = true;
+                    trace!("stream yielded message");
                     connected.outbound.push_back(TimestampedItem::new(msg));
                 },
                 Async::Ready(None) => {
@@ -349,15 +350,31 @@ impl <Item, S, T, N> PollConnection<Item, S, T, N> for Connection<Item, S, T, N>
         }
 
         if connected.outbound_inflight {
-            match try!(connected.tcp.poll_complete().chain_err(|| "error waiting for sent messages to be delivered")) {
-                Async::Ready(()) => {
+            match connected.tcp.poll_complete() {
+                Ok(Async::Ready(())) => {
                     trace!("transport poll complete");
                     progress = true;
                     connected.outbound_inflight = false;
                 },
-                Async::NotReady => {
+                Ok(Async::NotReady) => {
                     trace!("transport sink polled not ready");
                     // do nothing
+                },
+                Err(ref e) if e.kind() == io::ErrorKind::BrokenPipe => {
+                    let connected = connected.take();
+                    
+                    return Ok(Async::Ready(NotConnected {
+                        handle: connected.handle,
+                        stream: connected.stream,
+                        sink: connected.sink,
+                        error_count: connected.error_count + 1,
+                        session_id: connected.session_id + 1,
+                        new_transport: connected.new_transport,
+                        config: connected.config,
+                    }.into()));
+                },
+                Err(e) => {
+                    bail!(Error::with_chain(e, "tcp connection error"));
                 }
             }
         }

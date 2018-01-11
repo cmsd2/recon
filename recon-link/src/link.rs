@@ -8,14 +8,16 @@ use futures::sink::Sink;
 use futures::stream::Stream;
 use futures::sync::mpsc::{channel, Sender, Receiver};
 use tokio_core::reactor::Handle;
+use serde_json;
 use recon_util::codec::Codec;
 use errors::*;
 use conn;
 use transport;
 use framing;
+use proto::LinkMessage;
 
 pub type Id = String;
-pub type EncodedMessage = String;
+pub type Message = serde_json::Value;
 pub type TransportMessage = framing::Frame;
 pub type Transport = transport::NewTcpLineTransport;
 
@@ -25,23 +27,23 @@ struct ConnectionImpl<M> {
     pub rx: Receiver<conn::Message<M>>,
 }
 
-pub enum Command<M> {
+pub enum Command {
     AddConnection {
         id: Id,
         addr: SocketAddr,
     },
     Broadcast {
-        message: M,
+        message: Message,
     },
     Unicast {
         recipient: Id,
-        message: M,
+        message: Message,
     }
 }
 
-struct OutboundMessage<O> {
+struct OutboundMessage<M> {
     pub connection_id: Id,
-    pub encoded_message: O,
+    pub encoded_message: M,
 }
 
 pub struct Config {
@@ -49,20 +51,19 @@ pub struct Config {
     pub buffering: usize,
 }
 
-pub struct Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Error=E>, E: Into<Error> {
+pub struct Link {
     handle: Handle,
     pub id: Id,
-    tx: Sender<Command<M>>,
-    rx: Receiver<Command<M>>,
+    tx: Sender<Command>,
+    rx: Receiver<Command>,
     connections: BTreeMap<String, ConnectionImpl<TransportMessage>>,
     outbound: VecDeque<OutboundMessage<TransportMessage>>,
     outbound_max: usize,
     inflight: BTreeSet<Id>,
-    codec: C,
 }
 
-impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Error=E>, E: Into<Error> {
-    pub fn new(handle: Handle, id: String, codec: C, config: Config) -> Link<M,C,E> {
+impl Link {
+    pub fn new(handle: Handle, id: String, config: Config) -> Link {
         let (tx, rx) = channel(config.buffering);
         Link {
             handle: handle,
@@ -73,11 +74,10 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
             outbound: VecDeque::new(),
             outbound_max: config.outbound_max,
             inflight: BTreeSet::new(),
-            codec: codec,
         }
     }
 
-    pub fn sender(&self) -> Sender<Command<M>> {
+    pub fn sender(&self) -> Sender<Command> {
         self.tx.clone()
     }
 
@@ -89,10 +89,12 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
         return self.outbound.len() < self.outbound_max;
     }
 
-    pub fn unicast(&mut self, recipient: &Id, msg: M) -> Result<AsyncSink<M>> {
+    pub fn unicast(&mut self, recipient: &Id, msg: Message) -> Result<AsyncSink<Message>> {
         if !self.ready() {
             return Ok(AsyncSink::NotReady(msg));
         }
+
+        trace!("sending unicast message to {}", recipient);
 
         let encoded_msg = try!(self.encode(msg));
 
@@ -104,10 +106,12 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
         Ok(AsyncSink::Ready)
     }
 
-    pub fn broadcast(&mut self, msg: M) -> Result<AsyncSink<M>> {
+    pub fn broadcast(&mut self, msg: Message) -> Result<AsyncSink<Message>> {
         if !self.ready() {
             return Ok(AsyncSink::NotReady(msg));
         }
+
+        trace!("sending broadcast message");
 
         let encoded_msg = try!(self.encode(msg));
 
@@ -123,6 +127,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
 
     pub fn add_connection(&mut self, id: Id, addr: SocketAddr) -> Result<()> {
         debug!("received command add_connection {} to {}", id, addr);
+
         let (tx_outbound,rx_outbound) = channel(0);
         let (tx_inbound,rx_inbound) = channel(0);
         
@@ -150,17 +155,27 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
         Ok(())
     }
 
-    pub fn encode(&self, msg: M) -> Result<TransportMessage> {
-        self.codec.encode(msg).map_err(|e| e.into()).map(|msg| framing::Frame::Message(msg))
+    pub fn encode(&self, message: Message) -> Result<TransportMessage> {
+        let link_message = LinkMessage {
+            from: self.id.clone(),
+            body: message,
+        };
+        let encoded_message = serde_json::to_string(&link_message)
+            .chain_err(|| "error serialising link message")?;
+        Ok(framing::Frame::Message(encoded_message))
     }
 
     fn send_all_outbound(&mut self) -> Poll<(),Error> {
+        trace!("trying to send {} outbound link messages", self.outbound.len());
+
         while let Some(OutboundMessage { connection_id, encoded_message }) = self.outbound.pop_front() {
             match try!(self.send_one_outbound(&connection_id, encoded_message)) {
                 AsyncSink::Ready => {
+                    debug!("connection accepted outbound message");
                     self.inflight.insert(connection_id.clone());
                 },
                 AsyncSink::NotReady(encoded_message) => {
+                    debug!("connection not ready for outbound message");
                     self.outbound.push_front(OutboundMessage { connection_id, encoded_message });
                     return Ok(Async::NotReady);
                 }
@@ -172,6 +187,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
 
     fn send_one_outbound(&mut self, id: &Id, msg: TransportMessage) -> Result<AsyncSink<TransportMessage>> {
         if let Some(ref mut conn) = self.connections.get_mut(id) {
+            trace!("sending link message to connection {}", id);
             conn.tx.start_send(msg).map_err(|e| Error::with_chain(e, "error sending message to connection"))
         } else {
             // TODO: should we raise an error here or not?
@@ -185,6 +201,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
 
         for id in self.inflight.iter() {
             if let Some(ref mut conn) = self.connections.get_mut(id) {
+                trace!("polling connection {}", id);
                 match try!(conn.tx.poll_complete().map_err(|e| Error::with_chain(e, "error waiting for message delivery to connection"))) {
                     Async::Ready(()) => {},
                     Async::NotReady => {
@@ -194,11 +211,14 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
             }
         }
 
-        for (ref _id, ref mut conn) in self.connections.iter_mut() {
-            try!(conn.tx.poll_complete().map_err(|e| Error::with_chain(e, "error waiting for delivery to connections")));
+        for (ref id, ref mut conn) in self.connections.iter_mut() {
+            trace!("polling connection {}", id);
+            try!(conn.fut.poll().map_err(|e| Error::with_chain(e, "error waiting for delivery to connections")));
         }
 
         self.inflight = new_inflight;
+
+        trace!("{} link messages in flight", self.inflight.len());
 
         if self.inflight.is_empty() {
             Ok(Async::Ready(()))
@@ -207,7 +227,7 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
         }
     }
 
-    fn handle_command(&mut self, command: Command<M>) -> Result<()> {
+    fn handle_command(&mut self, command: Command) -> Result<()> {
         match command {
             Command::AddConnection { id, addr } => {
                 debug!("received add connection command {} {}", id, addr);
@@ -237,11 +257,13 @@ impl <M, C, E> Link<M, C, E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Er
     }
 }
 
-impl <M,C,E> Future for Link<M,C,E> where C: Codec<Item=M,EncodedItem=EncodedMessage,Error=E>, E: Into<Error> {
+impl Future for Link {
     type Item = ();
     type Error = Error;
 
     fn poll(&mut self) -> result::Result<Async<Self::Item>,Self::Error> {
+        trace!("link poll called");
+
         if self.ready() {
             match try!(self.rx.poll().map_err(|()| Error::from_kind(ErrorKind::ReceiveError))) {
                 Async::Ready(Some(command)) => {
