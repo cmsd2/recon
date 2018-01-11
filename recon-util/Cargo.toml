@@ -7,6 +7,7 @@ authors = ["Chris Dawes <cmsd2@cantab.net>"]
 futures = "0.1.17"
 log = "0.4.1"
 uuid = { version="0.5.1", features=["v4"] }
+error-chain = "0.11.0"
 
 [dependencies.env_logger]
 optional = true

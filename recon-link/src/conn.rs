@@ -10,8 +10,8 @@ use std::error;
 use std::time::{Duration, Instant};
 use std::fmt;
 use std::collections::VecDeque;
+use ::errors::*;
 
-pub type ConnectionError = io::Error;
 pub type SessionId = u32;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,7 +101,7 @@ pub trait NewTransport {
 
 #[derive(StateMachineFuture)]
 pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
-    #[state_machine_future(start, transitions(Connecting, Finished, Error))]
+    #[state_machine_future(start, transitions(Connecting, Finished, ConnectionError))]
     NotConnected {
         handle: Handle,
         stream: S,
@@ -112,7 +112,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         config: Config,
     },
 
-    #[state_machine_future(transitions(NotConnected, Connected, Finished, Error))]
+    #[state_machine_future(transitions(NotConnected, Connected, Finished, ConnectionError))]
     Connecting {
         handle: Handle,
         stream: S,
@@ -124,7 +124,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
         config: Config,
     },
 
-    #[state_machine_future(transitions(Connected, NotConnected, Finished, Error))]
+    #[state_machine_future(transitions(Connected, NotConnected, Finished, ConnectionError))]
     Connected {
         handle: Handle,
         stream: S,
@@ -144,7 +144,7 @@ pub enum Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>
     Finished(()),
 
     #[state_machine_future(error)]
-    Error(ConnectionError),
+    ConnectionError(Error),
 }
 
 impl <Item, S, K, T, N> Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
@@ -155,7 +155,7 @@ impl <Item, S, K, T, N> Connection<Item, S, K, T, N> where S: Stream<Item=Item,E
 }
 
 impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S, K, T, N> where S: Stream<Item=Item,Error=io::Error>, K: Sink<SinkItem=Message<Item>,SinkError=io::Error>, T: Stream<Item=Item,Error=io::Error>+Sink<SinkItem=Item,SinkError=io::Error>, N: NewTransport<Transport=T>+Clone+'static {
-    fn poll_not_connected<'a>(not_connected: &'a mut RentToOwn<'a, NotConnected<Item, S, K, T, N>>) -> Poll<AfterNotConnected<Item, S, K, T, N>, ConnectionError> {
+    fn poll_not_connected<'a>(not_connected: &'a mut RentToOwn<'a, NotConnected<Item, S, K, T, N>>) -> Poll<AfterNotConnected<Item, S, K, T, N>, Error> {
         trace!("not connected");
         
         let retry_strategy = FibonacciBackoff ::from_millis(1)
@@ -187,10 +187,10 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         }.into()))
     }
 
-    fn poll_connecting<'a>(connecting: &'a mut RentToOwn<'a, Connecting<Item, S, K, T, N>>) -> Poll<AfterConnecting<Item, S, K, T, N>, ConnectionError> {
+    fn poll_connecting<'a>(connecting: &'a mut RentToOwn<'a, Connecting<Item, S, K, T, N>>) -> Poll<AfterConnecting<Item, S, K, T, N>, Error> {
         trace!("connecting");
 
-        let tcp = try_ready!(connecting.tcp_future.poll());
+        let tcp = try_ready!(connecting.tcp_future.poll().chain_err(|| "error waiting for network packet"));
 
         let connecting = connecting.take();
         Ok(Async::Ready(Connected {
@@ -215,7 +215,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         }.into()))
     }
 
-    fn poll_connected<'a>(connected: &'a mut RentToOwn<'a, Connected<Item, S, K, T, N>>) -> Poll<AfterConnected<Item, S, K, T, N>, ConnectionError> {
+    fn poll_connected<'a>(connected: &'a mut RentToOwn<'a, Connected<Item, S, K, T, N>>) -> Poll<AfterConnected<Item, S, K, T, N>, Error> {
         trace!("connected");
 
         // we make progress if any poll returns Ready
@@ -268,7 +268,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         }
 
         while connected.outbound.len() < connected.config.outbound_max {
-            match try!(connected.stream.poll()) {
+            match try!(connected.stream.poll().chain_err(|| "error waiting for messages to send")) {
                 Async::Ready(Some(msg)) => {
                     progress = true;
                     connected.outbound.push_back(TimestampedItem::new(msg));
@@ -331,7 +331,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         }
 
         if let Some(msg) = connected.inbound.pop_front() {
-            match try!(connected.sink.start_send(msg)) {
+            match try!(connected.sink.start_send(msg).chain_err(|| "error sending received messages")) {
                 AsyncSink::Ready => {
                     trace!("sink started send");
                     progress = true;
@@ -345,7 +345,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         }
 
         if connected.inbound_inflight {
-            match try!(connected.sink.poll_complete()) {
+            match try!(connected.sink.poll_complete().chain_err(|| "error waiting for received messages to be delivered")) {
                 Async::Ready(()) => {
                     trace!("sink polled complete");
                     progress = true;
@@ -359,7 +359,7 @@ impl <Item, S, K, T, N> PollConnection<Item, S, K, T, N> for Connection<Item, S,
         }
 
         if connected.outbound_inflight {
-            match try!(connected.tcp.poll_complete()) {
+            match try!(connected.tcp.poll_complete().chain_err(|| "error waiting for sent messages to be delivered")) {
                 Async::Ready(()) => {
                     trace!("transport poll complete");
                     progress = true;

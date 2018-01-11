@@ -11,10 +11,13 @@ extern crate state_machine_future;
 extern crate bytes;
 extern crate uuid;
 extern crate recon_util;
+#[macro_use]
+extern crate error_chain;
 
 pub mod conn;
 pub mod framing;
 pub mod link;
+pub mod errors;
 
 #[cfg(test)]
 mod tests {
