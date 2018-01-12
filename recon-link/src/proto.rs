@@ -14,3 +14,18 @@ impl LinkMessage {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiplexMessage {
+    pub key: String,
+    pub body: Value,
+}
+
+impl MultiplexMessage {
+    pub fn new(key: String, body: Value) -> MultiplexMessage {
+        MultiplexMessage {
+            key: key,
+            body: body,
+        }
+    }
+}

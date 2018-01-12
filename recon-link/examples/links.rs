@@ -9,7 +9,7 @@ extern crate serde_json;
 extern crate recon_link;
 
 use std::time::Duration;
-use futures::future::Future;
+use futures::future::{self, Future};
 use futures::stream::{self, Stream};
 use futures::sink::Sink;
 use futures::sync::mpsc::{channel};
@@ -46,7 +46,7 @@ fn main() {
 
     let addr = "127.0.0.1:6666".parse().unwrap();
 
-    let mut link = Link::new(handle.clone(), "1".to_owned(), Config { outbound_max: 1, buffering: 0 });
+    let mut link = Link::new(handle.clone(), "1".to_owned(), Config { inbound_max: 1, outbound_max: 1, buffering: 0 }).expect("error creating link");
     let tx = link.sender();
     
     let stream = stream::iter_ok((1..1000).map(|n| serde_json::to_value(n).expect("serde error") ))
@@ -70,7 +70,8 @@ fn main() {
 
     link.add_connection("2".to_owned(), addr).expect("add connection error");
     
-    let result = core.run(link);
-
-    println!("event loop terminated: {:?}", result);
+    core.run(link.for_each(|item| {
+        println!("item: {:?}", item);
+        future::ok(())
+    })).expect("error running link");
 }

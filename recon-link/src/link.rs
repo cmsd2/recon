@@ -47,6 +47,7 @@ struct OutboundMessage<M> {
 }
 
 pub struct Config {
+    pub inbound_max: usize,
     pub outbound_max: usize,
     pub buffering: usize,
 }
@@ -58,23 +59,25 @@ pub struct Link {
     rx: Receiver<Command>,
     connections: BTreeMap<String, ConnectionImpl<TransportMessage>>,
     outbound: VecDeque<OutboundMessage<TransportMessage>>,
-    outbound_max: usize,
     inflight: BTreeSet<Id>,
+    inbound: VecDeque<conn::Message<LinkMessage>>,
+    config: Config,
 }
 
 impl Link {
-    pub fn new(handle: Handle, id: String, config: Config) -> Link {
+    pub fn new(handle: Handle, id: String, config: Config) -> Result<Link> {
         let (tx, rx) = channel(config.buffering);
-        Link {
+        Ok(Link {
             handle: handle,
             tx: tx,
             rx: rx,
             id: id,
             connections: BTreeMap::new(),
             outbound: VecDeque::new(),
-            outbound_max: config.outbound_max,
             inflight: BTreeSet::new(),
-        }
+            inbound: VecDeque::new(),
+            config: config,
+        })
     }
 
     pub fn sender(&self) -> Sender<Command> {
@@ -86,7 +89,7 @@ impl Link {
     }
 
     pub fn ready(&self) -> bool {
-        return self.outbound.len() < self.outbound_max;
+        return self.outbound.len() < self.config.outbound_max;
     }
 
     pub fn unicast(&mut self, recipient: &Id, msg: Message) -> Result<AsyncSink<Message>> {
@@ -165,6 +168,13 @@ impl Link {
         Ok(framing::Frame::Message(encoded_message))
     }
 
+    pub fn decode(message: &str) -> Result<LinkMessage> {
+        let link_message = serde_json::from_str(message)
+            .chain_err(|| "error deserialising link message")?;
+        
+        Ok(link_message)
+    }
+
     fn send_all_outbound(&mut self) -> Poll<(),Error> {
         trace!("trying to send {} outbound link messages", self.outbound.len());
 
@@ -194,6 +204,30 @@ impl Link {
             info!("dropping message destined for {}. not connection", id);
             Ok(AsyncSink::Ready)
         }
+    }
+
+    fn poll_inbound(&mut self) -> Result<()> {
+        trace!("polling inbound");
+
+        for (_id, mut conn) in self.connections.iter_mut() {
+            if let Async::Ready(Some(received)) = try!(conn.rx.poll().map_err(|()| Error::from_kind(ErrorKind::ReceiveError))) {
+                match received {
+                    conn::Message::Data { session_id, content: framing::Frame::Message(content) } => {
+                        let link_message = Self::decode(&content)?;
+
+                        self.inbound.push_back(conn::Message::Data { session_id: session_id, content: link_message });
+                    },
+                    conn::Message::Data { session_id: _session_id, content: framing::Frame::Done } => {
+                        // nothing?
+                    },
+                    conn::Message::Control { event } => {
+                        self.inbound.push_back(conn::Message::Control { event });
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn poll_inflight(&mut self) -> Result<Async<()>> {
@@ -257,11 +291,11 @@ impl Link {
     }
 }
 
-impl Future for Link {
-    type Item = ();
+impl Stream for Link {
+    type Item = conn::Message<LinkMessage>;
     type Error = Error;
 
-    fn poll(&mut self) -> result::Result<Async<Self::Item>,Self::Error> {
+    fn poll(&mut self) -> result::Result<Async<Option<Self::Item>>,Self::Error> {
         trace!("link poll called");
 
         if self.ready() {
@@ -271,7 +305,7 @@ impl Future for Link {
                 },
                 Async::Ready(None) => {
                     debug!("received end of stream");
-                    return Ok(Async::Ready(()));
+                    return Ok(Async::Ready(None));
                 },
                 Async::NotReady => {}
             }
@@ -281,6 +315,16 @@ impl Future for Link {
 
         try!(self.poll_inflight());
 
-        Ok(Async::NotReady)
+        if self.inbound.len() < self.config.inbound_max {
+            try!(self.poll_inbound());
+        }
+
+        if self.inbound.is_empty() {
+            trace!("no received message to return");
+            Ok(Async::NotReady)
+        } else {
+            trace!("returning received message");
+            Ok(Async::Ready(self.inbound.pop_front()))
+        }
     }
 }

@@ -30,7 +30,7 @@ pub enum Event {
 }
 
 pub enum Message<Item> {
-    Packet {
+    Data {
         session_id: SessionId,
         content: Item,
     },
@@ -64,8 +64,8 @@ impl <Item> TimestampedItem<Item> {
 impl <Item> Clone for Message<Item> where Item: Clone {
     fn clone(&self) -> Message<Item> {
         match self {
-            &Message::Packet { session_id, ref content } => {
-                Message::Packet {
+            &Message::Data { session_id, ref content } => {
+                Message::Data {
                     session_id: session_id,
                     content: content.clone()
                 }
@@ -82,8 +82,8 @@ impl <Item> Clone for Message<Item> where Item: Clone {
 impl <Item> fmt::Debug for Message<Item> where Item: fmt::Debug {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            &Message::Packet { session_id, ref content } => {
-                write!(f, "Message::Packet<session_id={:?}, content={:?}>", session_id, content)
+            &Message::Data { session_id, ref content } => {
+                write!(f, "Message::Data<session_id={:?}, content={:?}>", session_id, content)
             },
             &Message::Control { ref event } => {
                 write!(f, "Message::Control<event={:?}>", event)
@@ -219,7 +219,7 @@ impl <Item, S, T, N> PollConnection<Item, S, T, N> for Connection<Item, S, T, N>
                 Ok(Async::Ready(Some(msg))) => {
                     trace!("transport received msg");
                     progress = true;
-                    connected.inbound.push_back(Message::Packet{session_id, content: msg});
+                    connected.inbound.push_back(Message::Data{session_id, content: msg});
                 },
                 Ok(Async::Ready(None)) => {
                     trace!("transport returned end of stream");
