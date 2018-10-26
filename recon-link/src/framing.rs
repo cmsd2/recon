@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use std::{io, str};
 use tokio_io::{AsyncRead, AsyncWrite};
-use tokio_io::codec::{Framed, Encoder, Decoder};
+use tokio_codec::{Framed, Encoder, Decoder};
 
 #[derive(Debug, Clone)]
 pub enum ReconFrame {
@@ -73,5 +73,5 @@ pub type FramedLineTransport<T> = Framed<T, Parser>;
 pub fn new_line_transport<T>(inner: T) -> FramedLineTransport<T>
     where T: AsyncRead + AsyncWrite,
 {
-    inner.framed(Parser)
+    FramedLineTransport::<T>::new(inner, Parser)
 }

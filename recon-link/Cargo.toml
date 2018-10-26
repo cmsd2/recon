@@ -1,18 +1,18 @@
 [package]
 authors = ["Chris Dawes <cmsd2@cantab.net>"]
-name = "recon-link"
-version = "0.3.1-alpha.0"
-license = "Apache-2.0"
-description = "Persistent tcp connections"
-repository = "https://github.com/cmsd2/recon"
-keywords = ["reconnect", "async", "tokio", "futures", "tcp"]
 categories = ["asynchronous", "network-programming"]
-
+description = "Persistent tcp connections"
+keywords = ["reconnect", "async", "tokio", "futures", "tcp"]
+license = "Apache-2.0"
+name = "recon-link"
+repository = "https://github.com/cmsd2/recon"
+version = "0.3.1-alpha.0"
 [dependencies]
 bytes = "0.4.5"
 futures = "0.1.17"
 log = "0.4.1"
 state_machine_future = "0.1.5"
+tokio-codec = "0.1.1"
 tokio-core = "0.1.11"
 tokio-io = "0.1.4"
 tokio-retry = "0.1.1"

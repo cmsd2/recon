@@ -17,7 +17,7 @@ use futures::sink::{Sink};
 use tokio_core::reactor::{Core, Handle};
 use tokio_core::net::TcpStream;
 use tokio_timer::Timer;
-use recon_link::conn::{Connection, Message, NewTransport};
+use recon_link::conn::{self, Connection, Message, NewTransport};
 use recon_link::framing::{FramedLineTransport, new_line_transport, ReconFrame};
 
 pub type MessageContent = ReconFrame;
@@ -57,7 +57,12 @@ fn main() {
                 })
         });
 
-    let conn = Connection::new(core.handle(), stream, PrinterSink, NewTcpTransport(addr, handle), 10, 10, Duration::from_millis(1000));
+    let conn_config = conn::Config {
+        inbound_max: 10,
+        outbound_max: 10,
+        outbound_max_age: Duration::from_millis(1000),  
+    };
+    let conn = Connection::new(core.handle(), stream, PrinterSink, NewTcpTransport(addr, handle), conn_config);
 
     let result = core.run(conn);
 

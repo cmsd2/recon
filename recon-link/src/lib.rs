@@ -6,6 +6,7 @@ extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_retry;
 extern crate tokio_timer;
+extern crate tokio_codec;
 #[macro_use]
 extern crate state_machine_future;
 extern crate bytes;

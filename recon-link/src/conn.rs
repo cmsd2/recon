@@ -16,9 +16,9 @@ pub type SessionId = u32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    inbound_max: usize,
-    outbound_max: usize,
-    outbound_max_age: Duration,
+    pub inbound_max: usize,
+    pub outbound_max: usize,
+    pub outbound_max_age: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq)]
