@@ -18,12 +18,12 @@ extern crate snowflake;
 use std::net::SocketAddr;
 use tokio_tcp::{TcpListener};
 use actix::prelude::*;
-use connection_table::{AddListener,ConnectionTable};
 
 pub mod tcp_server;
 pub mod codec;
 pub mod link;
 pub mod connection_table;
+pub mod connection_manager;
 pub mod web;
 
 fn main() {
@@ -33,16 +33,17 @@ fn main() {
 
     let system = System::new("hello");
 
-    let connections_table = ConnectionTable::new().start();
-    let web_addr: SocketAddr = "127.0.0.1:8080".parse().expect("error parsing socket addr");
-    web::create_server(web::Options { 
-        connections: connections_table.clone(), 
-        listen: web_addr,
-    }).expect("error starting admin server");
+    // let connections_table = ConnectionTable::new().start();
 
     let addr: SocketAddr = "127.0.0.1:6666".parse().expect("error parsing socket addr");
     let listener = TcpListener::bind(&addr).unwrap();
-    let server_addr = tcp_server::TcpServer::new(listener, connections_table);
+    let server_addr = tcp_server::TcpServer::new(listener);
+
+    let web_addr: SocketAddr = "127.0.0.1:8080".parse().expect("error parsing socket addr");
+    web::create_server(web::Options { 
+        connections: server_addr, 
+        listen: web_addr,
+    }).expect("error starting admin server");
     
     let code = system.run();
 

@@ -2,22 +2,22 @@ use std::net::SocketAddr;
 use std::io;
 use bytes::Bytes;
 use actix::prelude::*;
-use actix_web::{server, App, AsyncResponder, Error, FutureResponse, HttpMessage, HttpRequest, HttpResponse, Path, Responder};
+use actix_web::{server, App, AsyncResponder, FutureResponse, HttpMessage, HttpRequest, HttpResponse, Responder};
 use actix_web::error::{ErrorBadRequest,ErrorInternalServerError};
-use actix_web::http::{self, Method};
-use actix_web::dev::Handler;
+use actix_web::http::Method;
 use futures::Future;
-use connection_table::{ConnectionTable,AddConnection,GetConnections};
+use connection_manager::*;
+use tcp_server::TcpServer;
 
 #[derive(Clone)]
 pub struct Options {
     pub listen: SocketAddr,
-    pub connections: Addr<ConnectionTable>
+    pub connections: Addr<TcpServer>
 }
 
 #[derive(Clone)]
 struct ConnectionsController {
-    connections: Addr<ConnectionTable>
+    connections: Addr<TcpServer>
 }
 
 impl ConnectionsController {

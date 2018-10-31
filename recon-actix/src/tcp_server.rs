@@ -2,25 +2,24 @@ use actix::prelude::*;
 use futures::Stream;
 use tokio_tcp::{TcpListener, TcpStream};
 use ::link::Link;
-use ::connection_table::{AddListener,ConnectionState,Connection,ConnectionEvent,ConnectionTable,Event};
+use ::connection_manager::*;
+use ::connection_table::ConnectionTable;
 
 pub struct TcpServer {
-    connections: Addr<ConnectionTable>,
+    connections: ConnectionTable,
 }
 
 impl TcpServer {
-    pub fn new(tcp_listener: TcpListener, connections: Addr<ConnectionTable>) -> actix::Addr<TcpServer> {
-        let connections2 = connections.clone();
+    pub fn new(tcp_listener: TcpListener) -> actix::Addr<TcpServer> {
         let addr = TcpServer::create(|ctx| {
             ctx.add_stream(
                 tcp_listener.incoming()
                         .map_err(|_| ())
                         .map(|stream| TcpConnect { stream }));
             TcpServer {
-                connections: connections2,
+                connections: ConnectionTable::new(),
             }
         });
-        connections.do_send(AddListener(addr.clone().recipient()));
         addr
     }
 }
@@ -71,5 +70,34 @@ impl Handler<ConnectionEvent> for TcpServer {
                 debug!("stopping connection actor for {:?}", msg.connection);
             }
         }
+    }
+}
+
+impl Handler<AddConnection> for TcpServer {
+    type Result = ();
+
+    fn handle(&mut self, msg: AddConnection, _ctx: &mut Context<Self>) -> Self::Result {
+        info!("adding new connection {:?}", msg);
+        //TODO fix unwrap
+        self.connections.add_connection(msg).unwrap();
+    }
+}
+
+impl Handler<RemoveConnection> for TcpServer {
+    type Result = ();
+
+    fn handle(&mut self, msg: RemoveConnection, _ctx: &mut Context<Self>) -> Self::Result {
+        info!("removing connection {:?}", msg);
+        //TODO fix unwrap
+        self.connections.remove_connection(msg).unwrap();
+    }
+}
+
+impl Handler<GetConnections> for TcpServer {
+    type Result = Result<Vec<Connection>,()>;
+
+    fn handle(&mut self, msg: GetConnections, _ctx: &mut Context<Self>) -> Self::Result {
+        info!("getting connections");
+        Ok(self.connections.get_connections())
     }
 }
