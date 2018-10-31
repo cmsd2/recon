@@ -4,5 +4,6 @@ members = [
     "recon-link",
     "recon-service",
     "recon-util",
+    "recon-actix",
 ]
 

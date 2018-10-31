@@ -27,12 +27,13 @@ mod logging {
     pub fn init_logger() {
         use env_logger;
         env_logger::init().unwrap();
+        println!("logger");
     }
 }
 
 #[cfg(not(feature="logger"))]
 mod logging {
-    pub fn init_logger() {}
+    pub fn init_logger() {println!("no logger")}
 }
 
 fn main() {
