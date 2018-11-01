@@ -17,8 +17,11 @@ pub struct ConnectionEvent {
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
 pub enum ConnectionState {
     NotConnected,
-    //Connecting,
-    //Connected,
+    Connecting,
+    Connected,
+    ReconnectBackoff {
+        until: std::time::Instant,
+    }
 }
 
 #[derive(Debug,Clone,PartialEq,Serialize,Deserialize)]
@@ -27,6 +30,7 @@ pub struct Connection {
     pub addr: SocketAddr,
     pub state: ConnectionState,
     pub reconnect: bool,
+    pub reconnect_tries: u32,
 }
 
 pub trait ConnectionManager<Context> : Actor<Context=Context> + Handler<AddConnection> + Handler<RemoveConnection> + Handler<GetConnections> where Context: ActorContext {
@@ -40,6 +44,18 @@ where T: Actor<Context=Context> + Handler<AddConnection> + Handler<RemoveConnect
 pub struct AddConnection {
     pub addr: SocketAddr,
     pub reconnect: bool,
+}
+
+#[derive(Message,Debug,Serialize,Deserialize)]
+pub struct UpdateConnection {
+    pub id: String,
+    pub reconnect: bool,
+}
+
+#[derive(Message,Debug)]
+pub struct UpdateConnectionState {
+    pub id: String,
+    pub state: ConnectionState,
 }
 
 #[derive(Message,Debug)]

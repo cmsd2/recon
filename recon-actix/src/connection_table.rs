@@ -24,9 +24,37 @@ impl ConnectionTable {
         self.listeners.push(r);
     }
 
-    pub fn add_connection(&mut self, msg: AddConnection) -> io::Result<()> {
+    pub fn update_connection_state(&mut self, msg: UpdateConnectionState) -> io::Result<Connection>  {
         for mut c in self.connections.iter_mut() {
-            if c.addr == msg.addr {
+            if c.id == msg.id {
+                if c.state != ConnectionState::Connecting 
+                        && msg.state == ConnectionState::Connecting {
+                    c.reconnect_tries += 1;
+                } else if c.state == ConnectionState::Connected 
+                        && msg.state != ConnectionState::Connected {
+                    c.reconnect_tries = 0;
+                }
+                
+                c.state = msg.state;
+
+                debug!("updated connection entry {:?}", c);
+                //TODO: replace with async
+                for r in self.listeners.iter() {
+                    r.do_send(ConnectionEvent {
+                        connection: c.clone(),
+                        event: Event::Updated,
+                    }).map_err(|err| io::Error::new(io::ErrorKind::Other, format!("error sending connection event: {}", err)))?;
+                }
+                return Ok(c.clone());
+            }
+        }
+
+        Err(io::Error::new(io::ErrorKind::Other, format!("no link found with id {}", msg.id)))
+    }
+
+    pub fn update_connection(&mut self, msg: UpdateConnection) -> io::Result<Connection> {
+        for mut c in self.connections.iter_mut() {
+            if c.id == msg.id {
                 c.reconnect = msg.reconnect;
                 debug!("updated connection entry {:?}", c);
                 //TODO: replace with async
@@ -36,14 +64,19 @@ impl ConnectionTable {
                         event: Event::Updated,
                     }).map_err(|err| io::Error::new(io::ErrorKind::Other, format!("error sending connection event: {}", err)))?;
                 }
-                return Ok(());
+                return Ok(c.clone());
             }
         }
 
+        Err(io::Error::new(io::ErrorKind::Other, format!("no link found with id {}", msg.id)))
+    }
+
+    pub fn add_connection(&mut self, msg: AddConnection) -> io::Result<Connection> {
         let c = Connection {
             id: format!("{}", ProcessUniqueId::new()),
             addr: msg.addr,
             reconnect: msg.reconnect,
+            reconnect_tries: 0,
             state: ConnectionState::NotConnected,
         };
         debug!("adding connection {:?}", c);
@@ -57,7 +90,7 @@ impl ConnectionTable {
             }).map_err(|err| io::Error::new(io::ErrorKind::Other, format!("error sending connection event: {}", err)))?;
         }
 
-        Ok(())
+        Ok(c)
     }
 
     pub fn remove_connection(&mut self, msg: RemoveConnection) -> io::Result<()> {
