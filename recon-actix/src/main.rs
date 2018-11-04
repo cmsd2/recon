@@ -1,29 +1,32 @@
 #[macro_use]
 extern crate log;
-extern crate env_logger;
-extern crate futures;
-extern crate bytes;
-extern crate tokio_core;
-extern crate tokio_io;
-extern crate tokio_codec;
-extern crate tokio_tcp;
 extern crate actix;
 extern crate actix_web;
+extern crate bytes;
+extern crate env_logger;
+extern crate futures;
 extern crate serde;
 extern crate serde_json;
+extern crate tokio_codec;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate tokio_retry;
+extern crate tokio_tcp;
 #[macro_use]
 extern crate serde_derive;
 extern crate snowflake;
+#[macro_use]
+extern crate failure;
 
-use std::net::SocketAddr;
-use tokio_tcp::{TcpListener};
 use actix::prelude::*;
+use std::net::SocketAddr;
+use tokio_tcp::TcpListener;
 
-pub mod tcp_server;
 pub mod codec;
-pub mod link;
-pub mod connection_table;
 pub mod connection_manager;
+pub mod connection_table;
+pub mod link;
+pub mod tcp_server;
 pub mod web;
 
 fn main() {
@@ -40,11 +43,11 @@ fn main() {
     let server_addr = tcp_server::TcpServer::new(listener);
 
     let web_addr: SocketAddr = "127.0.0.1:8080".parse().expect("error parsing socket addr");
-    web::create_server(web::Options { 
-        connections: server_addr, 
+    web::create_server(web::Options {
+        connections: server_addr,
         listen: web_addr,
     }).expect("error starting admin server");
-    
+
     let code = system.run();
 
     std::process::exit(code);

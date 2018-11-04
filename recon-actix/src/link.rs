@@ -1,12 +1,12 @@
-use futures::Future;
+use actix::io::FramedWrite;
 use actix::prelude::*;
-use actix::io::{FramedWrite};
-use tokio_io::AsyncRead;
-use tokio_io::io::WriteHalf;
-use tokio_codec::FramedRead;
-use tokio_tcp::TcpStream;
-use std::net::SocketAddr;
 use codec::Codec;
+use futures::Future;
+use std::net::SocketAddr;
+use tokio_codec::FramedRead;
+use tokio_io::io::WriteHalf;
+use tokio_io::AsyncRead;
+use tokio_tcp::TcpStream;
 
 pub type LinkError = ::codec::Error;
 
@@ -17,13 +17,13 @@ pub struct Post {
 
 pub struct Link {
     connection_manager: Recipient<LinkStopped>,
-    writer: FramedWrite<WriteHalf<TcpStream>,Codec>,
+    writer: FramedWrite<WriteHalf<TcpStream>, Codec>,
     error: Option<LinkError>,
     id: String,
     peer_addr: SocketAddr,
 }
 
-#[derive(Message,Debug)]
+#[derive(Message, Debug)]
 pub struct LinkStopped {
     pub reason: LinkStoppedReason,
     pub id: String,
@@ -33,13 +33,19 @@ pub struct LinkStopped {
 #[derive(Debug)]
 pub enum LinkStoppedReason {
     Finished,
-    Error(LinkError)
+    Error(LinkError),
 }
 
 impl Link {
-    pub fn new(tcp_stream: TcpStream, id: String, connection_manager: Recipient<LinkStopped>) -> actix::Addr<Link> {
+    pub fn new(
+        tcp_stream: TcpStream,
+        id: String,
+        connection_manager: Recipient<LinkStopped>,
+    ) -> actix::Addr<Link> {
         Link::create(move |ctx| {
-            let peer_addr = tcp_stream.peer_addr().expect("error getting socket peer address");
+            let peer_addr = tcp_stream
+                .peer_addr()
+                .expect("error getting socket peer address");
             let (r, w) = tcp_stream.split();
             Link::add_stream(FramedRead::new(r, Codec), ctx);
             Link {
@@ -64,7 +70,7 @@ impl StreamHandler<::codec::Request, LinkError> for Link {
         debug!("received message {:?}", msg);
     }
 
-    fn error(&mut self, err: LinkError, ctx: &mut Self::Context) -> Running {
+    fn error(&mut self, err: LinkError, _ctx: &mut Self::Context) -> Running {
         self.error = Some(err);
         Running::Stop
     }
@@ -78,12 +84,17 @@ impl StreamHandler<::codec::Request, LinkError> for Link {
         let id = self.id.clone();
         let peer_addr = self.peer_addr.clone();
 
-        Arbiter::spawn(self.connection_manager
-            .send(LinkStopped { reason, id, peer_addr })
-            .map_err(|err| {
-                warn!("error sending link stopped message: {}", err);
-                ()
-            }));
+        Arbiter::spawn(
+            self.connection_manager
+                .send(LinkStopped {
+                    reason,
+                    id,
+                    peer_addr,
+                }).map_err(|err| {
+                    warn!("error sending link stopped message: {}", err);
+                    ()
+                }),
+        );
 
         ctx.stop()
     }
