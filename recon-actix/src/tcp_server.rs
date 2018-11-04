@@ -77,7 +77,7 @@ impl TcpServer {
                     .map(|stream| TcpConnect { stream }),
             );
             TcpServer {
-                connections: ConnectionTable::new(),
+                connections: ConnectionTable::new().with_listener(ctx.address().recipient()),
             }
         });
         addr
@@ -99,8 +99,9 @@ impl TcpServer {
 
         let connector = Connector::new(ctx.address(), connection.clone());
 
-        let tries = 10;
-        let strategy = FibonacciBackoff::from_millis(10).map(jitter).take(tries);
+        let strategy = FibonacciBackoff::from_millis(500)
+            .max_delay(Duration::from_millis(30000))
+            .map(jitter);
         let fut = connector
             .connect(strategy)
             .map(|()| {
@@ -111,7 +112,7 @@ impl TcpServer {
                     error_listener,
                     LinkConnectError {
                         id: c2.id,
-                        tries: tries,
+                        tries: 0,
                     },
                 );
             });

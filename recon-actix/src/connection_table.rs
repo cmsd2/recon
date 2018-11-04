@@ -35,6 +35,11 @@ impl ConnectionTable {
         self.listeners.push(r);
     }
 
+    pub fn with_listener(mut self, r: Recipient<ConnectionEvent>) -> ConnectionTable {
+        self.listeners.push(r);
+        self
+    }
+
     pub fn notify_listener(r: &Recipient<ConnectionEvent>, ce: ConnectionEvent) -> io::Result<()> {
         Arbiter::spawn(
             r.send(ce)

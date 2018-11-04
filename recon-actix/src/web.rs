@@ -1,5 +1,5 @@
 use actix::prelude::*;
-use actix_web::error::{ErrorBadRequest, ErrorInternalServerError};
+use actix_web::error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound};
 use actix_web::http::Method;
 use actix_web::{
     server, App, AsyncResponder, FutureResponse, HttpMessage, HttpRequest, HttpResponse, Responder,
@@ -81,18 +81,25 @@ impl ConnectionsController {
             }).responder()
     }
 
-    pub fn remove(&self, req: &HttpRequest) -> impl Responder {
+    pub fn update(&self, req: &HttpRequest) -> impl Responder {
         debug!("{:?}", req);
         HttpResponse::Ok()
             .header("Content-Type", "application/json")
             .body("{}")
     }
 
-    pub fn update(&self, req: &HttpRequest) -> impl Responder {
+    pub fn remove(&self, req: &HttpRequest) -> FutureResponse<HttpResponse> {
         debug!("{:?}", req);
-        HttpResponse::Ok()
-            .header("Content-Type", "application/json")
-            .body("{}")
+        self.connections
+            .send(RemoveConnection {
+                id: req.match_info()["id"].to_owned(),
+            }).from_err()
+            .map(|_result| {
+                HttpResponse::Ok()
+                    .header("Content-Type", "application/json")
+                    .finish()
+            }).map_err(|_mailbox_error: actix::MailboxError| ErrorNotFound("not found"))
+            .responder()
     }
 }
 
