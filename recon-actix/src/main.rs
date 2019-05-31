@@ -15,7 +15,6 @@ extern crate tokio_tcp;
 #[macro_use]
 extern crate serde_derive;
 extern crate snowflake;
-#[macro_use]
 extern crate failure;
 
 use actix::prelude::*;
@@ -48,7 +47,11 @@ fn main() {
         listen: web_addr,
     }).expect("error starting admin server");
 
-    let code = system.run();
-
-    std::process::exit(code);
+    match system.run() {
+        Ok(()) => {},
+        Err(err) => {
+            error!("error: {}", err);
+            std::process::exit(-1);
+        }
+    }
 }

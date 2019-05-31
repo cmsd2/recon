@@ -34,6 +34,7 @@ impl ConnectionsController {
         debug!("{:?}", req);
         self.connections
             .send(GetConnections)
+            .map_err(|_e: actix::MailboxError| ErrorInternalServerError("error requesting connections"))
             .from_err()
             .and_then(|connections| {
                 debug!("received connections: {:?}", connections);
@@ -70,7 +71,10 @@ impl ConnectionsController {
                     let cmd_result = serde_json::from_str::<AddConnection>(&json)
                         .map_err(|err| ErrorBadRequest(err.to_string()));
                     futures::done(cmd_result).and_then(move |cmd| {
-                        connections.send(cmd).from_err().and_then(|_result| {
+                        connections.send(cmd)
+                        .map_err(|_e: actix::MailboxError| ErrorInternalServerError("error requesting connections"))
+                        .from_err()
+                        .and_then(|_result| {
                             Ok(HttpResponse::Created()
                                 .header("Content-Type", "application/json")
                                 .body("{}")

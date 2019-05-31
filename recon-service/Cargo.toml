@@ -9,4 +9,4 @@ keywords = ["reconnect", "async", "tokio", "futures", "service"]
 categories = ["asynchronous", "network-programming"]
 
 [dependencies]
-futures = "0.1.17"
+futures = "0.1.27"
