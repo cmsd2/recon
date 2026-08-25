@@ -53,13 +53,13 @@
 
 ## 5. Perfect link
 
-- [ ] 5.1 Implement deduplication by message identifier over the stubborn link, composed as a
+- [x] 5.1 Implement deduplication by message identifier over the stubborn link, composed as a
       child; verify the wire header carries exactly one identifier and nothing else
-- [ ] 5.2 Assert reliable delivery and no duplication over the simulator; verify every sent message
+- [x] 5.2 Assert reliable delivery and no duplication over the simulator; verify every sent message
       is delivered exactly once under configured loss and duplication
-- [ ] 5.3 Assert that separately sent messages with identical content are both delivered; verify
+- [x] 5.3 Assert that separately sent messages with identical content are both delivered; verify
       duplicate suppression does not swallow a genuine resend
-- [ ] 5.4 Unit-test the perfect link in isolation with a stand-in payload type; verify it compiles
+- [x] 5.4 Unit-test the perfect link in isolation with a stand-in payload type; verify it compiles
       and passes without any layer above it existing
 
 ## 6. Best-effort broadcast

@@ -1,12 +1,13 @@
 //! Process identity.
 
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 /// Identifies a process in the system.
 ///
 /// Copy and totally ordered, so collections keyed by it iterate deterministically and
 /// membership sets can be enumerated in a stable order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
 impl NodeId {

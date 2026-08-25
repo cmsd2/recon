@@ -1,0 +1,163 @@
+//! Perfect point-to-point links.
+//!
+//! Cachin, Guerraoui & Rodrigues, Module 2.3 and Algorithm 2.2 ("Eliminate Duplicates").
+//!
+//! Built over the stubborn link, which delivers a message infinitely often. This layer keeps
+//! the first copy of each message and discards the rest, yielding reliable delivery with no
+//! duplication and no creation.
+//!
+//! ```text
+//! upon event ⟨ pl, Send | q, m ⟩ do
+//!     trigger ⟨ sl, Send | q, m ⟩;
+//!
+//! upon event ⟨ sl, Deliver | p, m ⟩ do
+//!     if m ∉ delivered then
+//!         delivered := delivered ∪ {m};
+//!         trigger ⟨ pl, Deliver | p, m ⟩;
+//! ```
+//!
+//! **One deliberate departure.** The book deduplicates on the message *content*, `m`, which
+//! silently assumes every message is distinct. Send the same bytes twice on purpose and the
+//! second is swallowed. This implementation tags each transmission with an identifier — the
+//! sender and a sequence number — and deduplicates on that instead, so a genuine resend of
+//! identical content is delivered twice, as the layer above expects.
+//!
+//! That identifier is the only thing this stack puts on the wire: the stubborn link below adds
+//! nothing, and best-effort broadcast above adds nothing.
+
+use core::time::Duration;
+use recon_core::{NodeId, ProtoCx, Protocol};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+use crate::stubborn_link::{self as sl, StubbornLink};
+
+/// Names one transmission uniquely across the system.
+///
+/// The sender plus a per-sender sequence number. Deduplicating on this rather than on message
+/// content is what lets identical payloads be sent twice and delivered twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct MsgId {
+    pub src: NodeId,
+    pub seq: u64,
+}
+
+/// What crosses the wire: the identifier, and the payload it belongs to.
+///
+/// The single header in the three-layer stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wire<P> {
+    pub id: MsgId,
+    pub payload: P,
+}
+
+/// Requests from the layer above.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cmd<P> {
+    Send { to: NodeId, msg: P },
+}
+
+/// Indications to the layer above.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ind<P> {
+    Deliver { from: NodeId, msg: P },
+}
+
+/// Timers, which are the child's re-wrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Timer {
+    Stubborn(sl::Retransmit),
+}
+
+/// Reliable delivery, exactly once, over a stubborn link.
+#[derive(Debug)]
+pub struct PerfectLink<P> {
+    me: NodeId,
+    seq: u64,
+    delivered: BTreeSet<MsgId>,
+    stubborn: StubbornLink<Wire<P>>,
+    /// Indications the child raised during a handler, awaiting this protocol's attention.
+    /// Reused across events.
+    inbox: Vec<sl::Ind<Wire<P>>>,
+}
+
+impl<P> PerfectLink<P> {
+    /// A perfect link for process `me`, retransmitting every `interval` underneath.
+    pub fn new(me: NodeId, interval: Duration) -> Self {
+        PerfectLink {
+            me,
+            seq: 0,
+            delivered: BTreeSet::new(),
+            stubborn: StubbornLink::new(interval),
+            inbox: Vec::new(),
+        }
+    }
+
+    /// How many distinct messages have been delivered upward.
+    pub fn delivered_count(&self) -> usize {
+        self.delivered.len()
+    }
+
+    /// How many transmissions the layer below is still retrying.
+    pub fn outstanding(&self) -> usize {
+        self.stubborn.outstanding()
+    }
+}
+
+impl<P: Clone> PerfectLink<P> {
+    /// Apply what the stubborn link reported: keep the first copy of each identifier, drop the
+    /// rest.
+    fn consume_inbox(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let mut inbox = core::mem::take(&mut self.inbox);
+        for ind in inbox.drain(..) {
+            let sl::Ind::Deliver { from, msg: Wire { id, payload } } = ind;
+            if self.delivered.insert(id) {
+                cx.indicate(Ind::Deliver { from, msg: payload });
+            }
+        }
+        self.inbox = inbox;
+    }
+}
+
+impl<P: Clone> Protocol for PerfectLink<P> {
+    type Cmd = Cmd<P>;
+    type Ind = Ind<P>;
+    type Msg = Wire<P>;
+    type Timer = Timer;
+
+    fn on_cmd(&mut self, Cmd::Send { to, msg }: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
+        self.seq += 1;
+        let id = MsgId { src: self.me, seq: self.seq };
+        let wire = Wire { id, payload: msg };
+
+        let stubborn = &mut self.stubborn;
+        let mut inbox = core::mem::take(&mut self.inbox);
+        // The child's Msg is this protocol's Msg — the stubborn link adds nothing to the wire —
+        // so the message mapper is the identity.
+        cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
+            stubborn.on_cmd(sl::Cmd::Send { id: sl::SendId(id.seq), to, msg: wire }, ccx)
+        });
+        self.inbox = inbox;
+        self.consume_inbox(cx);
+    }
+
+    fn on_msg(&mut self, from: NodeId, msg: Wire<P>, cx: &mut ProtoCx<'_, Self>) {
+        let stubborn = &mut self.stubborn;
+        let mut inbox = core::mem::take(&mut self.inbox);
+        cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
+            stubborn.on_msg(from, msg, ccx)
+        });
+        self.inbox = inbox;
+        self.consume_inbox(cx);
+    }
+
+    fn on_timer(&mut self, Timer::Stubborn(token): Timer, cx: &mut ProtoCx<'_, Self>) {
+        let stubborn = &mut self.stubborn;
+        let mut inbox = core::mem::take(&mut self.inbox);
+        cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
+            stubborn.on_timer(token, ccx)
+        });
+        self.inbox = inbox;
+        self.consume_inbox(cx);
+    }
+}

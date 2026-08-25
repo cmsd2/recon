@@ -38,6 +38,33 @@ impl<PM, PI, PT, CM, CI, CT> EffectSink<CM, CI, CT> for MapSink<'_, PM, PI, PT, 
     }
 }
 
+/// Translates a child's outgoing effects, but hands its indications back to the parent.
+///
+/// A parent almost never wants to forward a child's indications untouched: the child reporting
+/// "a message arrived" is an *input* to the parent's logic, not an output of it. The parent
+/// cannot react during the call — it is already borrowed by the child — so indications are
+/// collected and processed once the child returns.
+struct ConsumeSink<'p, 'c, PM, PI, PT, CM, CI, CT> {
+    parent: &'p mut dyn EffectSink<PM, PI, PT>,
+    collected: &'c mut Vec<CI>,
+    msg: fn(CM) -> PM,
+    timer: fn(CT) -> PT,
+}
+
+impl<PM, PI, PT, CM, CI, CT> EffectSink<CM, CI, CT>
+    for ConsumeSink<'_, '_, PM, PI, PT, CM, CI, CT>
+{
+    fn emit(&mut self, effect: Effect<CM, CI, CT>) {
+        match effect {
+            Effect::Send { to, msg } => self.parent.emit(Effect::Send { to, msg: (self.msg)(msg) }),
+            Effect::SetTimer { after, token } => {
+                self.parent.emit(Effect::SetTimer { after, token: (self.timer)(token) })
+            }
+            Effect::Indicate(ind) => self.collected.push(ind),
+        }
+    }
+}
+
 /// A protocol's window onto the world.
 ///
 /// Supplies the current time and a seeded randomness source, and receives every effect the
@@ -95,6 +122,24 @@ impl<'a, M, I, T> Cx<'a, M, I, T> {
     ) {
         let mut mapped = MapSink { parent: &mut *self.sink, msg, ind, timer };
         let mut child = Cx { sink: &mut mapped, now: self.now, rng: &mut *self.rng };
+        f(&mut child);
+    }
+
+    /// Run `f` against a child's context, forwarding what it sends and schedules but collecting
+    /// its indications into `collected` for this protocol to handle itself.
+    ///
+    /// This is the usual shape. A child's indication is the parent's input — the stubborn link
+    /// reporting a delivery is what the perfect link deduplicates — so it must be consumed, not
+    /// passed through. `collected` belongs to the caller and is reused across events.
+    pub fn with_child_consuming<CM, CI, CT>(
+        &mut self,
+        msg: fn(CM) -> M,
+        timer: fn(CT) -> T,
+        collected: &mut Vec<CI>,
+        f: impl FnOnce(&mut Cx<'_, CM, CI, CT>),
+    ) {
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg, timer };
+        let mut child = Cx { sink: &mut sink, now: self.now, rng: &mut *self.rng };
         f(&mut child);
     }
 }
