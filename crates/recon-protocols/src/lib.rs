@@ -8,8 +8,10 @@
 
 pub mod best_effort_broadcast;
 pub mod perfect_link;
+pub mod reliable_broadcast;
 pub mod stubborn_link;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
 pub use perfect_link::PerfectLink;
+pub use reliable_broadcast::ReliableBroadcast;
 pub use stubborn_link::StubbornLink;

@@ -105,10 +105,25 @@ impl<P> PerfectLink<P> {
 }
 
 impl<P: Clone> PerfectLink<P> {
-    /// Apply what the stubborn link reported: keep the first copy of each identifier, drop the
-    /// rest.
-    fn consume_inbox(&mut self, cx: &mut ProtoCx<'_, Self>) {
+    /// Run the child, then apply what it reported: keep the first copy of each identifier and
+    /// drop the rest.
+    ///
+    /// Every handler is this, differing only in which child method it calls. Collecting the
+    /// ceremony here rather than repeating it three times is what keeps the handlers readable —
+    /// and it leaves the borrow structure visible in one place instead of hiding it in a macro.
+    fn with_stubborn(
+        &mut self,
+        cx: &mut ProtoCx<'_, Self>,
+        f: impl FnOnce(&mut StubbornLink<Wire<P>>, &mut ProtoCx<'_, StubbornLink<Wire<P>>>),
+    ) {
         let mut inbox = core::mem::take(&mut self.inbox);
+        inbox.clear();
+        {
+            let stubborn = &mut self.stubborn;
+            cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
+                f(stubborn, ccx)
+            });
+        }
         for ind in inbox.drain(..) {
             let sl::Ind::Deliver { from, msg: Wire { id, payload } } = ind;
             if self.delivered.insert(id) {
@@ -129,35 +144,16 @@ impl<P: Clone> Protocol for PerfectLink<P> {
         self.seq += 1;
         let id = MsgId { src: self.me, seq: self.seq };
         let wire = Wire { id, payload: msg };
-
-        let stubborn = &mut self.stubborn;
-        let mut inbox = core::mem::take(&mut self.inbox);
-        // The child's Msg is this protocol's Msg — the stubborn link adds nothing to the wire —
-        // so the message mapper is the identity.
-        cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
-            stubborn.on_cmd(sl::Cmd::Send { id: sl::SendId(id.seq), to, msg: wire }, ccx)
+        self.with_stubborn(cx, |sl, ccx| {
+            sl.on_cmd(sl::Cmd::Send { id: sl::SendId(id.seq), to, msg: wire }, ccx)
         });
-        self.inbox = inbox;
-        self.consume_inbox(cx);
     }
 
     fn on_msg(&mut self, from: NodeId, msg: Wire<P>, cx: &mut ProtoCx<'_, Self>) {
-        let stubborn = &mut self.stubborn;
-        let mut inbox = core::mem::take(&mut self.inbox);
-        cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
-            stubborn.on_msg(from, msg, ccx)
-        });
-        self.inbox = inbox;
-        self.consume_inbox(cx);
+        self.with_stubborn(cx, |sl, ccx| sl.on_msg(from, msg, ccx));
     }
 
     fn on_timer(&mut self, Timer::Stubborn(token): Timer, cx: &mut ProtoCx<'_, Self>) {
-        let stubborn = &mut self.stubborn;
-        let mut inbox = core::mem::take(&mut self.inbox);
-        cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
-            stubborn.on_timer(token, ccx)
-        });
-        self.inbox = inbox;
-        self.consume_inbox(cx);
+        self.with_stubborn(cx, |sl, ccx| sl.on_timer(token, ccx));
     }
 }
