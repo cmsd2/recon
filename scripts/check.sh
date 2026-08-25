@@ -30,6 +30,7 @@ run "cargo build" build
 run "cargo test" tests
 run "ordered maps" ./scripts/check-ordered-maps.sh
 run "error types"  ./scripts/check-error-types.sh
+run "no transport" ./scripts/check-no-transport.sh
 
 printf '\n========================================\n'
 if [ "$fail" -ne 0 ]; then

@@ -2,29 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Status: the tree is empty on purpose
+## What this is
 
-There is no Rust code in this repository right now. The `clean-slate` branch deliberately
-removed the previous implementation (three crates plus an archived gossip prototype) rather
-than porting it. `docs/postmortem.md` is the governing document for what comes next — read it
-before proposing architecture, because the *ordering* it prescribes is the entire point of the
-restart.
+Distributed message-passing algorithms — broadcast, failure detection, consensus — written in
+Rust so that the code reads as the algorithm. `docs/postmortem.md` governs the ordering, and the
+ordering is the entire point: the first attempt spent seventeen months on the transport layer,
+wrote the connection manager four separate times, and never reached the algorithms.
 
-The short version: this project is for writing distributed message-passing algorithms —
-broadcast, failure detection, consensus — in Rust, in a form where the code reads as the
-algorithm. The first attempt spent seventeen months on the transport layer, wrote the
-connection manager four separate times, and never reached the algorithms.
+Three crates, all of them sans-IO:
+
+- **`recon-core`** — the `Protocol` trait, the effect vocabulary, `Cx`, `Time`, error conventions.
+- **`recon-sim`** — the deterministic simulator. It *is* the fair-loss network, and it is the
+  project's standard of evidence.
+- **`recon-protocols`** — the ladder so far: stubborn link, perfect link, best-effort broadcast.
+
+Rungs are transcribed from Cachin, Guerraoui & Rodrigues, with the pseudocode quoted in each
+module's documentation and every departure from the page stated and justified there.
 
 ## Commands
 
-There is no Cargo project yet, so there is nothing to build or test. Do not invent
-`cargo` invocations for crates that do not exist; check `ls` and `git ls-files` first.
-
-What does work today:
-
 ```bash
-openspec --version          # 1.10.0, installed globally via volta
+./scripts/check.sh                      # everything, and the gate for every commit
+cargo test --workspace
+cargo test -p recon-protocols --test perfect_link          # one suite
+cargo test -p recon-protocols --test method                # the method's own tests
+cargo test -p recon-sim -- the_same_seed                   # by name
+openspec --version                      # 1.10.0, installed globally via volta
 ```
+
+Nothing opens a socket and nothing spawns a runtime; the whole suite runs in-process.
 
 In Claude Code, OpenSpec is driven by slash commands (note the colon):
 
@@ -61,8 +67,20 @@ Rules, not preferences:
 - **`cargo fmt` before every commit.** `rustfmt.toml` sets `use_small_heuristics = "Max"`
   so short struct literals stay on one line — the defaults pull effect and message
   constructions apart, which works against code meant to read as the algorithm.
-- **Guards are part of the build.** They encode two failure modes that are silent at runtime
-  rather than loud, which is exactly why they are mechanical checks and not review notes.
+- **Guards are part of the build.** They encode failure modes that are silent at runtime rather
+  than loud, which is exactly why they are mechanical checks and not review notes.
+
+Four guards run, and each exists because of a specific way this project has failed or could:
+
+| Guard | Forbids | Because |
+|---|---|---|
+| `check-ordered-maps.sh` | `HashMap` / `HashSet` in the three crates | iteration order varies per process and silently breaks seed reproducibility |
+| `check-error-types.sh` | `io::Error` for domain failures, and the literal `"json decoding error"` | the first attempt flattened seven distinct failures into one string |
+| `check-no-transport.sh` | sockets, async runtimes, `.await` | constraint 1 — the failure mode that consumed seventeen months |
+| `cargo clippy -D warnings` | any lint | warnings accumulate into noise and hide real diagnostics |
+
+`check-no-transport.sh` is meant to be **deleted deliberately**, in the commit that introduces
+transport under constraint 5. Do not weaken it; delete it, or leave it alone.
 
 ## The constraints that govern the rewrite
 
@@ -99,6 +117,25 @@ each one exists because its absence killed the first attempt.
    the milestone that proves the composition model holds.
 
 Errors get `thiserror` types per layer. The string `"json decoding error"` should never appear.
+
+## Conventions this code already follows
+
+- **Ordered maps only** in protocol and simulator state. Enforced; see the table above.
+- **`Time` is a newtype over `Duration`**, not `Instant` — an instant cannot be constructed at an
+  arbitrary value, and a run must be replayable. `Duration` is fine and is used directly for spans.
+- **Composition picks one of two forms**, and which one is decided by a single question: does the
+  layer transform its child's indications, or pass them on? Forwarding layers use
+  `Cx::with_child`; transforming layers use `Cx::with_child_consuming`, which collects the child's
+  indications for the parent to handle after the child call returns.
+- **Wire types nest, and are encoded exactly once** at the bottom boundary. No intermediate
+  representation is ever materialised — that, not nesting, is what cost the first attempt.
+- **A layer that adds no per-hop state adds no wire field.** Three protocols currently share one
+  header, the perfect link's message identifier.
+- **Departures from the book are documented in the module**, with the pseudocode quoted above the
+  implementation so the two can be read against each other.
+- **Every property test asserts non-vacuity.** An absence-of-violation property is satisfied by a
+  protocol that does nothing; `crates/recon-protocols/tests/method.rs` demonstrates that and
+  guards against it.
 
 ## Guarantees are conditional — read `docs/conditional-guarantees.md`
 

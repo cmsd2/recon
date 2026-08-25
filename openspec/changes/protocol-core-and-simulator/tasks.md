@@ -90,10 +90,10 @@
 
 ## 8. Recording what was learned
 
-- [ ] 8.1 Record the composition boilerplate actually observed across the two re-wrap boundaries —
+- [x] 8.1 Record the composition boilerplate actually observed across the two re-wrap boundaries —
       what repeated, how many lines, and whether it was mechanical; deliver as notes in the change
       so the eventual macro decision rests on measurement rather than anticipation
-- [ ] 8.2 Confirm the change opened no sockets and added no async runtime; verify by inspecting the
+- [x] 8.2 Confirm the change opened no sockets and added no async runtime; verify by inspecting the
       dependency tree and searching the tree for socket and runtime references
-- [ ] 8.3 Update `CLAUDE.md` with any standing rules this change establishes — at minimum the
+- [x] 8.3 Update `CLAUDE.md` with any standing rules this change establishes — at minimum the
       ordered-map requirement from task 1.4; verify the file reflects them
