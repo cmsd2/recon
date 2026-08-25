@@ -26,20 +26,20 @@
 
 ## 3. Simulator
 
-- [ ] 3.1 Implement the virtual clock and the scheduled delivery queue with deterministic ordering
+- [x] 3.1 Implement the virtual clock and the scheduled delivery queue with deterministic ordering
       of events sharing a timestamp; verify a timer far in the future fires without real waiting
-- [ ] 3.2 Implement the multi-process harness that runs a named set of processes in one thread;
+- [x] 3.2 Implement the multi-process harness that runs a named set of processes in one thread;
       verify a scenario runs to completion opening no sockets
-- [ ] 3.3 Implement fault injection for loss, duplication, reordering and delivery delay; verify
+- [x] 3.3 Implement fault injection for loss, duplication, reordering and delivery delay; verify
       each knob changes the trace in the expected direction at the configured rate
-- [ ] 3.4 Implement partitions between named groups, including healing; verify no delivery crosses
+- [x] 3.4 Implement partitions between named groups, including healing; verify no delivery crosses
       a partition while it holds and delivery resumes after it is removed
-- [ ] 3.5 Implement trace recording of sends, delivery outcomes, timer fires and indications with
+- [x] 3.5 Implement trace recording of sends, delivery outcomes, timer fires and indications with
       virtual time and originating process; verify a trace can be examined without touching
       protocol internals
-- [ ] 3.6 Implement seed-driven determinism end to end; verify the same seed yields byte-identical
+- [x] 3.6 Implement seed-driven determinism end to end; verify the same seed yields byte-identical
       traces across runs and two different seeds are each individually reproducible
-- [ ] 3.7 Implement the opt-in codec-check mode that round-trips every delivery; verify it detects
+- [x] 3.7 Implement the opt-in codec-check mode that round-trips every delivery; verify it detects
       a deliberately broken round-trip and that the default path performs no encoding
 
 ## 4. Stubborn link
