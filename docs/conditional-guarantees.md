@@ -83,21 +83,35 @@ perfect link cannot tell whether its peer merely reconnected or restarted with a
 
 ## Consequences for the port
 
-The link port should distinguish two events that are easy to conflate and behave differently:
+The link port gains exactly one event:
 
-- **`SessionChanged { peer, epoch }`** — the transport re-established. The peer's state is
-  intact; what was in flight may not be. Bridgeable by resending unacknowledged messages.
-- **`PeerRestarted { peer, incarnation }`** — the peer lost its state. Its deduplication set is
-  gone, so resending may now produce duplicates it can no longer detect. *Not* bridgeable
-  without logging.
+- **`SessionChanged { peer, epoch }`** — the transport session ended and a new one began.
+  Anything in flight may have been lost. Bridgeable by resending what was unacknowledged.
 
-Telling these apart requires the peer to advertise an incarnation number that survives across
-its own restarts — the same device as a boot id or a session id in real systems. Without it, a
-reconnect and a restart are indistinguishable, and only the pessimistic reading is safe.
+**And no more than that.** It is tempting to add a second event distinguishing "the peer
+reconnected" from "the peer restarted and forgot everything", because the two have very different
+consequences: after a restart the peer's deduplication set is gone, so resending may produce
+duplicates it can no longer detect. But a link cannot tell them apart. On the wire a reconnect
+looks identical whether the peer rebooted or a switch blipped. Distinguishing them requires the
+peer to advertise an incarnation identifier that is monotonic across its own restarts, which
+requires stable storage at the peer and a handshake to convey it — none of which is a transport
+concern. A link reporting a peer restart would be asserting something it has no means to know.
 
-Both variants should be **additive**: the textbook implementation over the simulator never emits
-them, so every existing proof and test stays valid, while every layer written from now on is
-forced to decide what it does about them.
+This is the reason the higher protocols carry epochs of their own. View numbers in viewstamped
+replication, terms in Raft, and incarnation numbers in gossip membership are not transport facts
+relayed upward; they exist at that level *because* the level below cannot supply them, and must
+be obtained instead from persistence or from agreement. `scope-annotated-modules.md` makes this
+precise as Theorem 8 and its corollaries.
+
+There is a second conflation worth avoiding. The scope of "no duplication" is the **local**
+process's incarnation, not the peer's: it is *my* deduplication set that is volatile, so it is
+*my* restart that lets me deliver again. That boundary needs no event at all — it is the
+process's own `⟨Init⟩`, which the book's notation already has, and there is nobody to notify,
+because the process that would raise the event is the one that ceased to exist.
+
+`SessionChanged` should be **additive**: the textbook implementation over the simulator never
+emits it, so every existing proof and test stays valid, while every layer written from now on is
+forced to decide what it does about it.
 
 ## What the simulator cannot currently express
 
@@ -170,22 +184,22 @@ Events:
     Request:    ⟨ pl, Send | q, m ⟩
     Indication: ⟨ pl, Deliver | p, m ⟩
     Indication: ⟨ pl, SessionChanged | q, e ⟩     ends session(q)
-    Indication: ⟨ pl, PeerRestarted  | q, i ⟩     ends incarnation(q)
 
 Properties:
-    PL1 [session(q)]      Reliable delivery: if a correct p sends m to a correct q,
-                          then q eventually delivers m.
-    PL2 [incarnation(q)]  No duplication: no message is delivered by a process more
-                          than once.
-    PL3 [always]          No creation: if q delivers m with sender p, then m was
-                          previously sent to q by p.
+    PL1 [session(q)]   Reliable delivery: if a correct p sends m to a correct q,
+                       then q eventually delivers m.
+    PL2 [incarnation]  No duplication: no message is delivered by a process more
+                       than once.
+    PL3 [always]       No creation: if q delivers m with sender p, then m was
+                       previously sent to q by p.
 
 Bridges:
-    session(q)      by retaining unacknowledged messages in memory and resending them,
-                    restoring PL1 across the boundary.
+    session(q)   by retaining unacknowledged messages in memory and resending them,
+                 restoring PL1 across the boundary.
 Propagates:
-    incarnation(q)  cannot restore PL2 once a peer has forgotten what it delivered;
-                    raises PeerRestarted and leaves the decision to the layer above.
+    nothing      the incarnation boundary is this process's own ⟨Init⟩; there is
+                 nobody to notify, and the peer's incarnation is not observable
+                 from here at all.
 ```
 
 ### How to read a scope tag
@@ -260,7 +274,7 @@ The session-aware version declares what it is bounded by, and handles it:
 
 ```rust
 impl Protocol for SessionLink<P> {
-    type Scope = SessionScope;                    // SessionChanged | PeerRestarted
+    type Scope = SessionScope;                    // SessionChanged, and nothing more
     fn on_scope_end(&mut self, s: SessionScope, cx: &mut ProtoCx<'_, Self>) { … }
 }
 ```

@@ -59,6 +59,16 @@ The requirement that boundaries be *marked by interface events* is not decoratio
 ending cannot be observed cannot be reacted to, cannot be tested, and cannot appear in a proof
 obligation discharged by an implementation. Section 8 returns to this.
 
+It also constrains *which* module may use a given scope.
+
+> **Definition 2a (Well-formedness).** A module may tag a property with scope S only if the ends
+> of S are determined by that module's own interface and state. A tag naming a scope the module
+> cannot detect is not merely inconvenient; the obligations of §6 cannot be discharged by any
+> implementation of it.
+
+Well-formedness is what keeps a scope annotation from becoming a way to smuggle requirements into
+a layer that has no means to meet them. Theorem 8 shows the condition has teeth.
+
 > **Definition 3 (Scoped property).** σ ⊨ P[S]  ⟺  ∀ I ∈ I_S(σ). P(σ, I).
 
 > **Definition 4 (The trivial scope).** `always` is the scope with I_always(σ) = {[0,∞)} for
@@ -240,7 +250,38 @@ than as an observation.
 
 > **Corollary 7.2 (Tightness).** `PL2 [incarnation]` is the strongest tag a perfect link with a
 > volatile deduplication set can carry. Taking K to be the set of already-delivered identifiers
-> and X to be that set, Theorem 7 forbids `PL2 [always]`.
+> and X to be that set, Theorem 7 forbids `PL2 [always]`. Note that the incarnation here is the
+> *delivering* process's own: the set that would have to survive is its own, and the boundary is
+> its own `⟨Init⟩`.
+
+Theorem 7 bounds what a layer can *repair*. A second bound, in the same style, limits what a layer
+can even *notice* — and it is the reason Definition 2a is a restriction rather than a formality.
+
+> **Theorem 8 (Detection requires durable identity).** Let L be a layer whose interface carries
+> only messages exchanged with a peer q and the establishment and loss of transport sessions with
+> q. Then L cannot distinguish an execution in which q's session was re-established from one in
+> which q restarted, unless q's messages carry an identifier that is monotonic across q's restarts.
+>
+> *Proof.* Suppose no such identifier is carried. Construct σ₁ in which the session with q is lost
+> and re-established while q retains its state, and σ₂ in which q crashes, restarts, and a session
+> is established with the fresh q. Choose them to agree on every event at L's interface: the same
+> session loss, the same re-establishment, and the same subsequent messages — possible because
+> nothing in those events is a function of q's state. L's behaviour is a function of its interface
+> events and its own state, which coincide; so L behaves identically. Hence L does not distinguish
+> them. ∎
+
+> **Corollary 8.1 (The link is the wrong layer).** `PeerRestarted` is not a well-formed scope
+> boundary for a point-to-point link. By Theorem 8 it could be detected only from an incarnation
+> identifier supplied by the peer; by Theorem 7 that identifier must survive the peer's own
+> incarnation, so it requires stable storage at the peer and a handshake to convey it — neither of
+> which is in a link's interface. A link may therefore report that a session ended, and nothing
+> more, because a session ending is all it observes.
+
+> **Corollary 8.2 (Why the upper layers carry epochs).** A layer that must distinguish a restarted
+> peer has to supply the identifier itself: persisted at each process, or agreed among them. This
+> is what view numbers in viewstamped replication, terms in Raft, and incarnation numbers in
+> gossip membership protocols are. They are not transport facts that the upper layers relay; they
+> exist at that level precisely because Theorem 8 forbids obtaining them from below.
 
 ---
 
@@ -270,9 +311,11 @@ leaving it implicit — which, in the unannotated notation, is what happens.
   pretending otherwise. What it adds is a construction, a syntactic link to the interface, and the
   separation of Proposition 3.
 - **It decides nothing new.** No verification problem becomes tractable that was not.
-- **It requires scopes to be observable.** Definition 2 insists boundaries are interface events.
-  A scope that cannot be observed cannot be discharged by an implementation nor exercised by a
-  test, and tagging with one would be decoration.
+- **It requires scopes to be observable *by the module that names them*.** Definitions 2 and 2a
+  insist boundaries are interface events of the declaring module. A scope that module cannot
+  observe cannot be discharged by any implementation of it nor exercised by a test, and tagging
+  with one would be a claim to knowledge the layer has no means to hold — Corollary 8.1 is the
+  worked case.
 - **It says nothing about probabilistic or partial scope endings** — a session degrading rather
   than ending, a process partially losing state. Both are real and both are outside this.
 - **The composition rules assume a refinement chain.** Theorems 5 and 6 use S_N ⊑ S_M. Scopes that
@@ -287,32 +330,39 @@ leaving it implicit — which, in the unannotated notation, is what happens.
 Module 2.3′: Perfect point-to-point links
 
 Scopes:
-    session(q)       transport session with q; ends on reconnect
-    incarnation(p)   p's volatile state; ends when p restarts
-                     session(q) ⊑ incarnation(p) ⊑ always
+    session(q)     transport session with q; ends when the session is lost
+    incarnation    this process's volatile state; ends at its own ⟨Init⟩
+                   session(q) ⊑ incarnation ⊑ always
 
 Events:
     Request:    ⟨ pl, Send | q, m ⟩
     Indication: ⟨ pl, Deliver | p, m ⟩
     Indication: ⟨ pl, SessionChanged | q, e ⟩     ends session(q)
-    Indication: ⟨ pl, PeerRestarted  | q, i ⟩     ends incarnation(q)
 
 Properties:
-    PL1 [session(q)]      Reliable delivery
-    PL2 [incarnation(q)]  No duplication
-    PL3 [always]          No creation
+    PL1 [session(q)]   Reliable delivery
+    PL2 [incarnation]  No duplication
+    PL3 [always]       No creation
 
 Bridges:    session(q), by retaining unacknowledged messages in memory (Theorem 7,
             first case) and resending after SessionChanged — discharging BRIDGE's
             stitching obligation for PL1.
-Propagates: incarnation(q). By Corollary 7.2 the tag cannot be strengthened without
-            stable storage, so PeerRestarted is raised and the decision left above.
+Propagates: nothing. The incarnation boundary is this process's own ⟨Init⟩; there is
+            nobody to notify, because the process that would have raised the event
+            is the one that ceased to exist.
 ```
 
 Three properties, three tags, and the reason for each is a theorem rather than a preference. PL3
 is `[always]` by Lemma 4, being subinterval-closed and holding globally. PL1 is `[session]` because
 bridging it further would require stitching the book does not perform. PL2 is `[incarnation]` and
 tight by Corollary 7.2.
+
+Note what the module does **not** declare. There is no `PeerRestarted`, and no scope naming the
+peer's incarnation. By Corollary 8.1 a link cannot observe one, so by Definition 2a it may not tag
+anything with it; and a link that reported it anyway would be asserting something it has no means
+to know. The most a link can say is that a session ended. A layer needing more must, by
+Corollary 8.2, obtain it from persistence or from agreement — which is what the epoch, view and
+term numbers of the higher protocols are for.
 
 The book's Module 2.3 is the special case in which every tag reads `always` and the two extra
 indications are absent — which by Corollary 1.1 is the book's module exactly, with the book's
