@@ -326,6 +326,8 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
     type Ind = Ind<P>;
     type Msg = Wire<P>;
     type Timer = Timer;
+    /// No scope conditions: this protocol's guarantees do not lapse.
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {

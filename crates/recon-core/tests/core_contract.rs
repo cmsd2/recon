@@ -32,6 +32,7 @@ impl Protocol for Echo {
     type Ind = Echoed;
     type Msg = Ping;
     type Timer = Tick;
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, Ping(n): Ping, cx: &mut ProtoCx<'_, Self>) {
         cx.send(B, Ping(n));
@@ -96,6 +97,7 @@ impl Protocol for Chooser {
     type Ind = Chose;
     type Msg = ();
     type Timer = ();
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, Choose: Choose, cx: &mut ProtoCx<'_, Self>) {
         let pick: u32 = cx.rng().random_range(0..1_000_000);
@@ -184,6 +186,7 @@ impl Protocol for Wrapper {
     type Ind = WrapInd;
     type Msg = WrapMsg;
     type Timer = WrapTimer;
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
@@ -252,6 +255,7 @@ impl Protocol for Outer {
     type Ind = OuterInd;
     type Msg = OuterMsg;
     type Timer = OuterTimer;
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
@@ -368,4 +372,189 @@ fn mapping_preserves_effect_shape() {
         e.map(|m| m, |i| i, |t| t + 1),
         Effect::SetTimer { after: Duration::ZERO, token: 2 }
     );
+}
+
+// ------------------------------- Scopes: tasks 1.1 to 1.3
+
+/// A protocol whose guarantee lapses when a named condition ends.
+#[derive(Default)]
+struct Scoped {
+    lapses: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WindowClosed(u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Lapsed(u32);
+
+impl Protocol for Scoped {
+    type Cmd = ();
+    type Ind = Lapsed;
+    type Msg = ();
+    type Timer = ();
+    type Scope = WindowClosed;
+
+    fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+
+    fn on_scope_end(&mut self, WindowClosed(n): WindowClosed, cx: &mut ProtoCx<'_, Self>) {
+        self.lapses += 1;
+        cx.indicate(Lapsed(n));
+    }
+}
+
+#[test]
+fn a_protocol_with_a_scope_handles_its_ending() {
+    let mut p = Scoped::default();
+    let fx = step(&mut p, Event::ScopeEnd(WindowClosed(7)), Time::ZERO, &mut rng(0));
+    assert_eq!(fx, vec![Effect::Indicate(Lapsed(7))]);
+    assert_eq!(p.lapses, 1);
+}
+
+#[test]
+fn a_protocol_with_no_scopes_cannot_be_given_an_ending() {
+    // `Echo` declares `type Scope = Infallible`, and an uninhabited type has no values — so
+    // `Event::ScopeEnd(..)` cannot be constructed for it. The absence is checked by the compiler
+    // rather than trusted, which is what a `#[allow]` or a runtime panic would not give.
+    //
+    // The nearest expressible statement is that any such value would be absurd:
+    fn _absurd(s: <Echo as Protocol>::Scope) -> ! {
+        match s {}
+    }
+
+    // And that the default handler, being unreachable, leaves the protocol untouched.
+    let mut p = Echo::default();
+    assert_eq!(p.seen, 0);
+    let fx = step(&mut p, Event::Msg { from: A, msg: Ping(1) }, Time::ZERO, &mut rng(0));
+    assert_eq!(fx, vec![Effect::Indicate(Echoed(1))]);
+}
+
+/// A parent that *bridges*: it handles its child's scope ending and restores the guarantee, so
+/// the layer above hears nothing about it.
+struct Bridger {
+    child: Scoped,
+    repaired: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgerScope {
+    Child(WindowClosed),
+}
+
+impl Protocol for Bridger {
+    type Cmd = ();
+    type Ind = ();
+    type Msg = ();
+    type Timer = ();
+    type Scope = BridgerScope;
+
+    fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+
+    fn on_scope_end(&mut self, BridgerScope::Child(w): BridgerScope, cx: &mut ProtoCx<'_, Self>) {
+        // Route down. The child's indications are consumed, not forwarded — this parent repairs
+        // the lapse itself and says nothing upward.
+        let child = &mut self.child;
+        let mut inbox: Vec<Lapsed> = Vec::new();
+        cx.with_child_consuming(
+            |_: ()| (),
+            |_: ()| (),
+            &mut inbox,
+            |ccx| child.on_scope_end(w, ccx),
+        );
+        self.repaired += inbox.len() as u32;
+    }
+}
+
+/// A parent that *propagates*: it cannot restore the guarantee, so it reports one of its own.
+struct Propagator {
+    child: Scoped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropagatorScope {
+    Child(WindowClosed),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MyGuaranteeLapsed(u32);
+
+impl Protocol for Propagator {
+    type Cmd = ();
+    type Ind = MyGuaranteeLapsed;
+    type Msg = ();
+    type Timer = ();
+    type Scope = PropagatorScope;
+
+    fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+
+    fn on_scope_end(
+        &mut self,
+        PropagatorScope::Child(w): PropagatorScope,
+        cx: &mut ProtoCx<'_, Self>,
+    ) {
+        let child = &mut self.child;
+        let mut inbox: Vec<Lapsed> = Vec::new();
+        cx.with_child_consuming(
+            |_: ()| (),
+            |_: ()| (),
+            &mut inbox,
+            |ccx| child.on_scope_end(w, ccx),
+        );
+        // Re-stated in this layer's own terms rather than forwarded verbatim.
+        for Lapsed(n) in inbox {
+            cx.indicate(MyGuaranteeLapsed(n));
+        }
+    }
+}
+
+#[test]
+fn a_parent_that_bridges_absorbs_the_ending() {
+    let mut p = Bridger { child: Scoped::default(), repaired: 0 };
+    let fx = step(
+        &mut p,
+        Event::ScopeEnd(BridgerScope::Child(WindowClosed(3))),
+        Time::ZERO,
+        &mut rng(0),
+    );
+    assert_eq!(fx, vec![], "a parent that repairs the lapse says nothing upward");
+    assert_eq!(p.repaired, 1, "but it did see it");
+    assert_eq!(p.child.lapses, 1);
+}
+
+#[test]
+fn a_parent_that_cannot_bridge_propagates_in_its_own_terms() {
+    let mut p = Propagator { child: Scoped::default() };
+    let fx = step(
+        &mut p,
+        Event::ScopeEnd(PropagatorScope::Child(WindowClosed(3))),
+        Time::ZERO,
+        &mut rng(0),
+    );
+    assert_eq!(
+        fx,
+        vec![Effect::Indicate(MyGuaranteeLapsed(3))],
+        "reported as this layer's own lapse, not as the child's"
+    );
+}
+
+#[test]
+fn scope_endings_route_downward_like_messages() {
+    // The routing shape: a parent matches its own scope enum and calls the child, exactly as
+    // on_msg and on_timer do. No new composition primitive was needed for the downward path.
+    let mut p = Propagator { child: Scoped::default() };
+    for i in 0..3 {
+        step(
+            &mut p,
+            Event::ScopeEnd(PropagatorScope::Child(WindowClosed(i))),
+            Time::ZERO,
+            &mut rng(0),
+        );
+    }
+    assert_eq!(p.child.lapses, 3);
 }

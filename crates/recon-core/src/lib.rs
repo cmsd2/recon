@@ -14,10 +14,12 @@ pub mod effect;
 pub mod error;
 pub mod node;
 pub mod protocol;
+pub mod session;
 pub mod time;
 
 pub use cx::{Cx, EffectSink};
 pub use effect::Effect;
 pub use node::NodeId;
 pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step};
+pub use session::SessionEnded;
 pub use time::Time;

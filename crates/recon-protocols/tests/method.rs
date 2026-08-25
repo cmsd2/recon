@@ -243,6 +243,7 @@ impl Protocol for Silent {
     type Ind = Ind<u32>;
     type Msg = pl::Wire<u32>;
     type Timer = ();
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: Cmd<u32>, _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: pl::Wire<u32>, _: &mut ProtoCx<'_, Self>) {}
@@ -290,6 +291,7 @@ impl Protocol for Defective {
     type Ind = Ind<u32>;
     type Msg = pl::Wire<u32>;
     type Timer = <BestEffortBroadcast<u32> as Protocol>::Timer;
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<u32>, cx: &mut ProtoCx<'_, Self>) {
         use rand::Rng;

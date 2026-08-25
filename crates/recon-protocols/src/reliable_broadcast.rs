@@ -199,6 +199,8 @@ impl<P: Clone> Protocol for ReliableBroadcast<P> {
     type Ind = Ind<P>;
     type Msg = Wire<P>;
     type Timer = Timer;
+    /// No scope conditions: this protocol's guarantees do not lapse.
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

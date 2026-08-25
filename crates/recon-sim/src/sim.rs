@@ -10,7 +10,7 @@ use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
-use recon_core::{Cx, Effect, NodeId, Protocol, Time};
+use recon_core::{Cx, Effect, NodeId, Protocol, SessionEnded, Time};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Round-trips one message through the wire codec, when codec checking is enabled.
@@ -21,6 +21,7 @@ enum Scheduled<P: Protocol> {
     Deliver { from: NodeId, to: NodeId, msg: P::Msg },
     Timer { node: NodeId, token: P::Timer },
     Command { node: NodeId, cmd: P::Cmd },
+    ScopeEnd { node: NodeId, scope: P::Scope },
 }
 
 /// Whether a process is handling events, and if not, why.
@@ -58,6 +59,17 @@ pub struct Sim<P: Protocol> {
     deferred: Vec<(NodeId, P::Timer)>,
     /// Rebuilds a process after a crash, since a crash loses volatile state.
     make: Box<dyn FnMut(NodeId) -> P>,
+    /// The current epoch of the session between each pair, keyed by the pair in sorted order.
+    /// Absent means no session has been established yet.
+    sessions: BTreeMap<(NodeId, NodeId), u64>,
+    /// The next epoch to hand out for each pair, so epochs increase across re-establishment.
+    next_epoch: BTreeMap<(NodeId, NodeId), u64>,
+    /// The last time anything was delivered from one process to another, so that a message is
+    /// never delivered before one sent earlier the same way. This is what makes a session FIFO.
+    last_delivery: BTreeMap<(NodeId, NodeId), Time>,
+    /// Turns a session ending into whatever the protocol calls a scope. Absent unless the
+    /// protocol opted in, exactly as the codec check does.
+    session_scope: Option<fn(SessionEnded) -> P::Scope>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
     effects: Vec<Effect<P::Msg, P::Ind, P::Timer>>,
     codec_check: Option<CodecCheck<P::Msg>>,
@@ -92,6 +104,10 @@ where
             partitions: None,
             deferred: Vec::new(),
             make: Box::new(make),
+            sessions: BTreeMap::new(),
+            next_epoch: BTreeMap::new(),
+            last_delivery: BTreeMap::new(),
+            session_scope: None,
             trace: Trace::default(),
             effects: Vec::new(),
             codec_check: None,
@@ -150,6 +166,9 @@ where
             return;
         }
         self.discard_timers_of(node);
+        if self.config.is_session_based() {
+            self.end_sessions_of(node);
+        }
         let at = self.now;
         self.trace.push(TraceEvent::Crashed { at, node });
     }
@@ -219,6 +238,9 @@ where
     pub fn partition(&mut self, groups: &[&[NodeId]]) {
         self.partitions =
             Some(groups.iter().map(|g| g.iter().copied().collect::<BTreeSet<_>>()).collect());
+        if self.config.is_session_based() {
+            self.end_severed_sessions();
+        }
     }
 
     /// Remove any partition, restoring full connectivity.
@@ -263,6 +285,12 @@ where
                     return;
                 }
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
+            }
+            Scheduled::ScopeEnd { node, scope } => {
+                if self.crashed(node) {
+                    return;
+                }
+                self.run_handler(node, |p, cx| p.on_scope_end(scope, cx));
             }
             Scheduled::Timer { node, token } => {
                 if self.suspended(node) {
@@ -369,6 +397,21 @@ where
             return;
         }
 
+        if self.config.is_session_based() {
+            if !self.ensure_session(from, to) {
+                let reason = if self.crashed(to) {
+                    DropReason::RecipientCrashed
+                } else {
+                    DropReason::Partitioned
+                };
+                self.trace.push(TraceEvent::Dropped { at, from, to, msg, reason });
+                return;
+            }
+            let deliver_at = self.session_delivery_time(from, to);
+            self.schedule(deliver_at, Scheduled::Deliver { from, to, msg });
+            return;
+        }
+
         let synchronous = self.config.is_synchronous();
 
         if !synchronous && self.config.loss > 0.0 && self.rng.random::<f64>() < self.config.loss {
@@ -437,5 +480,161 @@ where
     /// without paying for it on every run.
     pub fn enable_codec_check(&mut self) {
         self.codec_check = Some(crate::codec::round_trip);
+    }
+}
+
+fn pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
+    if a <= b { (a, b) } else { (b, a) }
+}
+
+impl<P> Sim<P>
+where
+    P: Protocol,
+    P::Msg: Clone + PartialEq,
+    P::Ind: Clone,
+    P::Timer: Clone,
+{
+    /// The current epoch of the session between `a` and `b`, if one is established.
+    pub fn session_epoch(&self, a: NodeId, b: NodeId) -> Option<u64> {
+        self.sessions.get(&pair(a, b)).copied()
+    }
+
+    /// End the session between `a` and `b`, discarding an unknown suffix of what was in flight.
+    ///
+    /// A new session opens at a higher epoch the next time either sends and the pair is able to
+    /// communicate.
+    pub fn break_session(&mut self, a: NodeId, b: NodeId) {
+        self.end_session(a, b, DropReason::SessionEnded);
+    }
+
+    /// Whether a session currently exists between `a` and `b`.
+    pub fn has_session(&self, a: NodeId, b: NodeId) -> bool {
+        self.sessions.contains_key(&pair(a, b))
+    }
+
+    fn end_session(&mut self, a: NodeId, b: NodeId, reason: DropReason) {
+        let key = pair(a, b);
+        let Some(epoch) = self.sessions.remove(&key) else {
+            return;
+        };
+        let at = self.now;
+
+        // Discard an unknown suffix of what was in flight, in either direction. The cut is drawn
+        // from the run's generator, so it varies with the seed and can be everything or nothing.
+        let mut inflight: Vec<(Time, u64)> = self
+            .queue
+            .iter()
+            .filter(|(_, s)| {
+                matches!(s, Scheduled::Deliver { from, to, .. } if pair(*from, *to) == key)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        inflight.sort();
+        let keep = self.rng.random_range(0..=inflight.len());
+        for k in inflight.into_iter().skip(keep) {
+            if let Some(Scheduled::Deliver { from, to, msg }) = self.queue.remove(&k) {
+                self.trace.push(TraceEvent::SuffixLost { at, from, to, msg });
+            }
+        }
+
+        // Ordering restarts with the next session.
+        self.last_delivery.remove(&(key.0, key.1));
+        self.last_delivery.remove(&(key.1, key.0));
+
+        self.trace.push(TraceEvent::SessionEnded { at, a: key.0, b: key.1, epoch, reason });
+
+        // Both endpoints are told, if they are alive to hear it.
+        if let Some(f) = self.session_scope {
+            let next = epoch + 1;
+            for (node, peer) in [(key.0, key.1), (key.1, key.0)] {
+                if !self.crashed(node) {
+                    self.schedule(
+                        at,
+                        Scheduled::ScopeEnd { node, scope: f(SessionEnded { peer, epoch: next }) },
+                    );
+                }
+            }
+        }
+    }
+
+    /// End every session involving `node`.
+    fn end_sessions_of(&mut self, node: NodeId) {
+        let peers: Vec<NodeId> = self
+            .sessions
+            .keys()
+            .filter_map(|(a, b)| {
+                if *a == node {
+                    Some(*b)
+                } else if *b == node {
+                    Some(*a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for peer in peers {
+            self.end_session(node, peer, DropReason::SessionEnded);
+        }
+    }
+
+    /// End every session that the current partitioning has severed.
+    fn end_severed_sessions(&mut self) {
+        let severed: Vec<(NodeId, NodeId)> =
+            self.sessions.keys().copied().filter(|(a, b)| !self.connected(*a, *b)).collect();
+        for (a, b) in severed {
+            self.end_session(a, b, DropReason::Partitioned);
+        }
+    }
+
+    /// Establish a session if the pair can communicate and none exists.
+    fn ensure_session(&mut self, a: NodeId, b: NodeId) -> bool {
+        let key = pair(a, b);
+        if self.sessions.contains_key(&key) {
+            return true;
+        }
+        if !self.connected(a, b) || self.crashed(a) || self.crashed(b) {
+            return false;
+        }
+        // Epochs are per pair and only ever increase, so a re-established session is
+        // distinguishable from the one it replaces.
+        let epoch = self.next_epoch.get(&key).copied().unwrap_or(1);
+        self.next_epoch.insert(key, epoch + 1);
+        self.sessions.insert(key, epoch);
+        let at = self.now;
+        self.trace.push(TraceEvent::SessionOpened { at, a: key.0, b: key.1, epoch });
+        true
+    }
+
+    /// Delivery time under a session: never before something sent earlier the same way.
+    fn session_delivery_time(&mut self, from: NodeId, to: NodeId) -> Time {
+        let lo = self.config.latency_min.as_nanos() as u64;
+        let hi = self.config.latency_max.as_nanos() as u64;
+        let base = if hi > lo { self.rng.random_range(lo..=hi) } else { lo };
+        let earliest = self.now + Duration::from_nanos(base);
+
+        let key = (from, to);
+        let at = match self.last_delivery.get(&key) {
+            Some(prev) if *prev >= earliest => *prev + Duration::from_nanos(1),
+            _ => earliest,
+        };
+        self.last_delivery.insert(key, at);
+        at
+    }
+}
+
+impl<P> Sim<P>
+where
+    P: Protocol,
+    P::Msg: Clone + PartialEq,
+    P::Ind: Clone,
+    P::Timer: Clone,
+    P::Scope: From<SessionEnded>,
+{
+    /// Deliver session endings to the protocol as scope endings.
+    ///
+    /// Opt-in, like the codec check: a protocol that declares no scopes cannot receive one, and
+    /// the bound lives only on this method so ordinary runs need nothing.
+    pub fn deliver_session_events(&mut self) {
+        self.session_scope = Some(P::Scope::from);
     }
 }

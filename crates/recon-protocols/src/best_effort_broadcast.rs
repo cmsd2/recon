@@ -89,6 +89,8 @@ impl<P: Clone> Protocol for BestEffortBroadcast<P> {
     type Ind = Ind<P>;
     type Msg = pl::Wire<P>;
     type Timer = Timer;
+    /// No scope conditions: this protocol's guarantees do not lapse.
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;

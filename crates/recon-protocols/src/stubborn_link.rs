@@ -108,6 +108,8 @@ impl<M: Clone> Protocol for StubbornLink<M> {
     type Ind = Ind<M>;
     type Msg = M;
     type Timer = Retransmit;
+    /// No scope conditions: this protocol's guarantees do not lapse.
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<M>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {

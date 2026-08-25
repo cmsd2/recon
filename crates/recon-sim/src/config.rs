@@ -31,6 +31,15 @@ pub struct Config {
     /// indistinguishable from a crashed one. It constrains *timing* only — crashes and
     /// partitions still stop delivery.
     pub synchronous: Option<Duration>,
+    /// When true, communication happens within sessions: between each pair of processes there is
+    /// a session in which delivery is reliable, ordered and free of duplicates — what TCP or QUIC
+    /// gives. A partition, a crash, or an explicit break ends it, losing an unknown suffix of what
+    /// was in flight, and a new session begins at a higher epoch.
+    ///
+    /// This is the model a deployed stack would run on. The fair-loss default is what you have if
+    /// you build reliability yourself, which is the simulator's own situation and not
+    /// production's.
+    pub sessions: bool,
     /// Safety valve: a run stops after this many events, whatever the clock says.
     ///
     /// Protocols such as the stubborn link retransmit forever by design, so a run is bounded
@@ -49,6 +58,7 @@ impl Default for Config {
             latency_max: Duration::from_millis(1),
             reorder_delay: Duration::from_millis(50),
             synchronous: None,
+            sessions: false,
             max_steps: 1_000_000,
         }
     }
@@ -114,6 +124,25 @@ impl Config {
     /// Whether this run makes a timing guarantee.
     pub fn is_synchronous(&self) -> bool {
         self.synchronous.is_some()
+    }
+
+    /// Communicate within sessions: reliable, ordered, duplicate-free delivery while a session
+    /// holds, and an unknown lost suffix when one ends.
+    ///
+    /// Overrides the loss and duplication knobs, enforced at delivery time so builder order
+    /// cannot reintroduce them. Latency still applies, but a message is never delivered before one
+    /// sent earlier to the same peer.
+    pub fn sessions(mut self) -> Self {
+        self.sessions = true;
+        self.loss = 0.0;
+        self.duplication = 0.0;
+        self.reorder = 0.0;
+        self
+    }
+
+    /// Whether this run communicates within sessions.
+    pub fn is_session_based(&self) -> bool {
+        self.sessions
     }
 
     pub fn max_steps(mut self, n: u64) -> Self {

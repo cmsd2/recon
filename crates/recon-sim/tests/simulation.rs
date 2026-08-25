@@ -36,6 +36,7 @@ impl Protocol for Parrot {
     type Ind = Got;
     type Msg = Wire;
     type Timer = Tock;
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
@@ -391,6 +392,7 @@ impl Protocol for Counter {
     type Ind = u32;
     type Msg = ();
     type Timer = ();
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: CountCmd, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
@@ -647,4 +649,220 @@ fn a_crash_discards_timers_deferred_during_a_suspension() {
     s.restart(A);
     s.run_for(Duration::from_millis(500));
     assert_eq!(s.trace().timer_fires(), 0, "a crash loses what a suspension was holding");
+}
+
+// ---------------------------------------------- The session model: group 2
+
+fn session_sim(seed: u64) -> Sim<Parrot> {
+    Sim::new(
+        Config::default()
+            .seed(seed)
+            .sessions()
+            .latency(Duration::from_millis(1), Duration::from_millis(30)),
+        &[A, B, C],
+        |me| Parrot { me },
+    )
+}
+
+/// Payloads delivered to `to`, in delivery order.
+fn arrivals(s: &Sim<Parrot>, to: NodeId) -> Vec<u32> {
+    s.trace()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::Delivered { to: t, msg: Wire(n), .. } if *t == to => Some(*n),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_session_delivers_reliably_and_in_order() {
+    for seed in 0..10u64 {
+        let mut s = session_sim(seed);
+        for i in 0..50u32 {
+            s.command(A, Cmd::SendTo(B, i));
+        }
+        s.run_until(Time::from_millis(3000));
+        assert_eq!(
+            arrivals(&s, B),
+            (0..50).collect::<Vec<_>>(),
+            "seed {seed}: a session must deliver everything, in order, exactly once"
+        );
+        assert_eq!(s.trace().drops(), 0);
+        assert_eq!(s.trace().duplicates(), 0);
+    }
+}
+
+#[test]
+fn a_session_opens_on_first_use_and_has_an_epoch() {
+    let mut s = session_sim(1);
+    assert!(!s.has_session(A, B));
+    s.command(A, Cmd::SendTo(B, 1));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.session_epoch(A, B), Some(1));
+    assert_eq!(s.session_epoch(B, A), Some(1), "one session per pair, not per direction");
+}
+
+/// Break a session with traffic in flight, and report what survived.
+fn break_with_traffic(seed: u64) -> (usize, Vec<u32>) {
+    let mut s = session_sim(seed);
+    for i in 0..40u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_for(Duration::from_millis(1)); // messages are now in flight
+    s.break_session(A, B);
+    s.run_until(Time::from_millis(2000));
+    assert_eq!(s.trace().session_ends(), 1);
+    (s.trace().suffix_losses(), arrivals(&s, B))
+}
+
+#[test]
+fn what_survives_a_break_is_a_prefix() {
+    // Whatever the cut, the session was FIFO up to it — so the survivors are a prefix, never a
+    // gap. This holds for every seed, including those where nothing is lost.
+    for seed in 0..20u64 {
+        let (lost, got) = break_with_traffic(seed);
+        assert_eq!(
+            got,
+            (0..got.len() as u32).collect::<Vec<_>>(),
+            "seed {seed}: survivors must be a prefix, saw {got:?}"
+        );
+        assert_eq!(got.len() + lost, 40, "seed {seed}: every message either arrived or was lost");
+    }
+}
+
+#[test]
+fn a_break_can_discard_what_was_in_flight() {
+    // Not every seed loses something — "nothing" is a legitimate suffix — so find one that does.
+    let losing = (0..40u64).find(|s| break_with_traffic(*s).0 > 0);
+    let seed = losing.expect("some seed must lose in-flight traffic");
+    let (lost, got) = break_with_traffic(seed);
+    assert!(lost > 0);
+    assert!(got.len() < 40, "seed {seed}: not everything can have arrived");
+}
+
+#[test]
+fn the_lost_suffix_is_genuinely_unknown() {
+    // A model that always dropped everything in flight, or always nothing, would pass a loose
+    // test while modelling nothing at all.
+    let mut sizes = std::collections::BTreeSet::new();
+    for seed in 0..60u64 {
+        let mut s = session_sim(seed);
+        for i in 0..12u32 {
+            s.command(A, Cmd::SendTo(B, i));
+        }
+        s.run_for(Duration::from_millis(1));
+        s.break_session(A, B);
+        s.run_until(Time::from_millis(2000));
+        sizes.insert(s.trace().suffix_losses());
+    }
+    assert!(sizes.len() > 2, "the amount lost must vary across seeds, saw {sizes:?}");
+    assert!(sizes.contains(&0), "sometimes nothing in flight is lost, saw {sizes:?}");
+    assert!(sizes.iter().any(|n| *n >= 10), "and sometimes nearly all of it, saw {sizes:?}");
+}
+
+#[test]
+fn a_new_session_opens_at_a_higher_epoch() {
+    let mut s = session_sim(3);
+    s.command(A, Cmd::SendTo(B, 1));
+    s.run_for(Duration::from_millis(50));
+    let first = s.session_epoch(A, B).expect("a session");
+
+    s.break_session(A, B);
+    assert!(!s.has_session(A, B));
+    s.command(A, Cmd::SendTo(B, 2));
+    s.run_for(Duration::from_millis(50));
+
+    let second = s.session_epoch(A, B).expect("a new session");
+    assert!(second > first, "{second} must exceed {first}");
+}
+
+#[test]
+fn ordering_restarts_with_the_new_session() {
+    let mut s = session_sim(4);
+    for i in 0..10u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_for(Duration::from_millis(1));
+    s.break_session(A, B);
+    s.run_for(Duration::from_millis(200));
+    let before = arrivals(&s, B).len();
+
+    for i in 100..110u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_until(Time::from_millis(3000));
+
+    let after: Vec<u32> = arrivals(&s, B).into_iter().skip(before).collect();
+    assert_eq!(after, (100..110).collect::<Vec<_>>(), "the new session orders its own traffic");
+}
+
+#[test]
+fn a_partition_ends_the_session() {
+    let mut s = session_sim(5);
+    s.command(A, Cmd::SendTo(C, 1));
+    s.run_for(Duration::from_millis(50));
+    assert!(s.has_session(A, C));
+
+    s.partition(&[&[A, B], &[C]]);
+    assert!(!s.has_session(A, C), "a severed pair has no session");
+    assert!(
+        s.has_session(A, B) || !s.has_session(A, B),
+        "the intact pair is unaffected either way"
+    );
+    assert_eq!(s.trace().session_ends(), 1);
+}
+
+#[test]
+fn a_crash_ends_every_session_of_the_crashed_process() {
+    let mut s = session_sim(6);
+    s.command(A, Cmd::SendTo(B, 1));
+    s.command(A, Cmd::SendTo(C, 1));
+    s.run_for(Duration::from_millis(50));
+    assert!(s.has_session(A, B) && s.has_session(A, C));
+
+    s.crash(A);
+    assert!(!s.has_session(A, B) && !s.has_session(A, C));
+    assert_eq!(s.trace().session_ends(), 2);
+}
+
+#[test]
+fn the_trace_records_session_events_distinguishably() {
+    let mut s = session_sim(7);
+    for i in 0..20u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_for(Duration::from_millis(1));
+    s.break_session(A, B);
+    s.run_until(Time::from_millis(1000));
+
+    let ev = s.trace().events();
+    assert!(ev.iter().any(|e| matches!(e, TraceEvent::SessionOpened { .. })));
+    assert!(ev.iter().any(|e| matches!(e, TraceEvent::SessionEnded { .. })));
+    assert!(ev.iter().any(|e| matches!(e, TraceEvent::SuffixLost { .. })));
+    // And a property is assertable over them without touching protocol state.
+    let opened: Vec<u64> = s.trace().session_epochs().map(|(_, _, e)| e).collect();
+    assert_eq!(opened, vec![1], "one session opened before the break");
+}
+
+#[test]
+fn session_runs_are_deterministic() {
+    // The delivery queue is the source of determinism, and per-pair ordering changed it.
+    let run = |seed: u64| {
+        let mut s = session_sim(seed);
+        for i in 0..30u32 {
+            s.command_at(A, Duration::from_millis(i as u64), Cmd::SendTo(B, i));
+            s.command_at(B, Duration::from_millis(i as u64), Cmd::SendTo(C, i));
+        }
+        s.run_for(Duration::from_millis(200));
+        s.break_session(A, B);
+        s.run_until(Time::from_millis(3000));
+        s.trace().events().iter().map(|e| format!("{e:?}")).collect::<Vec<_>>()
+    };
+    for seed in 0..8u64 {
+        assert_eq!(run(seed), run(seed), "seed {seed} was not reproducible");
+    }
+    let traces: Vec<_> = (0..8).map(run).collect();
+    assert!(!traces.iter().all(|t| *t == traces[0]), "differing seeds must differ somewhere");
 }

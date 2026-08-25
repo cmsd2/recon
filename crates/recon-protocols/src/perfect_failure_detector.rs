@@ -167,6 +167,8 @@ impl Protocol for PerfectFailureDetector {
     type Ind = Ind;
     type Msg = Heartbeat;
     type Timer = Tick;
+    /// No scope conditions: this protocol's guarantees do not lapse.
+    type Scope = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Start: Cmd, cx: &mut ProtoCx<'_, Self>) {
         if self.armed {
