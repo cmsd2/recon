@@ -44,11 +44,11 @@
 
 ## 4. Stubborn link
 
-- [ ] 4.1 Implement retransmission at a configured interval with an instruction to stop; verify
+- [x] 4.1 Implement retransmission at a configured interval with an instruction to stop; verify
       unit tests showing repeated transmission and cessation on stop
-- [ ] 4.2 Assert stubborn delivery over the simulator; verify a message sent between correct
+- [x] 4.2 Assert stubborn delivery over the simulator; verify a message sent between correct
       processes under heavy loss is delivered, and again after a partition heals
-- [ ] 4.3 Assert no creation over the simulator; verify every delivery in the trace corresponds to
+- [x] 4.3 Assert no creation over the simulator; verify every delivery in the trace corresponds to
       an earlier send by the named sender
 
 ## 5. Perfect link
