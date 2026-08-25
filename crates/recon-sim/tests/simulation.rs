@@ -371,3 +371,121 @@ fn a_broken_round_trip_is_reported() {
     let err = recon_sim::codec::round_trip(&Lossy(1)).expect_err("must not round-trip");
     assert!(err.to_string().contains("round trip"), "got: {err}");
 }
+
+// ------------------------------------------- Crash loses volatile state: task 3.8
+
+/// Counts what it has seen, so state loss is observable.
+struct Counter {
+    seen: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CountCmd {
+    Bump,
+    ArmTimer(Duration),
+}
+
+impl Protocol for Counter {
+    type Cmd = CountCmd;
+    type Ind = u32;
+    type Msg = ();
+    type Timer = ();
+
+    fn on_cmd(&mut self, cmd: CountCmd, cx: &mut ProtoCx<'_, Self>) {
+        match cmd {
+            CountCmd::Bump => {
+                self.seen += 1;
+                cx.indicate(self.seen);
+            }
+            CountCmd::ArmTimer(d) => cx.set_timer(d, ()),
+        }
+    }
+    fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: (), cx: &mut ProtoCx<'_, Self>) {
+        cx.indicate(u32::MAX);
+    }
+}
+
+fn counters() -> Sim<Counter> {
+    Sim::new(Config::default(), &[A, B], |_| Counter { seen: 0 })
+}
+
+#[test]
+fn a_crash_loses_volatile_state() {
+    let mut s = counters();
+    s.command(A, CountCmd::Bump);
+    s.command(A, CountCmd::Bump);
+    s.run_until(Time::from_millis(10));
+    assert_eq!(s.protocol(A).unwrap().seen, 2);
+
+    s.crash(A);
+    s.restart(A);
+    assert_eq!(s.protocol(A).unwrap().seen, 0, "a crash must not preserve state");
+
+    s.command(A, CountCmd::Bump);
+    s.run_until(Time::from_millis(20));
+    assert_eq!(s.protocol(A).unwrap().seen, 1, "the restarted process counts from scratch");
+}
+
+#[test]
+fn a_suspension_preserves_state() {
+    let mut s = counters();
+    s.command(A, CountCmd::Bump);
+    s.command(A, CountCmd::Bump);
+    s.run_until(Time::from_millis(10));
+
+    s.suspend(A);
+    assert!(s.is_stopped(A));
+    s.restart(A);
+    assert_eq!(s.protocol(A).unwrap().seen, 2, "a suspension is a pause, not a failure");
+}
+
+#[test]
+fn a_suspended_process_handles_nothing_while_stopped() {
+    let mut s = counters();
+    s.suspend(A);
+    s.command(A, CountCmd::Bump);
+    s.run_until(Time::from_millis(10));
+    assert_eq!(s.protocol(A).unwrap().seen, 0);
+
+    s.restart(A);
+    s.command(A, CountCmd::Bump);
+    s.run_until(Time::from_millis(20));
+    assert_eq!(s.protocol(A).unwrap().seen, 1);
+}
+
+#[test]
+fn a_crash_discards_pending_timers() {
+    // Timers are volatile state and must not outlive the process that set them.
+    let mut s = counters();
+    s.command(A, CountCmd::ArmTimer(Duration::from_millis(100)));
+    s.run_until(Time::from_millis(10));
+
+    s.crash(A);
+    s.restart(A);
+    s.run_until(Time::from_millis(500));
+    assert_eq!(s.trace().timer_fires(), 0, "a crashed process's timer must not fire");
+}
+
+#[test]
+fn a_suspension_keeps_pending_timers() {
+    let mut s = counters();
+    s.command(A, CountCmd::ArmTimer(Duration::from_millis(100)));
+    s.run_until(Time::from_millis(10));
+
+    s.suspend(A);
+    s.run_until(Time::from_millis(50));
+    s.restart(A);
+    s.run_until(Time::from_millis(500));
+    assert_eq!(s.trace().timer_fires(), 1, "a suspension keeps what a crash would lose");
+}
+
+#[test]
+fn a_crash_is_distinguishable_from_a_suspension_in_the_trace() {
+    let mut s = counters();
+    s.crash(A);
+    s.suspend(B);
+    let ev = s.trace().events();
+    assert!(ev.iter().any(|e| matches!(e, TraceEvent::Crashed { node, .. } if *node == A)));
+    assert!(ev.iter().any(|e| matches!(e, TraceEvent::Suspended { node, .. } if *node == B)));
+}

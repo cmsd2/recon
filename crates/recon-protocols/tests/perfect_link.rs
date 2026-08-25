@@ -212,3 +212,69 @@ fn deduplication_is_per_identifier_not_per_sender() {
     );
     assert_eq!(p.delivered_count(), 2);
 }
+
+// ------------------------- The scope of PL2, made observable
+
+#[test]
+fn no_duplication_does_not_survive_the_recipient_restarting() {
+    // PL2 [incarnation(q)] — the deduplication set is volatile, so a process that crashes and
+    // restarts has forgotten what it delivered and will deliver it again. The book states
+    // "no message is delivered by a process more than once" without qualification; this is the
+    // scope that qualification hides.
+    let mut p: PerfectLink<u32> = PerfectLink::new(B, interval());
+    let mut r = rng();
+    let wire = Wire { id: MsgId { src: A, seq: 1 }, payload: 5u32 };
+
+    let first = step(&mut p, Event::Msg { from: A, msg: wire.clone() }, Time::ZERO, &mut r);
+    let again = step(&mut p, Event::Msg { from: A, msg: wire.clone() }, Time::ZERO, &mut r);
+    assert_eq!(first.len(), 1);
+    assert_eq!(again.len(), 0, "within one incarnation, the duplicate is suppressed");
+
+    // The process restarts: fresh state, nothing remembered.
+    let mut p: PerfectLink<u32> = PerfectLink::new(B, interval());
+    let after_restart = step(&mut p, Event::Msg { from: A, msg: wire }, Time::ZERO, &mut r);
+    assert_eq!(
+        after_restart.len(),
+        1,
+        "across incarnations it is delivered again — PL2 is scoped, not absolute"
+    );
+}
+
+#[test]
+fn a_restarted_recipient_redelivers_in_a_run() {
+    // The same thing end to end, driven by the simulator's crash rather than by hand.
+    let mut s = sim::<u32>(Config::default().seed(11));
+    s.command(A, Cmd::Send { to: B, msg: 5 });
+    s.run_until(Time::from_millis(100));
+    assert_eq!(s.trace().indications_at(B).count(), 1);
+
+    // B dies and comes back empty; A is still stubbornly retransmitting.
+    s.crash(B);
+    s.restart(B);
+    s.run_until(Time::from_millis(400));
+
+    assert!(
+        s.trace().indications_at(B).count() > 1,
+        "a restarted recipient re-delivers what it had already delivered"
+    );
+}
+
+#[test]
+fn no_duplication_holds_across_a_suspension() {
+    // Contrast: a pause preserves the deduplication set, so PL2 holds across it.
+    let mut s = sim::<u32>(Config::default().seed(12));
+    s.command(A, Cmd::Send { to: B, msg: 5 });
+    s.run_until(Time::from_millis(100));
+    assert_eq!(s.trace().indications_at(B).count(), 1);
+
+    s.suspend(B);
+    s.run_until(Time::from_millis(200));
+    s.restart(B);
+    s.run_until(Time::from_millis(400));
+
+    assert_eq!(
+        s.trace().indications_at(B).count(),
+        1,
+        "suspension is within the incarnation, so no duplication still holds"
+    );
+}

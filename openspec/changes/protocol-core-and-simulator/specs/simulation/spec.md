@@ -100,6 +100,32 @@ and one thread, with no sockets opened and no network interfaces used.
 - **WHEN** a scenario configures several processes and runs to completion
 - **THEN** it executes inside the test process, opening no sockets
 
+### Requirement: A crash loses volatile state
+
+The simulator SHALL model a crash as the loss of a process's volatile state. A process that
+crashes and later restarts SHALL resume with freshly initialised state and no pending timers,
+having forgotten everything it held in memory.
+
+The simulator SHALL additionally offer suspension, which stops a process from handling events
+while preserving its state, for scenarios that require a pause rather than a crash.
+
+#### Scenario: A restarted process has forgotten what it delivered
+
+- **WHEN** a process crashes after delivering a message, is restarted, and the same message is
+  delivered to it again
+- **THEN** it delivers that message to the layer above a second time, because the record of the
+  first delivery did not survive
+
+#### Scenario: A crashed process loses its pending timers
+
+- **WHEN** a process sets a timer, crashes before it fires, and is restarted
+- **THEN** that timer does not fire
+
+#### Scenario: A suspended process resumes with its state intact
+
+- **WHEN** a process is suspended and later resumed
+- **THEN** it continues with the state it had, and its pending timers still fire
+
 ### Requirement: Encoding can be exercised on demand
 
 The simulator SHALL move message payloads between processes as typed values by default. It SHALL

@@ -36,8 +36,10 @@ pub enum TraceEvent<M, I, T> {
     TimerFired { at: Time, node: NodeId, token: T },
     /// A protocol delivered on its guarantee to the layer above.
     Indicated { at: Time, node: NodeId, ind: I },
-    /// A process crashed.
+    /// A process crashed, losing its volatile state.
     Crashed { at: Time, node: NodeId },
+    /// A process was suspended, keeping its state.
+    Suspended { at: Time, node: NodeId },
     /// A process restarted.
     Restarted { at: Time, node: NodeId },
 }
@@ -53,6 +55,7 @@ impl<M, I, T> TraceEvent<M, I, T> {
             | TraceEvent::TimerFired { at, .. }
             | TraceEvent::Indicated { at, .. }
             | TraceEvent::Crashed { at, .. }
+            | TraceEvent::Suspended { at, .. }
             | TraceEvent::Restarted { at, .. } => *at,
         }
     }

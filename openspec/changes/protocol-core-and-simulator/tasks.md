@@ -41,6 +41,9 @@
       traces across runs and two different seeds are each individually reproducible
 - [x] 3.7 Implement the opt-in codec-check mode that round-trips every delivery; verify it detects
       a deliberately broken round-trip and that the default path performs no encoding
+- [x] 3.8 Model a crash as the loss of volatile state — fresh protocol and no pending timers on
+      restart — with suspension as the opt-in alternative that preserves state; verify a restarted
+      process re-delivers a message it had already delivered, and that a suspended one does not
 
 ## 4. Stubborn link
 

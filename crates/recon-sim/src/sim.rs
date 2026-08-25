@@ -23,10 +23,20 @@ enum Scheduled<P: Protocol> {
     Command { node: NodeId, cmd: P::Cmd },
 }
 
+/// Whether a process is handling events, and if not, why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Liveness {
+    Running,
+    /// Stopped with its state preserved — a pause, not a failure.
+    Suspended,
+    /// Stopped having lost everything volatile.
+    Crashed,
+}
+
 /// A process in the run.
 struct Node<P> {
     protocol: P,
-    crashed: bool,
+    liveness: Liveness,
 }
 
 /// A deterministic run of `P` across several processes.
@@ -42,6 +52,8 @@ pub struct Sim<P: Protocol> {
     queue: BTreeMap<(Time, u64), Scheduled<P>>,
     nodes: BTreeMap<NodeId, Node<P>>,
     partitions: Option<Vec<BTreeSet<NodeId>>>,
+    /// Rebuilds a process after a crash, since a crash loses volatile state.
+    make: Box<dyn FnMut(NodeId) -> P>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
     effects: Vec<Effect<P::Msg, P::Ind, P::Timer>>,
     codec_check: Option<CodecCheck<P::Msg>>,
@@ -55,11 +67,15 @@ where
     P::Timer: Clone,
 {
     /// Build a run over `nodes`, constructing each process with `make`.
-    pub fn new(config: Config, nodes: &[NodeId], mut make: impl FnMut(NodeId) -> P) -> Self {
+    pub fn new(
+        config: Config,
+        nodes: &[NodeId],
+        mut make: impl FnMut(NodeId) -> P + 'static,
+    ) -> Self {
         let rng = ChaCha8Rng::seed_from_u64(config.seed);
         let mut map = BTreeMap::new();
         for &id in nodes {
-            map.insert(id, Node { protocol: make(id), crashed: false });
+            map.insert(id, Node { protocol: make(id), liveness: Liveness::Running });
         }
         Sim {
             now: Time::ZERO,
@@ -70,6 +86,7 @@ where
             queue: BTreeMap::new(),
             nodes: map,
             partitions: None,
+            make: Box::new(make),
             trace: Trace::default(),
             effects: Vec::new(),
             codec_check: None,
@@ -106,26 +123,60 @@ where
         self.schedule(self.now + after, Scheduled::Command { node, cmd });
     }
 
-    /// Stop `node` processing events and discard messages addressed to it.
+    /// Crash `node`: it stops handling events and loses everything volatile.
+    ///
+    /// Its protocol state is replaced with a freshly initialised one and its pending timers are
+    /// discarded, so a restart resumes having forgotten what it delivered. This is what a real
+    /// process gets. For a pause that preserves state, use [`Sim::suspend`].
     pub fn crash(&mut self, node: NodeId) {
+        let fresh = (self.make)(node);
         if let Some(n) = self.nodes.get_mut(&node) {
-            n.crashed = true;
+            n.protocol = fresh;
+            n.liveness = Liveness::Crashed;
+        } else {
+            return;
+        }
+        self.discard_timers_of(node);
+        let at = self.now;
+        self.trace.push(TraceEvent::Crashed { at, node });
+    }
+
+    /// Suspend `node`: it stops handling events but keeps its state and its timers.
+    ///
+    /// Not what a crash does. Use it to model a process that is merely unreachable or stalled.
+    pub fn suspend(&mut self, node: NodeId) {
+        if let Some(n) = self.nodes.get_mut(&node) {
+            n.liveness = Liveness::Suspended;
             let at = self.now;
-            self.trace.push(TraceEvent::Crashed { at, node });
+            self.trace.push(TraceEvent::Suspended { at, node });
         }
     }
 
-    /// Resume `node`. Its state is whatever it was when it crashed.
+    /// Resume `node`, whether it crashed or was suspended.
     pub fn restart(&mut self, node: NodeId) {
         if let Some(n) = self.nodes.get_mut(&node) {
-            n.crashed = false;
+            n.liveness = Liveness::Running;
             let at = self.now;
             self.trace.push(TraceEvent::Restarted { at, node });
         }
     }
 
-    pub fn is_crashed(&self, node: NodeId) -> bool {
-        self.nodes.get(&node).map(|n| n.crashed).unwrap_or(false)
+    /// Whether `node` is currently stopped, for either reason.
+    pub fn is_stopped(&self, node: NodeId) -> bool {
+        self.nodes.get(&node).map(|n| n.liveness != Liveness::Running).unwrap_or(false)
+    }
+
+    /// Timers are volatile state, so a crash takes them with it.
+    fn discard_timers_of(&mut self, node: NodeId) {
+        let doomed: Vec<(Time, u64)> = self
+            .queue
+            .iter()
+            .filter(|(_, s)| matches!(s, Scheduled::Timer { node: n, .. } if *n == node))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in doomed {
+            self.queue.remove(&k);
+        }
     }
 
     /// Split the network into groups. Messages between groups are not delivered.
@@ -209,7 +260,7 @@ where
     }
 
     fn crashed(&self, node: NodeId) -> bool {
-        self.nodes.get(&node).map(|n| n.crashed).unwrap_or(true)
+        self.nodes.get(&node).map(|n| n.liveness != Liveness::Running).unwrap_or(true)
     }
 
     /// Run one handler and interpret everything it emits.
