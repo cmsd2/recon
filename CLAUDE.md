@@ -102,6 +102,10 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
 
 ## Guarantees are conditional — read `docs/conditional-guarantees.md`
 
+The formal companion is `docs/scope-annotated-modules.md`: the extension to the book's module
+notation, proved conservative, with the composition rules and the lower bound on what a layer can
+bridge.
+
 The ladder's abstractions are idealised: stubborn links retransmit forever, and "perfect link"
 assumes a link that never ends. Neither survives contact with a real transport — TCP is a perfect
 link *within* a session and a liar across one.

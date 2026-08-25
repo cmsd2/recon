@@ -1,6 +1,8 @@
 # Conditional guarantees
 
-A design note, not a specification. It records a reframing that should shape the rungs above
+A design note, not a specification. The formal argument — what the scope annotation means, why
+every proof in Cachin, Guerraoui & Rodrigues survives it untouched, and what it does and does not
+add — is in [`scope-annotated-modules.md`](scope-annotated-modules.md). It records a reframing that should shape the rungs above
 best-effort broadcast, and the eventual transport layer. Nothing here is implemented yet, and
 some of it deliberately should not be until it has a second consumer.
 
