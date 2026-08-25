@@ -126,3 +126,100 @@ What is worth doing early, because the simulator can already produce the fault:
 2. Make crash actually lose state, with an opt-in for the current suspend-and-resume behaviour.
 3. Write the boundary down: layers above the link may depend on its `Cmd` and `Ind` types and
    nothing else. That is the seam a second implementation will be swapped through.
+
+## Extending the book's notation to say this
+
+The module blocks in Cachin, Guerraoui & Rodrigues state properties as prose with an implicit
+universal scope. Module 2.3, perfect point-to-point links, reads:
+
+```
+Properties:
+    PL1: Reliable delivery: If a correct process p sends a message m to a correct
+         process q, then q eventually delivers m.
+    PL2: No duplication: No message is delivered by a process more than once.
+    PL3: No creation: If some process q delivers a message m with sender p, then m
+         was previously sent to q by process p.
+```
+
+Read against the previous section, those three properties do not share a scope, and the prose
+hides the difference:
+
+- **PL1** holds while the session persists — or while a retransmission buffer outlives it.
+- **PL2** holds while the `delivered` set persists. A process that restarts having forgotten what
+  it delivered can duplicate again.
+- **PL3** is pure safety. It holds unconditionally.
+
+### The proposed extension
+
+Two additions to a module block: a **Scopes** section naming the conditions, and a bracketed
+scope tag on each property. Plus a **Bridges / Propagates** section stating what the module does
+when a scope it depends on ends.
+
+```
+Module 2.3′: Session-aware perfect point-to-point links
+
+Name: PerfectPointToPointLinks, instance pl.
+
+Scopes:
+    session(q)       the transport session with q; ends on reconnect
+    incarnation(p)   p's volatile state; ends when p restarts
+
+Events:
+    Request:    ⟨ pl, Send | q, m ⟩
+    Indication: ⟨ pl, Deliver | p, m ⟩
+    Indication: ⟨ pl, SessionChanged | q, e ⟩     ends session(q)
+    Indication: ⟨ pl, PeerRestarted  | q, i ⟩     ends incarnation(q)
+
+Properties:
+    PL1 [session(q)]      Reliable delivery: if a correct p sends m to a correct q,
+                          then q eventually delivers m.
+    PL2 [incarnation(q)]  No duplication: no message is delivered by a process more
+                          than once.
+    PL3 [always]          No creation: if q delivers m with sender p, then m was
+                          previously sent to q by p.
+
+Bridges:
+    session(q)      by retaining unacknowledged messages in memory and resending them,
+                    restoring PL1 across the boundary.
+Propagates:
+    incarnation(q)  cannot restore PL2 once a peer has forgotten what it delivered;
+                    raises PeerRestarted and leaves the decision to the layer above.
+```
+
+### How to read a scope tag
+
+`P [S]` means: **P holds over any interval throughout which S holds continuously.** An
+unconditional property is the degenerate case, `[always]`. This is the ordinary way of scoping a
+temporal property, so nothing new is being invented — it is only being written down where the
+book leaves it implicit.
+
+### Why it is worth the extra lines
+
+**It maps onto the code exactly.** A scope in the notation is a variant on the port; ending a
+scope is emitting that variant; *Bridges* is handling it; *Propagates* is re-emitting it. The
+notation and the type say the same thing, which is what makes the annotation load-bearing rather
+than decorative.
+
+**Each tag is a test specification.** `PL2 [incarnation(q)]` says directly: write a run in which
+`q` restarts having lost state, and check that duplication becomes possible. That test does not
+exist yet, and neither does the simulator capability to write it — which is itself the point. A
+property tagged `[always]` should have a test that survives every fault the simulator can inject;
+a property tagged with a scope should have a test that it does *not* survive that scope ending,
+unless the module claims to bridge it.
+
+**It makes the ladder's structure explicit.** Reading the rungs by their tags shows where each
+one strengthens a scope: reliable broadcast takes best-effort broadcast's validity from
+`[sender's incarnation]` to `[always]`, and it does so by moving the redundancy from the sender's
+memory onto other processes. That is the same table as the previous section, arrived at from the
+notation rather than from the implementation.
+
+### The cost, honestly
+
+Every module definition grows by six or eight lines, and most of the early rungs will be tagged
+`[always]` or `[session]` with nothing interesting to say. The notation earns its keep from
+reliable broadcast upward, where bridging is the entire content of each rung, and it is largely
+ceremony below that.
+
+It is also a private extension. Anyone reading this code against the book will meet a notation
+the book does not use, so the mapping has to be stated once — here — and referenced rather than
+re-explained per module.
