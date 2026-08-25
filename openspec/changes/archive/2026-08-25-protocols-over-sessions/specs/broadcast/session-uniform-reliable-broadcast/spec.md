@@ -35,28 +35,44 @@ eventually be delivered by every correct process.
 
 ### Requirement: An established session prompts a resend
 
-When a session with a peer is **established**, this layer SHALL re-broadcast every pending message
-that peer has not been seen to acknowledge. It SHALL NOT attempt to resend on being told a session
-ended, because the peer is then unreachable and anything sent would be discarded.
+When a session with a peer is **established**, this layer SHALL send that peer every message it
+still holds pending. It SHALL send only to that peer, and SHALL NOT attempt to resend on being told
+a session ended, because the peer is then unreachable and anything sent would be discarded.
 
-This uses only the record the algorithm already keeps and the broadcast it already performs: no new
-message, no acknowledgement protocol, and no state beyond what is required to decide delivery.
+The resend is unconditional, and the obvious economy is unsound. The record of acknowledgements the
+algorithm keeps says who relayed a message **to this process**; it says nothing about whether this
+process's own relay reached them, and that relay is what they are waiting for. Skipping a peer
+already recorded as having the message deadlocks: this process delivers, having seen everyone relay,
+and therefore never resends the relay another process is still waiting for. Deciding when to stop
+would require an acknowledgement message, which is a new communication step and is out of scope for
+this rung.
+
+This uses only the broadcast layer's directed send and the payloads the algorithm already keeps: no
+new message type and no state beyond what is required to decide delivery. Its cost is that pending
+messages are never pruned, so an establishment sends one message per broadcast so far — the
+transcription's unbounded growth appearing as traffic as well as memory.
 
 #### Scenario: What the peer missed is sent again
 
-- **WHEN** a session with a peer is established and pending messages exist that it has not
-  acknowledged
-- **THEN** those messages are broadcast again
+- **WHEN** a session with a peer is established and pending messages exist
+- **THEN** each of those messages is sent to that peer
 
 #### Scenario: Nothing is attempted on the ending
 
 - **WHEN** this layer is told a session with a peer ended
 - **THEN** it does not resend to that peer, there being no session over which to do so
 
-#### Scenario: What the peer has acknowledged is not sent again
+#### Scenario: Only the peer whose session returned is sent to
 
-- **WHEN** a session is established and the peer has acknowledged every pending message
-- **THEN** nothing is re-broadcast on its account
+- **WHEN** a session with one peer is established while sessions with the others held throughout
+- **THEN** nothing is sent to those others on that account
+
+#### Scenario: A skipped resend would deadlock
+
+- **WHEN** a process is missing only one peer's relay of a message that the peer has already
+  delivered
+- **THEN** the peer sends its relay again on re-establishment, rather than concluding from its own
+  record that the process already has it
 
 ### Requirement: Progress does not depend on the peer returning
 

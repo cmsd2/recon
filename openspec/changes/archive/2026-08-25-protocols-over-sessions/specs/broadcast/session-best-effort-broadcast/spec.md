@@ -31,6 +31,21 @@ the change would deny the layers above the only signal they have.
 - **WHEN** a session with a peer ends, and when a later one is established
 - **THEN** the layer above is told of each, distinguishably
 
+### Requirement: A directed send to one member
+
+This layer SHALL offer, alongside the broadcast, a send addressed to one member. It is not part of
+the module it transcribes, which has only a broadcast, and it adds no communication step: the same
+wire message travels over the same link to strictly fewer recipients.
+
+It exists so that a layer above can answer a session that has just come back without sending to
+every other process as well, which would otherwise multiply the cost of every reconnection by the
+size of the membership.
+
+#### Scenario: Only the addressed member receives it
+
+- **WHEN** a directed send names one member
+- **THEN** that member receives the message and no other process does
+
 ### Requirement: No duplication and no creation
 
 Each process SHALL deliver each broadcast at most once, and only if it was previously broadcast by

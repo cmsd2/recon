@@ -139,4 +139,21 @@ fn a_message_lost_to_a_session_ending_is_not_retried() {
     assert!(established >= 1, "as was the reconnection that followed");
 }
 
+// ------------------------------------- the directed send
+
+#[test]
+fn a_directed_send_reaches_only_the_addressed_member() {
+    // Not part of Module 3.1, which has only a broadcast. It exists so a layer above can answer a
+    // session that has just come back without paying for a fan-out to everyone else.
+    let mut s = sim(3);
+    s.run_for(Duration::from_millis(50));
+    s.command(A, Cmd::SendTo { to: C, msg: 7 });
+    s.run_for(Duration::from_millis(200));
+
+    for n in ALL {
+        let want = if n == C { vec![(A, 7)] } else { Vec::new() };
+        assert_eq!(delivered(&s, n), want, "{n}");
+    }
+}
+
 use rand::SeedableRng;
