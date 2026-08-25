@@ -64,13 +64,13 @@
 
 ## 6. Best-effort broadcast
 
-- [ ] 6.1 Implement fan-out over perfect links, composed as a child, including self-delivery;
+- [x] 6.1 Implement fan-out over perfect links, composed as a child, including self-delivery;
       verify the layer contributes no wire fields of its own
-- [ ] 6.2 Assert best-effort validity over the simulator; verify every correct process delivers a
+- [x] 6.2 Assert best-effort validity over the simulator; verify every correct process delivers a
       message broadcast by a correct sender, including when others have crashed
-- [ ] 6.3 Assert no duplication and no creation over the simulator; verify each process delivers
+- [x] 6.3 Assert no duplication and no creation over the simulator; verify each process delivers
       each broadcast exactly once and only for messages actually broadcast
-- [ ] 6.4 Verify that a sender crashing partway through a broadcast produces no property violation
+- [x] 6.4 Verify that a sender crashing partway through a broadcast produces no property violation
 
 ## 7. Verification of the method itself
 

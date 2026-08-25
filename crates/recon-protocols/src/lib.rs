@@ -6,8 +6,10 @@
 //!
 //! The bottom rung, fair-loss links, is not here: it is what the simulator provides.
 
+pub mod best_effort_broadcast;
 pub mod perfect_link;
 pub mod stubborn_link;
 
+pub use best_effort_broadcast::BestEffortBroadcast;
 pub use perfect_link::PerfectLink;
 pub use stubborn_link::StubbornLink;
