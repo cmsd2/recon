@@ -2,3 +2,6 @@
 target/
 **/*.rs.bk
 Cargo.lock
+
+# Local Claude Code settings (per-machine permission grants)
+.claude/settings.local.json
