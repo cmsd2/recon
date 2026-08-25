@@ -137,6 +137,34 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
   protocol that does nothing; `crates/recon-protocols/tests/method.rs` demonstrates that and
   guards against it.
 
+## Transcriptions vs implementations — read `docs/bounded-space.md`
+
+Two kinds of protocol live here, and which one a module is must be **stated in the module**, not
+assumed. A **transcription** renders an algorithm from the book faithfully enough to read against
+the page, and inherits the book's omissions — which explicitly include garbage collection. An
+**implementation** holds the same guarantees while consuming resources bounded by something other
+than how long it has been running.
+
+**The rule: state is bounded by membership, by a window, or by a configured capacity — never by
+the number of messages handled.** The same applies to *work*: a periodic task whose cost is
+proportional to everything ever sent is unbounded even if each item is small. That is the failure
+mode that hides, and this repository currently has it — the stubborn link re-sends everything it
+has ever sent on every tick, because nothing calls its `Stop`.
+
+Everything above the failure detector is presently a transcription and violates the rule. The
+audit, the measurements, and the mechanisms that fix each are in `docs/bounded-space.md`.
+
+Three practices follow:
+
+- **State the space bound in the module documentation**, beside its departures from the book:
+  bounded by membership, bounded by a window, or unbounded and therefore a transcription.
+- **An implementation carries a test that its state does not grow with messages handled** — run a
+  growing count, assert the bound holds. Same shape as the non-vacuity guards: assert the property
+  that would otherwise stop holding in silence.
+- **Converting a transcription is a change with a proposal**, not a cleanup commit. Bounding
+  usually weakens a guarantee to a scope — "no duplication *within the retention window*" — and
+  that belongs in a specification.
+
 ## Guarantees are conditional — read `docs/conditional-guarantees.md`
 
 The formal companion is `docs/scope-annotated-modules.md`: the extension to the book's module
