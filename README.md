@@ -8,10 +8,31 @@ touches a socket, a clock or a thread-local RNG. The network is a deterministic 
 runs entirely in one test process, so a failing run is reproducible from its seed. Nothing here
 opens a port, and a build guard fails the commit that tries to.
 
-The order matters more than anything else here. Algorithms come before transport, the simulator is
-the deliverable rather than the test harness, and each rung of the ladder is tested against its
-stated guarantees before the next one begins. Those rules are set out in
-[`docs/postmortem.md`](docs/postmortem.md) §5, and they are what the build guards enforce.
+## How this is ordered
+
+Six rules, which is what the build guards enforce. They are ordering rules rather than style
+preferences, and the numbering is referred to throughout.
+
+1. **Algorithms before transport.** No `TcpStream`, no reconnect logic, no multi-process shell
+   scripts until several protocols run against an in-memory network in a single test process.
+2. **The protocol core is sans-IO.** A protocol is a synchronous state machine that consumes
+   events and emits effects. It never awaits, never reads a clock, never calls `thread_rng`, never
+   touches a socket. Time and randomness arrive through the context parameter so they can be made
+   virtual and seeded.
+3. **The simulator is the deliverable, not the test harness.** Seeded RNG, virtual clock, a
+   priority queue of scheduled deliveries, and knobs for latency, loss, duplication, reordering,
+   partition and crash/restart. Correctness is asserted as properties over the delivery trace, and
+   a failing run is reproducible from its seed.
+4. **Compose statically; extract the DSL, don't design it.** Parents own children as concrete typed
+   fields and re-wrap child effects rather than re-encoding them. Write two or three protocols by
+   hand before writing any macro to remove the boilerplate.
+5. **Transport last.** When protocols work under simulation, the network layer is a thin adapter:
+   best-effort `send`, plus a session/epoch-changed event. QUIC over TCP-plus-reconnect-logic — it
+   supplies connection identity, multiplexing and framing, which removes the need for a
+   hand-rolled multiplexer entirely.
+6. **Climb the ladder in order.** Fair-loss link → perfect link → failure detector → best-effort
+   broadcast → reliable broadcast → uniform reliable broadcast → consensus. Each rung is tested
+   against its stated guarantees before the next begins.
 
 ## Getting started
 
@@ -159,7 +180,6 @@ test; until transport exists under constraint 5, everything interesting is in-pr
 
 | Document | What it says |
 |---|---|
-| [`docs/postmortem.md`](docs/postmortem.md) | Six ordering constraints and the failure modes each one exists to prevent, drawn from an earlier codebase that never reached the algorithms. Read this first; it explains why the project is ordered the way it is. |
 | [`docs/bounded-space.md`](docs/bounded-space.md) | Transcriptions versus implementations, the rule that state is bounded by membership or a window or a capacity but never by messages handled, and an audit of which rungs currently break it. |
 | [`docs/conditional-guarantees.md`](docs/conditional-guarantees.md) | Why every guarantee is bounded by a scope, why the end of that scope is a first-class event rather than an implementation detail, and what it means that a layer which cannot bridge must propagate. |
 | [`docs/scope-annotated-modules.md`](docs/scope-annotated-modules.md) | The formal companion: the extension to the book's module notation, proved conservative, with composition rules and a lower bound on what a layer can bridge. |
@@ -195,8 +215,7 @@ thinking without committing to anything. Project context and per-artifact rules 
 ### An earlier codebase
 
 An earlier attempt at the same idea is checked out as detached worktrees beside this repository.
-Read them as notes — **do not port them**; the post-mortem documents concrete bugs in the gossip
-code that would come along.
+Read them as notes — **do not port them**; the gossip code has known bugs that would come along.
 
 | Path | Ref | Contents |
 |---|---|---|
