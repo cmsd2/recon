@@ -77,15 +77,15 @@
 
 ## 7. Verification of the method itself
 
-- [ ] 7.1 Run the full three-layer stack under combined faults; verify all stated properties of all
+- [x] 7.1 Run the full three-layer stack under combined faults; verify all stated properties of all
       three layers hold simultaneously across many seeds
-- [ ] 7.2 Add positive assertions that fault injection actually occurred — losses present at a
+- [x] 7.2 Add positive assertions that fault injection actually occurred — losses present at a
       configured loss rate, duplicates present when configured; verify the suite fails if the
       network silently stops injecting faults
-- [ ] 7.3 Add a guard that properties are not vacuously satisfied — assert minimum delivery counts
+- [x] 7.3 Add a guard that properties are not vacuously satisfied — assert minimum delivery counts
       alongside each absence-of-violation property; verify the suite fails against a protocol
       stubbed to deliver nothing
-- [ ] 7.4 Demonstrate the reproduce-from-seed workflow; verify a deliberately introduced defect
+- [x] 7.4 Demonstrate the reproduce-from-seed workflow; verify a deliberately introduced defect
       reports a seed, and re-running that seed reproduces the identical failure
 
 ## 8. Recording what was learned
