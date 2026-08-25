@@ -40,6 +40,12 @@ pub struct Config {
     /// you build reliability yourself, which is the simulator's own situation and not
     /// production's.
     pub sessions: bool,
+    /// How often a session-based run retries establishing sessions that are not up.
+    ///
+    /// A deployed link keeps trying to reconnect on its own rather than waiting for the layers
+    /// above to transmit, so the model does too. The value stands in for a retry interval, with or
+    /// without backoff; no protocol may depend on it.
+    pub reconnect_interval: Duration,
     /// Safety valve: a run stops after this many events, whatever the clock says.
     ///
     /// Protocols such as the stubborn link retransmit forever by design, so a run is bounded
@@ -59,6 +65,7 @@ impl Default for Config {
             reorder_delay: Duration::from_millis(50),
             synchronous: None,
             sessions: false,
+            reconnect_interval: Duration::from_millis(5),
             max_steps: 1_000_000,
         }
     }
@@ -137,6 +144,12 @@ impl Config {
         self.loss = 0.0;
         self.duplication = 0.0;
         self.reorder = 0.0;
+        self
+    }
+
+    /// How often to retry establishing sessions that are not up.
+    pub fn reconnect_interval(mut self, d: Duration) -> Self {
+        self.reconnect_interval = d;
         self
     }
 

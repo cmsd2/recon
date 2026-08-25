@@ -30,7 +30,7 @@
 //! end is an event this link is told about, so it can react to it, report it, and be tested
 //! against it.
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEnded};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
 use std::collections::BTreeMap;
 
 /// What crosses the wire: the payload, unchanged.
@@ -50,9 +50,12 @@ pub enum Cmd<P> {
 pub enum Ind<P> {
     /// A message arrived. Ordered with respect to others from the same peer in the same session.
     Deliver { from: NodeId, msg: P },
-    /// The session with `peer` ended and `epoch` has begun. Anything sent to that peer and not
-    /// yet delivered may have been lost, and this link cannot say which.
-    SessionChanged { peer: NodeId, epoch: u64 },
+    /// The session with `peer` ended at `epoch`. Anything sent to that peer and not yet delivered
+    /// may have been lost, and this link cannot say which. Nothing can be done about it yet.
+    SessionEnded { peer: NodeId, epoch: u64 },
+    /// A session with `peer` is in force at `epoch`. This is the moment on which anything that
+    /// must be resent can be.
+    SessionEstablished { peer: NodeId, epoch: u64 },
 }
 
 /// Reliable ordered delivery within a session, and honesty across one.
@@ -85,7 +88,7 @@ impl<P: Clone> Protocol for SessionLink<P> {
     type Ind = Ind<P>;
     type Msg = Wire<P>;
     type Timer = ();
-    type Scope = SessionEnded;
+    type Scope = SessionEvent;
 
     fn on_cmd(&mut self, Cmd::Send { to, msg }: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         // No sequence number, no retransmission buffer, no record kept. The session is
@@ -100,13 +103,18 @@ impl<P: Clone> Protocol for SessionLink<P> {
 
     fn on_timer(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
 
-    fn on_scope_end(
-        &mut self,
-        SessionEnded { peer, epoch }: SessionEnded,
-        cx: &mut ProtoCx<'_, Self>,
-    ) {
-        // The one thing this link exists to do that a perfect link cannot: say so.
-        self.epochs.insert(peer, epoch);
-        cx.indicate(Ind::SessionChanged { peer, epoch });
+    fn on_scope_end(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+        // The one thing this link exists to do that a perfect link cannot: say so. Both events
+        // are reported — the ending because a suffix may be gone, the establishment because it is
+        // the only moment on which anything can be resent.
+        match event {
+            SessionEvent::Ended { peer, epoch } => {
+                cx.indicate(Ind::SessionEnded { peer, epoch });
+            }
+            SessionEvent::Established { peer, epoch } => {
+                self.epochs.insert(peer, epoch);
+                cx.indicate(Ind::SessionEstablished { peer, epoch });
+            }
+        }
     }
 }

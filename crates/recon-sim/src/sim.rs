@@ -10,7 +10,7 @@ use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
-use recon_core::{Cx, Effect, NodeId, Protocol, SessionEnded, Time};
+use recon_core::{Cx, Effect, NodeId, Protocol, SessionEvent, Time};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Round-trips one message through the wire codec, when codec checking is enabled.
@@ -18,10 +18,26 @@ type CodecCheck<M> = fn(&M) -> Result<M, CodecError>;
 
 /// Something scheduled to happen at a point in virtual time.
 enum Scheduled<P: Protocol> {
-    Deliver { from: NodeId, to: NodeId, msg: P::Msg },
-    Timer { node: NodeId, token: P::Timer },
-    Command { node: NodeId, cmd: P::Cmd },
-    ScopeEnd { node: NodeId, scope: P::Scope },
+    Deliver {
+        from: NodeId,
+        to: NodeId,
+        msg: P::Msg,
+    },
+    Timer {
+        node: NodeId,
+        token: P::Timer,
+    },
+    Command {
+        node: NodeId,
+        cmd: P::Cmd,
+    },
+    ScopeEnd {
+        node: NodeId,
+        scope: P::Scope,
+    },
+    /// Retry establishing every session that is not up. A deployed link keeps trying on its own
+    /// rather than waiting for the layers above to transmit, so the model does too.
+    Reconnect,
 }
 
 /// Whether a process is handling events, and if not, why.
@@ -69,7 +85,7 @@ pub struct Sim<P: Protocol> {
     last_delivery: BTreeMap<(NodeId, NodeId), Time>,
     /// Turns a session ending into whatever the protocol calls a scope. Absent unless the
     /// protocol opted in, exactly as the codec check does.
-    session_scope: Option<fn(SessionEnded) -> P::Scope>,
+    session_scope: Option<fn(SessionEvent) -> P::Scope>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
     effects: Vec<Effect<P::Msg, P::Ind, P::Timer>>,
     codec_check: Option<CodecCheck<P::Msg>>,
@@ -93,7 +109,7 @@ where
         for &id in nodes {
             map.insert(id, Node { protocol: make(id), liveness: Liveness::Running });
         }
-        Sim {
+        let mut sim = Sim {
             now: Time::ZERO,
             rng,
             config,
@@ -111,7 +127,13 @@ where
             trace: Trace::default(),
             effects: Vec::new(),
             codec_check: None,
+        };
+        if sim.config.is_session_based() {
+            // The link starts trying immediately and keeps trying, so a session comes up as soon
+            // as one is possible rather than when something above happens to transmit.
+            sim.schedule(Time::ZERO, Scheduled::Reconnect);
         }
+        sim
     }
 
     /// The upper bound on delivery, when the run is synchronous.
@@ -285,6 +307,11 @@ where
                     return;
                 }
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
+            }
+            Scheduled::Reconnect => {
+                self.reconnect_sweep();
+                let at = self.now + self.config.reconnect_interval;
+                self.schedule(at, Scheduled::Reconnect);
             }
             Scheduled::ScopeEnd { node, scope } => {
                 if self.crashed(node) {
@@ -543,15 +570,13 @@ where
 
         self.trace.push(TraceEvent::SessionEnded { at, a: key.0, b: key.1, epoch, reason });
 
-        // Both endpoints are told, if they are alive to hear it.
+        // Both endpoints are told, if they are alive to hear it. The epoch named is the one that
+        // ended: at the moment of failure the next is not a fact, and may never become one.
         if let Some(f) = self.session_scope {
-            let next = epoch + 1;
             for (node, peer) in [(key.0, key.1), (key.1, key.0)] {
                 if !self.crashed(node) {
-                    self.schedule(
-                        at,
-                        Scheduled::ScopeEnd { node, scope: f(SessionEnded { peer, epoch: next }) },
-                    );
+                    let scope = f(SessionEvent::Ended { peer, epoch });
+                    self.schedule(at, Scheduled::ScopeEnd { node, scope });
                 }
             }
         }
@@ -602,7 +627,28 @@ where
         self.sessions.insert(key, epoch);
         let at = self.now;
         self.trace.push(TraceEvent::SessionOpened { at, a: key.0, b: key.1, epoch });
+
+        // Both endpoints are told. This is the actionable event: the peer is reachable, so
+        // anything sent in response arrives.
+        if let Some(f) = self.session_scope {
+            for (node, peer) in [(key.0, key.1), (key.1, key.0)] {
+                if !self.crashed(node) {
+                    let scope = f(SessionEvent::Established { peer, epoch });
+                    self.schedule(at, Scheduled::ScopeEnd { node, scope });
+                }
+            }
+        }
         true
+    }
+
+    /// Try to establish every session that is not up.
+    fn reconnect_sweep(&mut self) {
+        let nodes: Vec<NodeId> = self.nodes.keys().copied().collect();
+        for (i, a) in nodes.iter().enumerate() {
+            for b in nodes.iter().skip(i + 1) {
+                self.ensure_session(*a, *b);
+            }
+        }
     }
 
     /// Delivery time under a session: never before something sent earlier the same way.
@@ -628,9 +674,9 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
-    P::Scope: From<SessionEnded>,
+    P::Scope: From<SessionEvent>,
 {
-    /// Deliver session endings to the protocol as scope endings.
+    /// Deliver session events to the protocol as scope events.
     ///
     /// Opt-in, like the codec check: a protocol that declares no scopes cannot receive one, and
     /// the bound lives only on this method so ordinary runs need nothing.

@@ -695,9 +695,8 @@ fn a_session_delivers_reliably_and_in_order() {
 }
 
 #[test]
-fn a_session_opens_on_first_use_and_has_an_epoch() {
+fn a_session_has_one_epoch_shared_by_both_ends() {
     let mut s = session_sim(1);
-    assert!(!s.has_session(A, B));
     s.command(A, Cmd::SendTo(B, 1));
     s.run_for(Duration::from_millis(50));
     assert_eq!(s.session_epoch(A, B), Some(1));
@@ -799,19 +798,16 @@ fn ordering_restarts_with_the_new_session() {
 }
 
 #[test]
-fn a_partition_ends_the_session() {
+fn a_partition_ends_the_sessions_it_severs_and_no_others() {
     let mut s = session_sim(5);
-    s.command(A, Cmd::SendTo(C, 1));
     s.run_for(Duration::from_millis(50));
-    assert!(s.has_session(A, C));
+    assert!(s.has_session(A, C) && s.has_session(B, C) && s.has_session(A, B));
 
     s.partition(&[&[A, B], &[C]]);
     assert!(!s.has_session(A, C), "a severed pair has no session");
-    assert!(
-        s.has_session(A, B) || !s.has_session(A, B),
-        "the intact pair is unaffected either way"
-    );
-    assert_eq!(s.trace().session_ends(), 1);
+    assert!(!s.has_session(B, C), "nor does the other severed pair");
+    assert!(s.has_session(A, B), "but the intact pair keeps its session");
+    assert_eq!(s.trace().session_ends(), 2, "exactly the two crossing the split");
 }
 
 #[test]
@@ -841,9 +837,15 @@ fn the_trace_records_session_events_distinguishably() {
     assert!(ev.iter().any(|e| matches!(e, TraceEvent::SessionOpened { .. })));
     assert!(ev.iter().any(|e| matches!(e, TraceEvent::SessionEnded { .. })));
     assert!(ev.iter().any(|e| matches!(e, TraceEvent::SuffixLost { .. })));
-    // And a property is assertable over them without touching protocol state.
-    let opened: Vec<u64> = s.trace().session_epochs().map(|(_, _, e)| e).collect();
-    assert_eq!(opened, vec![1], "one session opened before the break");
+    // And a property is assertable over them without touching protocol state: A and B's session
+    // opened at 1, was broken, and opened again at 2.
+    let ab: Vec<u64> = s
+        .trace()
+        .session_epochs()
+        .filter(|(a, b, _)| (*a, *b) == (A, B))
+        .map(|(_, _, e)| e)
+        .collect();
+    assert_eq!(ab, vec![1, 2], "opened, broken, opened again at a higher epoch");
 }
 
 #[test]
@@ -865,4 +867,61 @@ fn session_runs_are_deterministic() {
     }
     let traces: Vec<_> = (0..8).map(run).collect();
     assert!(!traces.iter().all(|t| *t == traces[0]), "differing seeds must differ somewhere");
+}
+
+// ------------------- A link that reconnects on its own: group 1
+
+#[test]
+fn a_healed_partition_reconnects_with_nothing_sent() {
+    // The link keeps trying on its own, so reconnection does not depend on the layers above
+    // happening to transmit — which is a state neither end controls.
+    let mut s = session_sim(20);
+    s.run_for(Duration::from_millis(50));
+    assert!(s.has_session(A, B));
+    let first = s.session_epoch(A, B).unwrap();
+
+    s.partition(&[&[A], &[B, C]]);
+    assert!(!s.has_session(A, B));
+    s.run_for(Duration::from_millis(100));
+    assert!(!s.has_session(A, B), "still severed");
+
+    s.heal();
+    s.run_for(Duration::from_millis(100)); // nothing is sent by anyone
+    assert!(s.has_session(A, B), "the link reconnected without being asked");
+    assert!(s.session_epoch(A, B).unwrap() > first);
+}
+
+#[test]
+fn a_restarted_process_reconnects_with_nothing_sent() {
+    let mut s = session_sim(21);
+    s.run_for(Duration::from_millis(50));
+    assert!(s.has_session(A, B));
+
+    s.crash(B);
+    assert!(!s.has_session(A, B));
+    s.restart(B);
+    s.run_for(Duration::from_millis(100));
+    assert!(s.has_session(A, B), "reconnected after restart, unprompted");
+}
+
+#[test]
+fn an_unreachable_peer_is_retried_not_abandoned() {
+    let mut s = session_sim(22);
+    s.partition(&[&[A], &[B, C]]);
+    s.run_for(Duration::from_millis(500)); // many retry intervals pass
+    assert!(!s.has_session(A, B));
+
+    s.heal();
+    s.run_for(Duration::from_millis(50));
+    assert!(s.has_session(A, B), "retrying resumed as soon as it became possible");
+}
+
+#[test]
+fn sessions_open_without_anything_being_sent() {
+    let mut s = session_sim(23);
+    assert!(!s.has_session(A, B), "nothing has run yet");
+    s.run_for(Duration::from_millis(50));
+    for (x, y) in [(A, B), (A, C), (B, C)] {
+        assert!(s.has_session(x, y), "{x}-{y} should be up without any traffic");
+    }
 }

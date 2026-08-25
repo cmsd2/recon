@@ -21,5 +21,5 @@ pub use cx::{Cx, EffectSink};
 pub use effect::Effect;
 pub use node::NodeId;
 pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step};
-pub use session::SessionEnded;
+pub use session::SessionEvent;
 pub use time::Time;

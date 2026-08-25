@@ -2,7 +2,7 @@
 //! that does not grow with messages.
 
 use core::time::Duration;
-use recon_core::{Effect, Event, NodeId, SessionEnded, Time, step};
+use recon_core::{Effect, Event, NodeId, SessionEvent, Time, step};
 use recon_protocols::session_link::{Cmd, Ind, SessionLink};
 use recon_sim::{Config, Sim};
 
@@ -76,8 +76,18 @@ fn state_does_not_grow_with_messages() {
     }
     assert_eq!(p.tracked_peers(), 0, "a thousand messages, no per-message state");
 
-    step(&mut p, Event::ScopeEnd(SessionEnded { peer: A, epoch: 2 }), Time::ZERO, &mut r);
-    step(&mut p, Event::ScopeEnd(SessionEnded { peer: B, epoch: 2 }), Time::ZERO, &mut r);
+    step(
+        &mut p,
+        Event::ScopeEnd(SessionEvent::Established { peer: A, epoch: 2 }),
+        Time::ZERO,
+        &mut r,
+    );
+    step(
+        &mut p,
+        Event::ScopeEnd(SessionEvent::Established { peer: B, epoch: 2 }),
+        Time::ZERO,
+        &mut r,
+    );
     assert_eq!(p.tracked_peers(), 2, "state is one entry per peer, and that is all");
 }
 
@@ -123,23 +133,30 @@ fn a_session_ending_is_reported_with_the_peer_and_the_new_epoch() {
     s.break_session(A, B);
     s.run_for(Duration::from_millis(50));
 
-    let changes: Vec<(NodeId, u64)> = reported(&s, A)
+    // The ending names the epoch that ended; the establishment that follows names the next.
+    let ended: Vec<(NodeId, u64)> = reported(&s, A)
         .into_iter()
         .filter_map(|i| match i {
-            Ind::SessionChanged { peer, epoch } => Some((peer, epoch)),
+            Ind::SessionEnded { peer, epoch } => Some((peer, epoch)),
             _ => None,
         })
         .collect();
-    assert_eq!(changes, vec![(B, epoch_before + 1)], "A is told, naming B and the new epoch");
+    assert_eq!(ended, vec![(B, epoch_before)], "the ending names the epoch that ended");
 
-    let b_changes: Vec<(NodeId, u64)> = reported(&s, B)
+    // A has sessions with every peer, because the link reconnects on its own rather than waiting
+    // to be asked. Only B's are of interest here.
+    let established: Vec<u64> = reported(&s, A)
         .into_iter()
         .filter_map(|i| match i {
-            Ind::SessionChanged { peer, epoch } => Some((peer, epoch)),
+            Ind::SessionEstablished { peer, epoch } if peer == B => Some(epoch),
             _ => None,
         })
         .collect();
-    assert_eq!(b_changes, vec![(A, epoch_before + 1)], "and so is B, naming A");
+    assert_eq!(
+        established,
+        vec![epoch_before, epoch_before + 1],
+        "one establishment for the original session with B and one for its replacement"
+    );
 }
 
 #[test]
@@ -191,7 +208,9 @@ fn the_link_tracks_the_epoch_it_was_told() {
 
     let epoch = s.protocol(A).unwrap().epoch(B).expect("A learned B's new epoch");
     assert_eq!(epoch, 2);
-    assert_eq!(s.protocol(A).unwrap().tracked_peers(), 1, "one peer, one entry");
+    // One entry per peer it has a session with — and it has one with everybody, because the link
+    // establishes on its own. State is still bounded by membership, which is the point.
+    assert_eq!(s.protocol(A).unwrap().tracked_peers(), ALL.len() - 1);
 }
 
 #[test]
@@ -202,7 +221,7 @@ fn a_crash_ends_the_session_and_the_survivor_is_told() {
     s.crash(B);
     s.run_for(Duration::from_millis(50));
 
-    let changes =
-        reported(&s, A).into_iter().filter(|i| matches!(i, Ind::SessionChanged { .. })).count();
-    assert_eq!(changes, 1, "A is told its session with B is gone");
+    let endings =
+        reported(&s, A).into_iter().filter(|i| matches!(i, Ind::SessionEnded { .. })).count();
+    assert_eq!(endings, 1, "A is told its session with B is gone");
 }
