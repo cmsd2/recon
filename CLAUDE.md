@@ -100,6 +100,26 @@ each one exists because its absence killed the first attempt.
 
 Errors get `thiserror` types per layer. The string `"json decoding error"` should never appear.
 
+## Guarantees are conditional — read `docs/conditional-guarantees.md`
+
+The ladder's abstractions are idealised: stubborn links retransmit forever, and "perfect link"
+assumes a link that never ends. Neither survives contact with a real transport — TCP is a perfect
+link *within* a session and a liar across one.
+
+The reframing that governs everything above best-effort broadcast: **every guarantee is bounded
+by a scope** — a session, a process incarnation, a cancellation, a deadline — and the end of that
+scope is a first-class event on the port, never an implementation detail. A layer bridges a scope
+ending only if its redundancy outlives it: memory survives a reconnect, stable storage survives a
+restart, other processes survive this one dying. **A layer that cannot bridge must propagate.**
+Silently absorbing a scope end is the bug the first attempt shipped.
+
+Two things follow for anyone writing a new rung:
+
+- Layers above the link may depend on its `Cmd` and `Ind` types and nothing else. That is the
+  seam a session-aware or logged implementation gets swapped through.
+- `Sim::crash` currently preserves state, so it models a pause rather than a crash. Do not rely
+  on it to test what a restarted process actually faces.
+
 ## Anti-patterns, all of them load-bearing history
 
 Each of these is a real decision from the first attempt, with the consequence it produced:
