@@ -23,6 +23,14 @@ pub struct Config {
     pub latency_max: Duration,
     /// Extra delay applied to a message selected for reordering.
     pub reorder_delay: Duration,
+    /// When set, the run is synchronous: delivery between connected, uncrashed processes is
+    /// guaranteed within this bound, and nothing is lost, duplicated or given a reordering spike.
+    ///
+    /// This is what a perfect failure detector needs and what the asynchronous default cannot
+    /// offer: without a known bound, a live process whose messages are unlucky is
+    /// indistinguishable from a crashed one. It constrains *timing* only — crashes and
+    /// partitions still stop delivery.
+    pub synchronous: Option<Duration>,
     /// Safety valve: a run stops after this many events, whatever the clock says.
     ///
     /// Protocols such as the stubborn link retransmit forever by design, so a run is bounded
@@ -40,6 +48,7 @@ impl Default for Config {
             latency_min: Duration::from_millis(1),
             latency_max: Duration::from_millis(1),
             reorder_delay: Duration::from_millis(50),
+            synchronous: None,
             max_steps: 1_000_000,
         }
     }
@@ -76,6 +85,35 @@ impl Config {
         self.latency_min = min;
         self.latency_max = max;
         self
+    }
+
+    /// Run synchronously: every message between connected, uncrashed processes is delivered
+    /// within `bound`, and none is lost or duplicated.
+    ///
+    /// The bound is readable afterwards through [`Config::delivery_bound`], so a protocol whose
+    /// correctness depends on it can be configured from the same value rather than from a guess.
+    /// Setting this overrides the fault knobs, and the override is enforced at delivery time —
+    /// calling `loss` afterwards will not quietly reintroduce loss.
+    pub fn synchronous(mut self, bound: Duration) -> Self {
+        self.synchronous = Some(bound);
+        self.loss = 0.0;
+        self.duplication = 0.0;
+        self.reorder = 0.0;
+        self.latency_max = bound;
+        if self.latency_min > bound {
+            self.latency_min = bound;
+        }
+        self
+    }
+
+    /// The upper bound on delivery, when the run is synchronous.
+    pub fn delivery_bound(&self) -> Option<Duration> {
+        self.synchronous
+    }
+
+    /// Whether this run makes a timing guarantee.
+    pub fn is_synchronous(&self) -> bool {
+        self.synchronous.is_some()
     }
 
     pub fn max_steps(mut self, n: u64) -> Self {

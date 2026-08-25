@@ -5,6 +5,7 @@ use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, Time};
 use recon_sim::{Config, DropReason, Sim, TraceEvent};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -488,4 +489,162 @@ fn a_crash_is_distinguishable_from_a_suspension_in_the_trace() {
     let ev = s.trace().events();
     assert!(ev.iter().any(|e| matches!(e, TraceEvent::Crashed { node, .. } if *node == A)));
     assert!(ev.iter().any(|e| matches!(e, TraceEvent::Suspended { node, .. } if *node == B)));
+}
+
+// ------------------------------------------ Synchronous mode: tasks 1.1 to 1.4
+
+fn sync_sim(bound: Duration, seed: u64) -> Sim<Parrot> {
+    Sim::new(Config::default().seed(seed).synchronous(bound), &[A, B, C], |me| Parrot { me })
+}
+
+/// Pair each Sent with its Delivered by payload, and return the observed delays.
+fn delays(s: &Sim<Parrot>) -> Vec<Duration> {
+    let mut sent: BTreeMap<u32, Time> = BTreeMap::new();
+    let mut out = Vec::new();
+    for e in s.trace().events() {
+        match e {
+            TraceEvent::Sent { at, msg: Wire(n), .. } => {
+                sent.insert(*n, *at);
+            }
+            TraceEvent::Delivered { at, msg: Wire(n), .. } => {
+                if let Some(t0) = sent.get(n) {
+                    out.push(at.saturating_since(*t0));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+fn the_delivery_bound_is_readable_from_the_run() {
+    // A protocol depending on the bound must be able to be configured from it, not from a guess.
+    let bound = Duration::from_millis(25);
+    let s = sync_sim(bound, 1);
+    assert_eq!(s.delivery_bound(), Some(bound));
+
+    let async_s = sim(Config::default());
+    assert_eq!(async_s.delivery_bound(), None, "the default makes no timing promise");
+}
+
+#[test]
+fn every_delivery_is_within_the_bound() {
+    let bound = Duration::from_millis(20);
+    for seed in 0..8u64 {
+        let mut s = sync_sim(bound, seed);
+        for i in 0..40u32 {
+            s.command_at(A, Duration::from_millis(i as u64), Cmd::SendTo(B, i));
+        }
+        s.run_until(Time::from_millis(2000));
+        let d = delays(&s);
+        assert_eq!(d.len(), 40, "seed {seed}: every message must be delivered");
+        for delay in d {
+            assert!(delay <= bound, "seed {seed}: delivery took {delay:?}, bound is {bound:?}");
+        }
+    }
+}
+
+#[test]
+fn nothing_is_lost_or_duplicated_in_synchronous_mode() {
+    let mut s = sync_sim(Duration::from_millis(15), 2);
+    for i in 0..60u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_until(Time::from_millis(1000));
+    assert_eq!(s.trace().drops(), 0);
+    assert_eq!(s.trace().duplicates(), 0);
+    assert_eq!(s.trace().delivery_count(), 60);
+}
+
+#[test]
+fn the_fault_knobs_cannot_subvert_the_synchronous_promise() {
+    // Enforcement is at delivery time, so builder order cannot reintroduce loss.
+    let bound = Duration::from_millis(10);
+    let mut s: Sim<Parrot> = Sim::new(
+        Config::default().seed(3).synchronous(bound).loss(0.9).duplication(0.9).reorder(0.9),
+        &[A, B, C],
+        |me| Parrot { me },
+    );
+    for i in 0..50u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_until(Time::from_millis(500));
+    assert_eq!(s.trace().drops(), 0, "loss set after synchronous must not take effect");
+    assert_eq!(s.trace().duplicates(), 0);
+    assert_eq!(s.trace().reorderings(), 0);
+    for delay in delays(&s) {
+        assert!(delay <= bound);
+    }
+}
+
+#[test]
+fn crashes_still_stop_delivery_in_synchronous_mode() {
+    // The mode constrains timing, not failure — a detector with nothing to detect is untestable.
+    let mut s = sync_sim(Duration::from_millis(10), 4);
+    s.crash(B);
+    s.command(A, Cmd::SendTo(B, 1));
+    s.run_until(Time::from_millis(200));
+    assert_eq!(s.trace().delivery_count(), 0);
+    assert_eq!(s.trace().drops_because(DropReason::RecipientCrashed), 1);
+}
+
+#[test]
+fn partitions_still_stop_delivery_in_synchronous_mode() {
+    let mut s = sync_sim(Duration::from_millis(10), 5);
+    s.partition(&[&[A, B], &[C]]);
+    s.command(A, Cmd::SendTo(C, 1));
+    s.command(A, Cmd::SendTo(B, 2));
+    s.run_until(Time::from_millis(200));
+    assert_eq!(s.trace().drops_because(DropReason::Partitioned), 1);
+    assert_eq!(s.trace().delivery_count(), 1);
+}
+
+#[test]
+fn the_default_remains_asynchronous() {
+    // The existing behaviour must be untouched: loss, duplication and jitter as before.
+    let mut s = sim(Config::default()
+        .seed(6)
+        .loss(0.5)
+        .duplication(0.5)
+        .latency(Duration::from_millis(1), Duration::from_millis(40)));
+    for i in 0..200u32 {
+        s.command(A, Cmd::SendTo(B, i));
+    }
+    s.run_until(Time::from_millis(2000));
+    assert!(s.trace().drops() > 0, "the default must still lose");
+    assert!(s.trace().duplicates() > 0, "and still duplicate");
+    assert!(delays(&s).iter().any(|d| *d > Duration::from_millis(20)), "and still jitter");
+}
+
+#[test]
+fn a_timer_due_during_a_suspension_fires_on_resume() {
+    // A suspension preserves state, and a pending timer is state. Dropping it leaves the process
+    // alive but permanently inert — which is how a heartbeat protocol silently dies.
+    let mut s = counters();
+    s.command(A, CountCmd::ArmTimer(Duration::from_millis(50)));
+    s.run_for(Duration::from_millis(10));
+
+    s.suspend(A);
+    s.run_for(Duration::from_millis(100)); // the timer comes due here, while suspended
+    assert_eq!(s.trace().timer_fires(), 0, "nothing fires while suspended");
+
+    s.restart(A);
+    s.run_for(Duration::from_millis(10));
+    assert_eq!(s.trace().timer_fires(), 1, "and it fires once the process is back");
+}
+
+#[test]
+fn a_crash_discards_timers_deferred_during_a_suspension() {
+    // Suspended then crashed: the crash still takes the volatile state, held timers included.
+    let mut s = counters();
+    s.command(A, CountCmd::ArmTimer(Duration::from_millis(50)));
+    s.run_for(Duration::from_millis(10));
+
+    s.suspend(A);
+    s.run_for(Duration::from_millis(100));
+    s.crash(A);
+    s.restart(A);
+    s.run_for(Duration::from_millis(500));
+    assert_eq!(s.trace().timer_fires(), 0, "a crash loses what a suspension was holding");
 }

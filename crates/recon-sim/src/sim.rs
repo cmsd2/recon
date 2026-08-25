@@ -52,6 +52,10 @@ pub struct Sim<P: Protocol> {
     queue: BTreeMap<(Time, u64), Scheduled<P>>,
     nodes: BTreeMap<NodeId, Node<P>>,
     partitions: Option<Vec<BTreeSet<NodeId>>>,
+    /// Timers that came due while their process was suspended. A suspension preserves state, and
+    /// a pending timer is state, so these are re-armed on resume rather than discarded. A crash
+    /// destroys them instead — see `discard_timers_of`.
+    deferred: Vec<(NodeId, P::Timer)>,
     /// Rebuilds a process after a crash, since a crash loses volatile state.
     make: Box<dyn FnMut(NodeId) -> P>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
@@ -86,11 +90,20 @@ where
             queue: BTreeMap::new(),
             nodes: map,
             partitions: None,
+            deferred: Vec::new(),
             make: Box::new(make),
             trace: Trace::default(),
             effects: Vec::new(),
             codec_check: None,
         }
+    }
+
+    /// The upper bound on delivery, when the run is synchronous.
+    ///
+    /// A protocol whose correctness rests on this bound should be configured from it rather than
+    /// from a timeout that happens to work.
+    pub fn delivery_bound(&self) -> Option<Duration> {
+        self.config.delivery_bound()
     }
 
     /// The current virtual time.
@@ -153,11 +166,32 @@ where
     }
 
     /// Resume `node`, whether it crashed or was suspended.
+    ///
+    /// Timers that came due while it was suspended fire now. A crashed process has none, since
+    /// the crash discarded them along with the rest of its volatile state.
     pub fn restart(&mut self, node: NodeId) {
-        if let Some(n) = self.nodes.get_mut(&node) {
-            n.liveness = Liveness::Running;
-            let at = self.now;
-            self.trace.push(TraceEvent::Restarted { at, node });
+        if !self.nodes.contains_key(&node) {
+            return;
+        }
+        self.nodes.get_mut(&node).expect("just checked").liveness = Liveness::Running;
+        let at = self.now;
+        self.trace.push(TraceEvent::Restarted { at, node });
+
+        let due: Vec<P::Timer> = {
+            let mut keep = Vec::new();
+            let mut due = Vec::new();
+            for (n, token) in self.deferred.drain(..) {
+                if n == node {
+                    due.push(token);
+                } else {
+                    keep.push((n, token));
+                }
+            }
+            self.deferred = keep;
+            due
+        };
+        for token in due {
+            self.schedule(at, Scheduled::Timer { node, token });
         }
     }
 
@@ -166,8 +200,10 @@ where
         self.nodes.get(&node).map(|n| n.liveness != Liveness::Running).unwrap_or(false)
     }
 
-    /// Timers are volatile state, so a crash takes them with it.
+    /// Timers are volatile state, so a crash takes them with it — including any held while the
+    /// process was suspended.
     fn discard_timers_of(&mut self, node: NodeId) {
+        self.deferred.retain(|(n, _)| *n != node);
         let doomed: Vec<(Time, u64)> = self
             .queue
             .iter()
@@ -229,6 +265,11 @@ where
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
             }
             Scheduled::Timer { node, token } => {
+                if self.suspended(node) {
+                    // Held, not dropped: the process still exists and will want this.
+                    self.deferred.push((node, token));
+                    return;
+                }
                 if self.crashed(node) {
                     return;
                 }
@@ -257,6 +298,10 @@ where
                 self.run_handler(to, |p, cx| p.on_msg(from, msg, cx));
             }
         }
+    }
+
+    fn suspended(&self, node: NodeId) -> bool {
+        self.nodes.get(&node).map(|n| n.liveness == Liveness::Suspended).unwrap_or(false)
     }
 
     fn crashed(&self, node: NodeId) -> bool {
@@ -324,7 +369,9 @@ where
             return;
         }
 
-        if self.config.loss > 0.0 && self.rng.random::<f64>() < self.config.loss {
+        let synchronous = self.config.is_synchronous();
+
+        if !synchronous && self.config.loss > 0.0 && self.rng.random::<f64>() < self.config.loss {
             self.trace.push(TraceEvent::Dropped { at, from, to, msg, reason: DropReason::Lost });
             return;
         }
@@ -332,7 +379,10 @@ where
         let delay = self.draw_delay(from, to, &msg);
         self.schedule(at + delay, Scheduled::Deliver { from, to, msg: msg.clone() });
 
-        if self.config.duplication > 0.0 && self.rng.random::<f64>() < self.config.duplication {
+        if !synchronous
+            && self.config.duplication > 0.0
+            && self.rng.random::<f64>() < self.config.duplication
+        {
             self.trace.push(TraceEvent::Duplicated { at, from, to, msg: msg.clone() });
             let second = self.draw_delay(from, to, &msg);
             self.schedule(at + second, Scheduled::Deliver { from, to, msg });
@@ -345,6 +395,11 @@ where
         let base = if hi > lo { self.rng.random_range(lo..=hi) } else { lo };
 
         let mut delay = Duration::from_nanos(base);
+        if let Some(bound) = self.config.synchronous {
+            // A reordering spike would exceed the bound, which is the one thing this mode
+            // promises not to do.
+            return delay.min(bound);
+        }
         if self.config.reorder > 0.0 && self.rng.random::<f64>() < self.config.reorder {
             let at = self.now;
             self.trace.push(TraceEvent::Reordered { at, from, to, msg: msg.clone() });
