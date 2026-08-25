@@ -223,3 +223,64 @@ ceremony below that.
 It is also a private extension. Anyone reading this code against the book will meet a notation
 the book does not use, so the mapping has to be stated once — here — and referenced rather than
 re-explained per module.
+
+## Keeping the book versions and the real versions side by side
+
+The obvious worry about adding `SessionChanged` is that it infects everything. It would, if it
+were a variant of the link's `Ind`: every layer above would have to match a case the textbook
+stack can never produce, and the algorithms would fill with dead branches — the opposite of code
+that reads like the page.
+
+It does not infect them if scope ends are their **own associated type** rather than an indication.
+
+```rust
+trait Protocol {
+    type Cmd;
+    type Ind;
+    type Msg;
+    type Timer;
+    type Scope;                                   // the notation's `Scopes:` section
+
+    fn on_scope_end(&mut self, _s: Self::Scope, _cx: &mut ProtoCx<'_, Self>) {}
+}
+```
+
+The book version declares that it has no scope conditions, and writes no handler:
+
+```rust
+impl Protocol for PerfectLink<P> {
+    type Scope = core::convert::Infallible;       // every property [always]
+    // no on_scope_end — nothing to write, and no branch to read past
+}
+```
+
+The session-aware version declares what it is bounded by, and handles it:
+
+```rust
+impl Protocol for SessionLink<P> {
+    type Scope = SessionScope;                    // SessionChanged | PeerRestarted
+    fn on_scope_end(&mut self, s: SessionScope, cx: &mut ProtoCx<'_, Self>) { … }
+}
+```
+
+Two properties make this work, and both were checked rather than assumed:
+
+- **A scope end cannot be constructed for the book version.** `Infallible` is uninhabited, so
+  there is no value to pass. A driver generic over `P` cannot inject one; the impossibility is a
+  type error, not a convention.
+- **An exhaustive match on an uninhabited type needs zero arms.** Where a handler is written
+  generically, `match s {}` is complete, so nothing is ever unreachable-by-comment.
+
+`Scope` then behaves exactly like `Msg`, `Ind` and `Timer` under composition: a parent that
+**bridges** handles the child's scope end and emits nothing upward; a parent that **propagates**
+re-wraps it into its own `Scope` type, the same way it re-wraps messages and timers. The
+notation's *Bridges / Propagates* section and the code become the same statement again.
+
+**The cost is real ceremony.** A fifth associated type on every protocol, a `type Scope =
+Infallible;` line on every textbook rung, and a fourth mapper in every composition call — all to
+serve a layer that does not exist yet.
+
+**So: not now.** This is recorded as the intended mechanism, verified to compile, to be added
+when the session-aware link is actually written. Adding it earlier would be building the
+abstraction before its second consumer, which is the failure this project already documented.
+The retrofit is contained: one associated type, and `Infallible` on each existing protocol.
