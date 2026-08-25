@@ -115,12 +115,30 @@ That is recovered with a `step` helper that runs one event against a throwaway s
 the effects, restoring `assert_eq!(step(&mut p, ev, ..), [..])` ergonomics without imposing it on
 production paths.
 
-### 5. Time is a project-defined monotonic type
+### 5. Time is a newtype over `std::time::Duration`
 
-Not `std::time::Instant`, not `tokio::time::Instant`. Neither can be constructed at an arbitrary
-value deterministically, which defeats the simulator. A plain monotonic value (nanoseconds since
-the start of a run) appears in every signature; the simulator advances it by fiat, and the eventual
-tokio driver derives it from a base instant.
+`Time` is a point in a run, represented as an offset from its start. It is not
+`std::time::Instant` and not any runtime's instant type: neither can be constructed at an
+arbitrary value, which is what a replayable run requires.
+
+*Why `Duration` and not a raw integer:* the constraint was only ever on `Instant`. `Duration` is
+a pure value type with no clock behind it, so it satisfies arbitrary construction completely. It
+also brings tested saturating arithmetic and the full constructor family, instead of hand-rolled
+nanosecond conversions. And its range is `(u64 secs, u32 nanos)` rather than a `u64` of
+nanoseconds, which lifts the ceiling from roughly 584 years to 584 billion — a bound that stops
+being worth thinking about. The cost is 16 bytes per `Time` instead of 8, which shows up in the
+simulator's queue key and is negligible there.
+
+*Why still a newtype:* a `Time` is a point and a `Duration` is a span. `Time + Duration -> Time`
+and `Time - Time -> Duration` are the only meaningful combinations, and the wrapper is what stops
+one being passed where the other belongs.
+
+*Why not a datetime library:* `chrono`, `time` and `jiff` all model civil and zoned time — wall
+clocks, calendars, time zones. A protocol has no use for any of that; it needs elapsed time and
+nothing else. A datetime type in the core would be an unnecessary dependency and an invitation to
+reason about wall-clock semantics that the simulator cannot reproduce. If human-readable
+timestamps are ever wanted for trace output or logging, that belongs at the edge, converting from
+a run's start instant.
 
 *Why now:* this type is in every handler signature that touches time. Retrofitting it is a
 mechanical but wide change.

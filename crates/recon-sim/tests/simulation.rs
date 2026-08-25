@@ -121,7 +121,7 @@ fn a_distant_timer_costs_no_real_time() {
     let wall = std::time::Instant::now();
     let mut s = sim(Config::default());
     s.command(A, Cmd::Tick(Duration::from_secs(3600)));
-    s.run_until(Time::from_nanos(u64::MAX / 2));
+    s.run_until(Time::MAX);
     assert_eq!(s.trace().timer_fires(), 1, "the timer must have fired");
     assert!(
         wall.elapsed() < Duration::from_secs(1),

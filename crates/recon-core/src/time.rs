@@ -2,54 +2,75 @@
 //!
 //! Deliberately not `std::time::Instant` or any runtime's instant type: neither can be
 //! constructed at an arbitrary value, which makes a seeded, replayable run impossible.
-//! `std::time::Duration` is used as-is — it is a pure value type with no clock behind it.
+//!
+//! `std::time::Duration` has no such problem — it is a pure value type with no clock behind it —
+//! so it is what [`Time`] is built from. The newtype is still worth having: a `Time` is a
+//! *point* and a `Duration` is a *span*, and keeping them distinct is what stops one being
+//! passed where the other belongs.
 
-use core::ops::{Add, Sub};
+use core::ops::{Add, AddAssign, Sub};
 use core::time::Duration;
 
-/// A point in time, measured as nanoseconds since the start of a run.
+/// A point in time, measured as an offset from the start of a run.
 ///
-/// Monotonic by construction: the simulator only ever advances it, and a real driver
-/// derives it from a base instant captured at startup.
+/// Monotonic by construction: the simulator only ever advances it, and a real driver derives it
+/// from a base instant captured at startup. Arithmetic saturates rather than wrapping, so
+/// monotonicity cannot be broken by overflow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct Time(u64);
+pub struct Time(Duration);
 
 impl Time {
     /// The start of a run.
-    pub const ZERO: Time = Time(0);
+    pub const ZERO: Time = Time(Duration::ZERO);
 
-    /// The latest representable time, useful as a sentinel for "no deadline".
-    pub const MAX: Time = Time(u64::MAX);
+    /// The latest representable time — around 584 billion years in, so useful as a
+    /// "no deadline" sentinel and unreachable in practice.
+    pub const MAX: Time = Time(Duration::MAX);
 
-    /// Construct a time at `nanos` nanoseconds after the start of the run.
+    /// A time `offset` after the start of the run.
+    pub const fn from_offset(offset: Duration) -> Self {
+        Time(offset)
+    }
+
     pub const fn from_nanos(nanos: u64) -> Self {
-        Time(nanos)
+        Time(Duration::from_nanos(nanos))
     }
 
-    /// Construct a time at `millis` milliseconds after the start of the run.
+    pub const fn from_micros(micros: u64) -> Self {
+        Time(Duration::from_micros(micros))
+    }
+
     pub const fn from_millis(millis: u64) -> Self {
-        Time(millis.saturating_mul(1_000_000))
+        Time(Duration::from_millis(millis))
     }
 
-    /// Nanoseconds since the start of the run.
-    pub const fn as_nanos(self) -> u64 {
+    pub const fn from_secs(secs: u64) -> Self {
+        Time(Duration::from_secs(secs))
+    }
+
+    /// The offset from the start of the run.
+    pub const fn as_offset(self) -> Duration {
         self.0
     }
 
+    /// Nanoseconds since the start of the run. `u128`, because the range exceeds `u64`.
+    pub const fn as_nanos(self) -> u128 {
+        self.0.as_nanos()
+    }
+
     /// Milliseconds since the start of the run, truncated.
-    pub const fn as_millis(self) -> u64 {
-        self.0 / 1_000_000
+    pub const fn as_millis(self) -> u128 {
+        self.0.as_millis()
     }
 
     /// Time elapsed from `earlier` to `self`, saturating at zero if `earlier` is later.
     pub fn saturating_since(self, earlier: Time) -> Duration {
-        Duration::from_nanos(self.0.saturating_sub(earlier.0))
+        self.0.saturating_sub(earlier.0)
     }
 
     /// `self` advanced by `d`, saturating at [`Time::MAX`].
     pub fn saturating_add(self, d: Duration) -> Time {
-        let nanos = u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
-        Time(self.0.saturating_add(nanos))
+        Time(self.0.saturating_add(d))
     }
 }
 
@@ -57,6 +78,12 @@ impl Add<Duration> for Time {
     type Output = Time;
     fn add(self, d: Duration) -> Time {
         self.saturating_add(d)
+    }
+}
+
+impl AddAssign<Duration> for Time {
+    fn add_assign(&mut self, d: Duration) {
+        *self = self.saturating_add(d);
     }
 }
 
@@ -77,14 +104,16 @@ mod tests {
         assert_eq!(Time::from_nanos(42).as_nanos(), 42);
         assert_eq!(Time::from_millis(3).as_nanos(), 3_000_000);
         assert_eq!(Time::from_nanos(5_500_000).as_millis(), 5);
+        assert_eq!(Time::from_secs(2), Time::from_millis(2_000));
+        assert_eq!(Time::from_offset(Duration::from_micros(7)).as_nanos(), 7_000);
     }
 
     #[test]
-    fn orders_by_nanos() {
+    fn orders_by_offset() {
         assert!(Time::ZERO < Time::from_nanos(1));
         assert!(Time::from_millis(2) > Time::from_millis(1));
         assert_eq!(Time::ZERO, Time::from_nanos(0));
-        assert!(Time::MAX > Time::from_millis(u32::MAX as u64));
+        assert!(Time::MAX > Time::from_secs(u32::MAX as u64));
 
         let mut v = [Time::from_nanos(3), Time::from_nanos(1), Time::from_nanos(2)];
         v.sort();
@@ -94,10 +123,12 @@ mod tests {
     #[test]
     fn adds_a_duration() {
         assert_eq!(Time::ZERO + Duration::from_millis(5), Time::from_millis(5));
-        assert_eq!(
-            Time::from_nanos(10) + Duration::from_nanos(7),
-            Time::from_nanos(17)
-        );
+        assert_eq!(Time::from_nanos(10) + Duration::from_nanos(7), Time::from_nanos(17));
+
+        let mut t = Time::ZERO;
+        t += Duration::from_millis(4);
+        t += Duration::from_millis(6);
+        assert_eq!(t, Time::from_millis(10));
     }
 
     #[test]
@@ -111,5 +142,13 @@ mod tests {
         assert_eq!(Time::MAX + Duration::from_secs(1), Time::MAX);
         assert_eq!(Time::from_millis(1) - Time::from_millis(9), Duration::ZERO);
         assert_eq!(Time::ZERO.saturating_add(Duration::MAX), Time::MAX);
+    }
+
+    #[test]
+    fn the_range_exceeds_a_u64_of_nanoseconds() {
+        // The ceiling a u64-of-nanos representation would have imposed was ~584 years.
+        let beyond_u64_nanos = Time::from_secs(600 * 365 * 24 * 60 * 60);
+        assert!(beyond_u64_nanos.as_nanos() > u64::MAX as u128);
+        assert!(beyond_u64_nanos < Time::MAX);
     }
 }
