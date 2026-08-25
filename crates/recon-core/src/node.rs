@@ -7,10 +7,10 @@ use core::fmt;
 /// Copy and totally ordered, so collections keyed by it iterate deterministically and
 /// membership sets can be enumerated in a stable order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeId(pub u32);
+pub struct NodeId(pub u64);
 
 impl NodeId {
-    pub const fn new(n: u32) -> Self {
+    pub const fn new(n: u64) -> Self {
         NodeId(n)
     }
 }
