@@ -11,9 +11,11 @@ pub mod perfect_failure_detector;
 pub mod perfect_link;
 pub mod reliable_broadcast;
 pub mod stubborn_link;
+pub mod uniform_reliable_broadcast;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
 pub use perfect_failure_detector::PerfectFailureDetector;
 pub use perfect_link::PerfectLink;
 pub use reliable_broadcast::ReliableBroadcast;
 pub use stubborn_link::StubbornLink;
+pub use uniform_reliable_broadcast::UniformReliableBroadcast;
