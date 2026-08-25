@@ -19,6 +19,10 @@ Three crates, all of them sans-IO:
 Rungs are transcribed from Cachin, Guerraoui & Rodrigues, with the pseudocode quoted in each
 module's documentation and every departure from the page stated and justified there.
 
+`README.md` is the map — the crates, the ladder as it currently stands, the documents and what
+each says, the prior art, and how to build, test and add a rung. It is the front door for anyone
+who has not read this file, and it is **kept current as part of the work**; see below.
+
 ## Commands
 
 ```bash
@@ -81,6 +85,29 @@ Four guards run, and each exists because of a specific way this project has fail
 
 `check-no-transport.sh` is meant to be **deleted deliberately**, in the commit that introduces
 transport under constraint 5. Do not weaken it; delete it, or leave it alone.
+
+## Keep `README.md` current
+
+`README.md` is a map of what is actually here, and a map that lags is worse than none — it sends
+a reader to a rung that does not exist, or omits the one they wanted. No guard can check it, so
+it is a standing obligation rather than a mechanical one: **update it in the same commit as the
+change that dates it**, not in a sweep afterwards.
+
+What dates it, and what to do:
+
+| Change | Update |
+|---|---|
+| A new protocol module | Add a row to the right ladder table — module, book reference, status, space bound — and say in the prose what guarantee it adds. Its status and space must match what the module's own documentation claims. |
+| A rung converted from transcription to implementation | Change its status and space in the table. The distinction is the whole point of `docs/bounded-space.md`; a stale table quietly asserts the opposite of what is true. |
+| A new test suite, or a suite that changes size materially | The suite table at the end, and the total. `cargo test --workspace` prints the counts. |
+| A new document in `docs/` | A row in the documentation table saying what it *says*, not what it is called. |
+| A new capability spec, or a new top-level directory under `openspec/specs/` | The specification tree. |
+| A guard added, or `check-no-transport.sh` deleted under constraint 5 | The guard table, and the surrounding prose if a constraint has been discharged. |
+| An `examples/` directory, once one exists | Replace the placeholder section, which currently says there are none and why. |
+| A new crate, or a change to how the project is built or run | The crate table and the getting-started commands. Verify the commands by running them. |
+
+Check the relative links still resolve when files move. The README claims specific test counts and
+specific statuses; if you cannot verify a claim you are about to write, do not write it.
 
 ## The constraints that govern the rewrite
 
