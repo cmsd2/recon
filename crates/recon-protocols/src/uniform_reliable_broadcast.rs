@@ -3,6 +3,12 @@
 //! Cachin, Guerraoui & Rodrigues, Module 3.3 and Algorithm 3.4 ("All-Ack Uniform Reliable
 //! Broadcast").
 //!
+//! **Status: transcription. Space: unbounded.** `pending` holds payloads, `ack` holds a process
+//! set per message, and `delivered` grows without limit. Deployable once collected — and this
+//! layer already computes the predicate it would need, since `correct ⊆ ack[m]` is a stability
+//! test: a message every correct process has seen can be dropped from `pending` and `ack` the
+//! moment it is delivered. See `docs/bounded-space.md`.
+//!
 //! Reliable broadcast guarantees agreement only among *correct* processes. A process that
 //! delivers a message and then crashes may leave the survivors never delivering it — and if that
 //! delivery had any external effect, the divergence cannot be repaired from above. Uniform

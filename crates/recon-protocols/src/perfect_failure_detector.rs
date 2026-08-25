@@ -2,6 +2,10 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 2.6 and Algorithm 2.5 ("Exclude on Timeout").
 //!
+//! **Status: deployable where synchrony is real. Space: bounded by membership.** All state is one
+//! entry per peer. A system without a known delivery bound wants an eventually perfect detector
+//! instead — see the timing note below.
+//!
 //! ```text
 //! PFD1: Strong completeness: Eventually, every process that crashes is permanently
 //!       detected by every correct process.

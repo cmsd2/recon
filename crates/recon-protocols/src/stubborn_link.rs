@@ -2,6 +2,16 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 2.2 and Algorithm 2.1 ("Retransmit Forever").
 //!
+//! **Status: academic. Space: unbounded.** This is how a perfect link is built when the only
+//! thing underneath is a lossy datagram service — the simulator's situation, and not a
+//! deployment's, where TCP and QUIC retransmit already. It stays because everything above needs a
+//! perfect link and the simulator offers only fair-loss.
+//!
+//! `sent` grows with every transmission and nothing retires an entry unless the layer above stops
+//! it, which Algorithm 2.2 never does. Every entry is re-sent on every tick, so the cost grows
+//! with everything ever sent. See `docs/bounded-space.md`; the fix is not to bound this but to
+//! ship a session link instead.
+//!
 //! Turns a fair-loss network into one where a message sent between correct processes is
 //! eventually delivered, by retransmitting it at a fixed interval. The cost is unbounded
 //! duplication: the recipient delivers the message infinitely often. Suppressing that is the

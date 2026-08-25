@@ -2,6 +2,10 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 3.2 and Algorithm 3.3 ("Eager Reliable Broadcast").
 //!
+//! **Status: transcription. Space: unbounded.** `delivered` grows with every message delivered,
+//! and the book omits its collection deliberately. Deployable once it is windowed — which weakens
+//! no duplication to hold within the retention window. See `docs/bounded-space.md`.
+//!
 //! Best-effort broadcast promises nothing when the sender crashes partway through: some processes
 //! deliver, others do not, and they disagree for ever. This layer adds **agreement** — if any
 //! correct process delivers a message, every correct process eventually does — by having every

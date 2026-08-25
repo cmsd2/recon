@@ -57,6 +57,38 @@ Fifty-one transmissions per message, none of them needed, and the rate grows wit
 ever sent. In a simulator this is a slow test. In a running system it is a link that degrades
 until it stops working.
 
+## Which rungs would actually be deployed
+
+The rule above matters most for code that ships, so it is worth being explicit about which rungs
+would. Some of the ladder exists to show how a guarantee is *constructed* from nothing; in a real
+deployment the transport has already constructed it.
+
+| Rung | In a deployment |
+|---|---|
+| fair-loss link | the network itself, or the simulator standing in for it |
+| **stubborn link** | **academic.** TCP and QUIC retransmit already |
+| **perfect link** | **academic as written.** Within a TCP session you have PL1–PL3 for free |
+| best-effort broadcast | **deployed.** Fan-out over links, state bounded by membership |
+| reliable broadcast | **deployed**, once `delivered` is windowed |
+| uniform reliable broadcast | **deployed**, once `pending`, `ack` and `delivered` are collected |
+| perfect failure detector | **deployed only where synchrony is real.** Otherwise ◇P |
+
+The stubborn and perfect links are how you obtain a perfect link when you have nothing but a lossy
+datagram service. That is the simulator's situation and not production's. They stay — everything
+above them needs a perfect link, and the simulator offers only fair-loss — but they are not what
+would ship, and their unbounded state is therefore an academic defect rather than an operational
+one.
+
+**What replaces them is not a better stubborn link.** It is a *session link*: TCP or QUIC supplying
+PL1–PL3 within a session, plus an event saying the session changed and an unknown suffix may have
+been lost. That is the design already recorded in
+[`conditional-guarantees.md`](conditional-guarantees.md), and this is the second argument for it —
+the first being honesty about reconnection, and this one being that the deployable link needs
+*less* state than the academic one, not more. Within a session TCP does not duplicate, so there is
+nothing to deduplicate; across a session boundary the epoch event says so explicitly.
+
+So the fix for the worst offender in the table above is not to bound it. It is to not ship it.
+
 ## The mechanisms that fix each
 
 **Stop retransmitting what has arrived.** The perfect link knows when a message was delivered —

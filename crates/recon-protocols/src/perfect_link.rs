@@ -2,6 +2,14 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 2.3 and Algorithm 2.2 ("Eliminate Duplicates").
 //!
+//! **Status: academic as written. Space: unbounded.** Within a TCP or QUIC session, PL1–PL3 come
+//! from the transport. The deployable equivalent is a *session link*: those guarantees from the
+//! session, plus an event when the session changes and an unknown suffix may have been lost. It
+//! needs less state than this, not more — within a session the transport does not duplicate, so
+//! there is nothing to deduplicate.
+//!
+//! `delivered` here grows with every message received. See `docs/bounded-space.md`.
+//!
 //! Built over the stubborn link, which delivers a message infinitely often. This layer keeps
 //! the first copy of each message and discards the rest, yielding reliable delivery with no
 //! duplication and no creation.

@@ -2,6 +2,9 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 3.1 and Algorithm 3.1 ("Basic Broadcast").
 //!
+//! **Status: deployable. Space: bounded by membership.** This layer holds only the process set;
+//! everything else belongs to the link beneath it.
+//!
 //! Sends the message individually to every process over perfect links. If the sender is
 //! correct, every correct process delivers it. If the sender crashes partway through, some
 //! processes may deliver and others may not — that is the guarantee this abstraction
