@@ -10,7 +10,7 @@ opens a port, and a build guard fails the commit that tries to.
 
 ## How this is ordered
 
-Six rules, which is what the build guards enforce. They are ordering rules rather than style
+Six constraints, which is what the build guards enforce. They are ordering rules rather than style
 preferences, and the numbering is referred to throughout.
 
 1. **Algorithms before transport.** No `TcpStream`, no reconnect logic, no multi-process shell
@@ -212,30 +212,9 @@ thinking without committing to anything. Project context and per-artifact rules 
 
 ## Prior art
 
-### An earlier codebase
-
-An earlier attempt at the same idea is checked out as detached worktrees beside this repository.
-Read them as notes — **do not port them**; the gossip code has known bugs that would come along.
-
-| Path | Ref | Contents |
-|---|---|---|
-| `../recon-ref/master` | `373a7b1` | `archive/recon-gossip/` (`upb.rs`, `lpb.rs` — the only algorithm code in it) plus the three crates |
-| `../recon-ref/link` | `090fd89` | Link v2 — channel-based `link.rs`, `transport.rs`, `pub_sub.rs` |
-| `../recon-ref/actix` | `8ad6fa9` | Link v3 — actix `tcp_server.rs`, `connection_manager.rs`, `connection_table.rs` |
-
-Everything in them is futures 0.1 / tokio-core 0.1 on edition 2015. That style is history, not a
-model.
-
-Two of its ideas are worth carrying forward as ideas rather than code: the **session-epoch contract**
-(every packet tagged with a session id that increments on reconnect, so the layer above is told a
-suffix may have been lost instead of being shown a reconnection as if it were invisible) — now
-implemented — and the **stale-write reconnect** (if the transport refuses a write past a deadline,
-tear the connection down rather than wait; a half-open-TCP defence).
-
-### Outside it
-
 - **Cachin, Guerraoui & Rodrigues**, *Introduction to Reliable and Secure Distributed
-  Programming*, 2nd ed. The ladder, the module notation, and the pseudocode every rung transcribes.
+  Programming*, 2nd ed. (Springer, 2011). The ladder, the module notation, and the pseudocode
+  every rung transcribes.
 - **The KTH distributed systems course** and its Scala/Kompics DSL, which is where the idea of
   writing these algorithms as composable message-passing components comes from.
 - **`quinn-proto`, `rustls`, `raft-rs`** — the prior art for sans-IO protocol cores in Rust. Each
