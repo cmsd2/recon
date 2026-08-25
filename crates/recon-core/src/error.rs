@@ -38,10 +38,7 @@ mod tests {
 
     #[test]
     fn every_variant_retains_its_cause() {
-        let e = CodecError::Decode {
-            type_name: "PlMsg",
-            source: Box::new(Underlying),
-        };
+        let e = CodecError::Decode { type_name: "PlMsg", source: Box::new(Underlying) };
         // The message identifies decoding as the cause...
         assert_eq!(e.to_string(), "failed to decode PlMsg");
         // ...and the underlying detail survives, rather than being flattened to a string.

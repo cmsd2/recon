@@ -17,12 +17,9 @@ pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
 
 /// Decode a value produced by [`encode`].
 pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
-    bincode::serde::decode_from_slice(bytes, bincode::config::standard())
-        .map(|(v, _)| v)
-        .map_err(|e| CodecError::Decode {
-            type_name: core::any::type_name::<T>(),
-            source: Box::new(e),
-        })
+    bincode::serde::decode_from_slice(bytes, bincode::config::standard()).map(|(v, _)| v).map_err(
+        |e| CodecError::Decode { type_name: core::any::type_name::<T>(), source: Box::new(e) },
+    )
 }
 
 /// Encode then decode, confirming the value survives unchanged.

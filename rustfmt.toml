@@ -1,0 +1,6 @@
+# Keep short struct literals, calls and control flow on one line. rustfmt's defaults
+# explode anything past 18 characters, which pulls single-line effect and message
+# constructions apart and works against code that should read as the algorithm.
+use_small_heuristics = "Max"
+max_width = 100
+edition = "2024"

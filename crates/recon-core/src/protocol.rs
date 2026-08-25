@@ -49,8 +49,7 @@ pub enum Event<C, M, T> {
 }
 
 /// The event type for a given protocol.
-pub type ProtoEvent<P> =
-    Event<<P as Protocol>::Cmd, <P as Protocol>::Msg, <P as Protocol>::Timer>;
+pub type ProtoEvent<P> = Event<<P as Protocol>::Cmd, <P as Protocol>::Msg, <P as Protocol>::Timer>;
 
 /// Deliver one event to `p` and return the effects it emitted.
 ///

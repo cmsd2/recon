@@ -34,6 +34,36 @@ In Claude Code, OpenSpec is driven by slash commands (note the colon):
 
 Project context and per-artifact rules for OpenSpec live in `openspec/config.yaml`.
 
+## Before every commit
+
+Run `./scripts/check.sh`. It must pass in full. Do not commit with anything outstanding —
+warnings accumulate into noise, and noise is how a real diagnostic gets missed.
+
+```bash
+./scripts/check.sh          # fmt, clippy -D warnings, build, test, project guards
+```
+
+Individually, if you need to isolate a failure:
+
+```bash
+cargo fmt --all             # formatting is not optional; rustfmt.toml is checked in
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --all-targets
+cargo test --workspace
+./scripts/check-ordered-maps.sh   # BTreeMap only: HashMap iteration order breaks replay
+./scripts/check-error-types.sh    # no io::Error for domain failures
+```
+
+Rules, not preferences:
+
+- **Zero compiler warnings.** Fix them; do not `#[allow]` them without a written reason.
+- **Zero clippy warnings.** `-D warnings` is the standard, so a lint is a build failure.
+- **`cargo fmt` before every commit.** `rustfmt.toml` sets `use_small_heuristics = "Max"`
+  so short struct literals stay on one line — the defaults pull effect and message
+  constructions apart, which works against code meant to read as the algorithm.
+- **Guards are part of the build.** They encode two failure modes that are silent at runtime
+  rather than loud, which is exactly why they are mechanical checks and not review notes.
+
 ## The constraints that govern the rewrite
 
 These come from `docs/postmortem.md` §5. They are ordering rules, not style preferences —

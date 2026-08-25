@@ -144,7 +144,12 @@ fn identical_event_sequences_produce_identical_effects() {
         let mut r = rng(9);
         let mut all = Vec::new();
         all.extend(step(&mut p, Event::Cmd(Ping(1)), Time::ZERO, &mut r));
-        all.extend(step(&mut p, Event::Msg { from: A, msg: Ping(2) }, Time::from_millis(1), &mut r));
+        all.extend(step(
+            &mut p,
+            Event::Msg { from: A, msg: Ping(2) },
+            Time::from_millis(1),
+            &mut r,
+        ));
         all.extend(step(&mut p, Event::Timer(Tick), Time::from_millis(2), &mut r));
         (all, p.seen)
     };
@@ -212,10 +217,7 @@ fn child_effects_surface_re_wrapped() {
         fx,
         vec![
             Effect::Send { to: B, msg: WrapMsg::Inner(Ping(5)) },
-            Effect::SetTimer {
-                after: Duration::from_millis(10),
-                token: WrapTimer::Inner(Tick)
-            },
+            Effect::SetTimer { after: Duration::from_millis(10), token: WrapTimer::Inner(Tick) },
         ],
         "the child's message and timer must arrive wrapped in the parent's types"
     );
@@ -253,9 +255,7 @@ impl Protocol for Outer {
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| {
-            inner.on_cmd(cmd, ccx)
-        });
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_cmd(cmd, ccx));
     }
     fn on_msg(&mut self, from: NodeId, OuterMsg::Down(m): OuterMsg, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
@@ -265,9 +265,7 @@ impl Protocol for Outer {
     }
     fn on_timer(&mut self, OuterTimer::Down(t): OuterTimer, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| {
-            inner.on_timer(t, ccx)
-        });
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_timer(t, ccx));
     }
 }
 
@@ -371,4 +369,3 @@ fn mapping_preserves_effect_shape() {
         Effect::SetTimer { after: Duration::ZERO, token: 2 }
     );
 }
-

@@ -8,10 +8,10 @@ use crate::config::Config;
 use crate::trace::{DropReason, Trace, TraceEvent};
 use core::time::Duration;
 use rand::{Rng, SeedableRng};
-use std::collections::{BTreeMap, BTreeSet};
 use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
 use recon_core::{Cx, Effect, NodeId, Protocol, Time};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Round-trips one message through the wire codec, when codec checking is enabled.
 type CodecCheck<M> = fn(&M) -> Result<M, CodecError>;
@@ -213,7 +213,11 @@ where
     }
 
     /// Run one handler and interpret everything it emits.
-    fn run_handler(&mut self, node: NodeId, f: impl FnOnce(&mut P, &mut Cx<'_, P::Msg, P::Ind, P::Timer>)) {
+    fn run_handler(
+        &mut self,
+        node: NodeId,
+        f: impl FnOnce(&mut P, &mut Cx<'_, P::Msg, P::Ind, P::Timer>),
+    ) {
         let mut effects = core::mem::take(&mut self.effects);
         effects.clear();
 

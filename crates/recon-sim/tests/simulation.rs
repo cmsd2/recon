@@ -61,14 +61,12 @@ fn sim(config: Config) -> Sim<Parrot> {
 
 /// Drive a busy run and return its trace rendered comparably.
 fn busy_run(seed: u64) -> Vec<String> {
-    let mut s = sim(
-        Config::default()
-            .seed(seed)
-            .loss(0.3)
-            .duplication(0.2)
-            .reorder(0.2)
-            .latency(Duration::from_millis(1), Duration::from_millis(20)),
-    );
+    let mut s = sim(Config::default()
+        .seed(seed)
+        .loss(0.3)
+        .duplication(0.2)
+        .reorder(0.2)
+        .latency(Duration::from_millis(1), Duration::from_millis(20)));
     for i in 0..40u32 {
         s.command_at(A, Duration::from_millis(i as u64), Cmd::SendTo(B, i));
         s.command_at(B, Duration::from_millis(i as u64), Cmd::SendTo(C, i));
@@ -217,9 +215,9 @@ fn duplication_delivers_a_message_twice() {
 
 #[test]
 fn latency_jitter_reorders_messages() {
-    let mut s = sim(
-        Config::default().seed(11).latency(Duration::from_millis(1), Duration::from_millis(60)),
-    );
+    let mut s = sim(Config::default()
+        .seed(11)
+        .latency(Duration::from_millis(1), Duration::from_millis(60)));
     for i in 0..30u32 {
         s.command_at(A, Duration::from_millis(i as u64), Cmd::SendTo(B, i));
     }
@@ -293,10 +291,10 @@ fn the_trace_records_every_kind_of_event() {
 
 #[test]
 fn the_trace_is_ordered_by_time() {
-    let mut s = sim(Config::default().seed(4).loss(0.2).latency(
-        Duration::from_millis(1),
-        Duration::from_millis(30),
-    ));
+    let mut s = sim(Config::default()
+        .seed(4)
+        .loss(0.2)
+        .latency(Duration::from_millis(1), Duration::from_millis(30)));
     for i in 0..30u32 {
         s.command_at(A, Duration::from_millis(i as u64), Cmd::SendTo(B, i));
     }

@@ -75,7 +75,8 @@ fn a_second_send_does_not_arm_a_second_timer() {
     let mut p = link();
     let mut r = rng();
     step(&mut p, Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 }), Time::ZERO, &mut r);
-    let fx = step(&mut p, Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 }), Time::ZERO, &mut r);
+    let fx =
+        step(&mut p, Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 }), Time::ZERO, &mut r);
     assert_eq!(fx, vec![Effect::Send { to: B, msg: 2 }], "no second timer");
 }
 
@@ -133,10 +134,7 @@ fn a_stopped_transmission_stops_in_a_run() {
     let after = s.trace().sends().count();
 
     assert!(before >= 4, "should have retransmitted before stopping, saw {before}");
-    assert!(
-        after - before <= 1,
-        "after stopping, transmissions must cease: {before} then {after}"
-    );
+    assert!(after - before <= 1, "after stopping, transmissions must cease: {before} then {after}");
 }
 
 // -------------------------------------------------- Stubborn delivery: task 4.2
@@ -200,13 +198,11 @@ fn no_delivery_is_required_to_a_crashed_process() {
 
 #[test]
 fn every_delivery_corresponds_to_an_earlier_send() {
-    let mut s = sim(
-        Config::default()
-            .seed(8)
-            .loss(0.3)
-            .duplication(0.3)
-            .latency(Duration::from_millis(1), Duration::from_millis(15)),
-    );
+    let mut s = sim(Config::default()
+        .seed(8)
+        .loss(0.3)
+        .duplication(0.3)
+        .latency(Duration::from_millis(1), Duration::from_millis(15)));
     s.command(A, Cmd::Send { id: SendId(1), to: B, msg: 11 });
     s.command(B, Cmd::Send { id: SendId(2), to: A, msg: 22 });
     s.run_until(Time::from_millis(400));
