@@ -1,0 +1,15 @@
+[package]
+name = "recon-sim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+recon-core = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

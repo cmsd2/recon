@@ -84,49 +84,101 @@ the same way.
 
 ---
 
-## 3. Evidence: four bugs the project had no way to find
+## 3. Evidence: what reading the code proves, and what it doesn't
 
-These are from reading, not running — which is the point. Each one is invisible to nine processes
-writing to log files, and each one is a two-line assertion in a simulator.
+An earlier draft of this document listed four bugs in the gossip code, found by reading it against
+remembered pseudocode. Three of the four were wrong. They are recorded here rather than quietly
+deleted, because how they failed is the most useful evidence in the document.
 
-### `archive/recon-gossip/src/lpb.rs:158` — inverted probability
+Checked against Cachin, Guerraoui & Rodrigues, *Introduction to Reliable and Secure Distributed
+Programming*, 2nd ed., §3.8, pages 95–100:
 
-The field is documented `alpha: f32, // probability of storing message`. The code stores with
-probability *1 − α*:
+### Not a bug — `lpb.rs:158`, the α probability
 
-```rust
-if rng.gen_range(0f32, 1f32) > self.alpha {
-    self.stored.insert(msg_id.clone(), dm.clone());
-}
+Claimed: the field is documented `// probability of storing message` but stores with probability
+*1 − α*, so α is inverted.
+
+Algorithm 3.10 (page 98) prints:
+
+```
+upon event ⟨ upb, Deliver | p, [DATA, s, m, sn] ⟩ do
+    if random([0, 1]) > α then
+        stored := stored ∪ {[DATA, s, m, sn]};
 ```
 
-The example passes `alpha = 0.5`, where the bug is perfectly symmetric and therefore undetectable.
-Retransmission capacity is inverted for every other value.
+`lpb.rs` is character-for-character the book. What is genuinely odd belongs to the source, not the
+code: the book's *prose* on page 99 says a process "stores a copy of the message with probability
+α," which contradicts its own pseudocode. Page 100 breaks the tie — "all of them were to store it
+(by setting α = 0)" — and store-always at α = 0 only holds under *1 − α*. So the pseudocode is
+right and the prose is loose. `lpb.rs` copied the pseudocode into its code and the prose into its
+comment, faithfully reproducing the book's own inconsistency.
 
-### `archive/recon-gossip/src/upb.rs:111–115` — message amplification
+### Not a bug — `upb.rs:111–115`, relay before dedup
 
-`handle_broadcast` relays whenever `ttl > 0`, and only *afterwards* checks whether the message was
-already delivered. Eager probabilistic broadcast relays on first receipt only. Here every
-duplicate is re-gossiped to `k` fresh targets, so redundant traffic compounds with each round
-rather than terminating.
+Claimed: relaying before checking `delivered` re-gossips duplicates and compounds traffic.
 
-### `archive/recon-gossip/src/lpb.rs:170–179` — retransmit storm
+Algorithm 3.9 (page 95) places the relay *outside* the dedup guard, at the same level:
 
-On a sequence gap, a `Request` is gossiped for every missing sequence number, guarded only by
-`pending.contains_key`. Nothing records that a request was already sent, so each subsequent
-out-of-order arrival re-requests the same gaps — and `handle_lpb_request` relays requests onward
-with their own TTL. Under real reordering this feeds back on itself.
+```
+upon event ⟨ fll, Deliver | p, [GOSSIP, s, m, r] ⟩ do
+    if m ∉ delivered then
+        delivered := delivered ∪ {m};
+        trigger ⟨ pb, Deliver | s, m ⟩;
+    if r > 1 then gossip([GOSSIP, s, m, r − 1]);
+```
 
-### `archive/recon-gossip/src/upb.rs:223` — garbage collection in the hot path
+The book names the consequence on the same page: "the algorithm induces a significant amount of
+redundancy in the message exchanges: any given process may receive the same message many times."
+The redundancy is analysed, not accidental. The TTL encoding differs harmlessly — the book starts
+at `R` and stops at `r = 1`, the code starts at `rounds - 1` and stops at `ttl = 0`, giving the
+same number of relay hops.
+
+### Not a bug — `lpb.rs:170–179`, repeated retransmit requests
+
+Claimed: nothing records that a request was already sent, so gaps are re-requested on every
+out-of-order arrival.
+
+Algorithm 3.10 (page 98) does exactly this, guarded only by `pending`:
+
+```
+else if sn > next[s] then
+    pending := pending ∪ {[DATA, s, m, sn]};
+    forall missing ∈ [next[s], . . . , sn − 1] do
+        if no m′ exists such that [DATA, s, m′, missing] ∈ pending then
+            gossip([REQUEST, self, s, missing, R − 1]);
+    starttimer(∆, s, sn);
+```
+
+### Stands — `upb.rs:223`, garbage collection in the hot path
 
 `delivered_gc()` runs on *every* `poll()`, draining and rebuilding the entire delivered-set to
-expire entries by wall-clock age. Poll runs on every event. The cost of receiving one message is
-linear in everything ever received.
+expire entries by wall-clock age. Poll runs on every event, so the cost of receiving one message
+is linear in everything ever received.
 
-**Honourable mentions:** `examples/gossip.rs:103` calls `self.poll()` recursively from inside
+This one is the implementation's own: page 100 says "garbage collection of the stored message
+copies is omitted in the pseudo code for simplicity," so there was no spec to follow and the
+chosen strategy is genuinely expensive.
+
+### Stands — the futures-0.1 defects
+
+Unrelated to the algorithms. `examples/gossip.rs:103` calls `self.poll()` recursively from inside
 `poll`; `multiplex.rs:164` and `App::poll` both return `Ok(Async::NotReady)` unconditionally at
-the end, the classic futures-0.1 lost-wakeup shape; `lpb.rs:189` unwraps a map lookup inside a
-message handler.
+the end, the classic lost-wakeup shape; `lpb.rs:189` unwraps a map lookup inside a message
+handler.
+
+### What this episode actually demonstrates
+
+The original claim was that the project could not find its own bugs. The stronger claim, which
+these corrections earn, is this: **nobody can settle these questions by reading — including a
+careful reader with the book open.** Three confident false positives came out of exactly the
+method the project had available to it, and they were only resolved by going to the source
+line by line.
+
+Every one of them would have been settled in seconds by a simulator asserting properties over the
+delivery trace: messages per broadcast against the analytical bound, store rate against α,
+requests per gap. Not because such a simulator is clever, but because it answers questions that
+reading cannot answer at all. That is the argument of §5.3, and it applies to the reader of the
+code as much as to its author.
 
 ---
 
@@ -163,14 +215,19 @@ The right shape — abstract transport construction so it can be swapped. It was
 that: one implementation, TCP, which is why nothing could be tested. Twelve lines. Rewrite it,
 and this time write the in-memory implementation first.
 
-### Notes only — `upb.rs` and `lpb.rs`
+### Read closely — `upb.rs` and `lpb.rs`
 
 `archive/recon-gossip/src/` — 574 lines
 
-Value as a translation you have already done once: Cachin, Guerraoui & Rodrigues algorithms 3.9
-and 3.10 rendered into concrete data structures, with the awkward parts (sequence tracking,
-pending maps, timeout skip-over) already worked out. Read them as notes when you rewrite. Don't
-port them — four of the bugs above would come with.
+Better reference material than the first draft of this document credited. Verified against the
+book in §3: these are faithful transcriptions of algorithms 3.9, 3.10 and 3.11, with the awkward
+parts — sequence tracking, pending maps, timeout skip-over, TTL encoding — already worked out
+correctly. The translation from pseudo-code to concrete data structures has been done once and
+it holds up.
+
+What should not come across is the futures-0.1 plumbing they are embedded in: the `Stream` impls,
+the manual timer vectors, the `serde_json::Value` boundaries, the `io::Error` returns. Take the
+algorithm logic; leave the scaffolding.
 
 ### Discard — `multiplex.rs`, `switchboard.rs`, `pub_sub.rs`, `tcp_server.rs`, `recon-service`
 
@@ -244,8 +301,9 @@ faster than real time.
 Then assert properties over the delivery trace rather than reading logs. For lazy probabilistic
 broadcast: per-sender FIFO on delivered messages; no message delivered twice; with zero loss,
 everything is eventually delivered; a gap is skipped only after δ has actually elapsed; and total
-messages per broadcast stays under a bound. That last one catches the amplification bug in
-section 3 on the first run.
+messages per broadcast stays under a bound. Every question §3 had to settle by hand — does the
+relay compound, is the store rate α or 1−α, how many requests does one gap produce — is one of
+these assertions, answered on the first run instead of by argument.
 
 Because the schedule is a seed, a failing run is a number you can replay and hand to a shrinker.
 Worth surveying before you build: `turmoil`, `madsim` and `stateright` all occupy this space —
@@ -254,8 +312,8 @@ teaching framework gives you. *Check their current state; this survey has a know
 
 ### 4. Compose statically — and extract the DSL, don't design it
 
-The Scala framework you're remembering can wire an arbitrary runtime graph of components because
-the JVM erases types and boxes everything. Reproducing that dynamism in Rust means trait objects
+Kompics — the framework from the KTH course, and the reason this project started — can wire an
+arbitrary runtime graph of components because the JVM erases types and boxes everything. Reproducing that dynamism in Rust means trait objects
 plus `Any` downcasting, which is `multiplex_key: String` wearing a better hat. That instinct is
 what produced the JSON-in-JSON.
 
@@ -331,7 +389,14 @@ approached in the opposite order.
 ## Colophon
 
 Drawn from the working tree at `373a7b1` and the unmerged `origin/link` and `origin/actix`
-branches. Findings in section 3 come from reading the archived sources, not from executing them.
-The Scala framework is inferred from the module names `upb` / `lpb` and the algorithm structure,
-which follow Cachin, Guerraoui & Rodrigues closely — if that inference is wrong, section 5 step 4
-is the part to re-read.
+branches. The archived sources were read, never executed — §3 is about what that limitation
+costs.
+
+Section 3 was revised after checking every claim against Cachin, Guerraoui & Rodrigues,
+*Introduction to Reliable and Secure Distributed Programming*, 2nd ed. (Springer, 2011),
+§3.8 "Probabilistic Broadcast", algorithms 3.9–3.11 on pages 95–99. Three of its four original
+findings did not survive that check and are marked as withdrawn rather than removed.
+
+The Scala framework was originally inferred from the module names `upb` / `lpb`; the author has
+since confirmed it was Kompics, from the KTH distributed systems course that uses this book as
+its text. Section 5 step 4 rests on that confirmation rather than on inference.

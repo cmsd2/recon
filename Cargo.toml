@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/recon-core",
+    "crates/recon-sim",
+    "crates/recon-protocols",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Chris Dawes <cmsd2@cantab.net>"]
+repository = "https://github.com/cmsd2/recon"
+
+[workspace.dependencies]
+recon-core = { path = "crates/recon-core" }
+recon-sim = { path = "crates/recon-sim" }
+recon-protocols = { path = "crates/recon-protocols" }
+
+rand = { version = "0.9", default-features = false, features = ["std", "std_rng"] }
+rand_chacha = "0.9"
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+thiserror = "2"
