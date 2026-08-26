@@ -88,6 +88,8 @@ pub struct Sim<P: Protocol> {
     sessions: BTreeMap<(NodeId, NodeId), u64>,
     /// The next epoch to hand out for each pair, so epochs increase across re-establishment.
     next_epoch: BTreeMap<(NodeId, NodeId), u64>,
+    /// When each pair's last session ended, so that none re-opens in the instant it closed.
+    ended_at: BTreeMap<(NodeId, NodeId), Time>,
     /// The last time anything was delivered from one process to another, so that a message is
     /// never delivered before one sent earlier the same way. This is what makes a session FIFO.
     last_delivery: BTreeMap<(NodeId, NodeId), Time>,
@@ -137,6 +139,7 @@ where
             make: Box::new(make),
             sessions: BTreeMap::new(),
             next_epoch: BTreeMap::new(),
+            ended_at: BTreeMap::new(),
             last_delivery: BTreeMap::new(),
             session_scope: None,
             storage: BTreeMap::new(),
@@ -692,15 +695,28 @@ where
             .collect();
         inflight.sort();
         let keep = self.rng.random_range(0..=inflight.len());
-        for k in inflight.into_iter().skip(keep) {
+        for k in inflight.iter().copied().skip(keep) {
             if let Some(Scheduled::Deliver { from, to, msg }) = self.queue.remove(&k) {
                 self.trace.push(TraceEvent::SuffixLost { at, from, to, msg });
             }
         }
 
-        // Ordering restarts with the next session.
+        // What survived is flushed now, before the ending is announced. A transport delivers
+        // nothing on a connection after it has surfaced the close, and a scope boundary that
+        // arrivals can trail is not a boundary: the layer above resends on `Established`, so a
+        // straggler from the old epoch would arrive behind the new epoch's traffic under an
+        // identifier nothing distinguishes. Re-scheduled in their existing order, so the session
+        // is FIFO right up to its last message.
+        for k in inflight.into_iter().take(keep) {
+            if let Some(item) = self.queue.remove(&k) {
+                self.schedule(at, item);
+            }
+        }
+
+        // Ordering restarts with the next session, and the next one cannot be this instant.
         self.last_delivery.remove(&(key.0, key.1));
         self.last_delivery.remove(&(key.1, key.0));
+        self.ended_at.insert(key, at);
 
         self.trace.push(TraceEvent::SessionEnded { at, a: key.0, b: key.1, epoch, reason });
 
@@ -746,7 +762,14 @@ where
     }
 
     /// Establish a session if the pair can communicate and none exists.
+    ///
+    /// A process needs no session with itself, and giving it one would announce `Established`
+    /// twice per node — the pair loop visits `(a, b)` and `(b, a)` — so a layer that resends on
+    /// re-establishment would resend to itself twice per round.
     fn ensure_session(&mut self, a: NodeId, b: NodeId) -> bool {
+        if a == b {
+            return true;
+        }
         let key = pair(a, b);
         if self.sessions.contains_key(&key) {
             return true;
@@ -754,6 +777,13 @@ where
         // Strictly crashed: a suspended process still exists, and the scope event it is owed is
         // held for it rather than skipped.
         if !self.connected(a, b) || self.crashed(a) || self.crashed(b) {
+            return false;
+        }
+        // Not in the instant the last one ended. Everything that ending owes the two endpoints —
+        // the flushed prefix, then `Ended` — is scheduled at that instant, and a successor
+        // established among them would reach a layer as `Established` before the `Ended` it
+        // replaces. Reconnection takes time; the sweep opens the next one.
+        if self.ended_at.get(&key) == Some(&self.now) {
             return false;
         }
         // Epochs are per pair and only ever increase, so a re-established session is

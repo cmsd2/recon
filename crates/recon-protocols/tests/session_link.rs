@@ -225,3 +225,20 @@ fn a_crash_ends_the_session_and_the_survivor_is_told() {
         reported(&s, A).into_iter().filter(|i| matches!(i, Ind::SessionEnded { .. })).count();
     assert_eq!(endings, 1, "A is told its session with B is gone");
 }
+
+#[test]
+fn a_dead_session_is_not_reported_as_current() {
+    // `epoch()` answers "what is in force", not "what was the last number I saw". A layer asking
+    // it is deciding whether it can send; answering with a dead session's epoch would say yes.
+    let mut s = sim(21);
+    s.run_for(Duration::from_millis(50));
+    let live = s.protocol(A).unwrap().epoch(B).expect("a session with B is up");
+
+    s.break_session(A, B);
+    s.run_for(Duration::from_micros(1)); // the ending reaches the layer, nothing has reconnected
+    assert_eq!(s.protocol(A).unwrap().epoch(B), None, "no session, so no epoch in force");
+
+    s.run_for(Duration::from_millis(500));
+    let again = s.protocol(A).unwrap().epoch(B).expect("the link reconnects on its own");
+    assert!(again > live, "and the successor is a later epoch: {live} then {again}");
+}

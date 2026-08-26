@@ -820,6 +820,50 @@ fn break_with_traffic(seed: u64) -> (usize, Vec<u32>) {
 }
 
 #[test]
+fn nothing_is_delivered_on_a_session_after_it_has_ended() {
+    // A scope boundary that arrivals can trail is not a boundary. The wire carries no epoch, so a
+    // straggler from the old session is indistinguishable from new traffic — and the layer above
+    // resends on `Established`, so it would be reading the answer to a question it has not asked
+    // yet. A real transport hands over what it has and *then* surfaces the close.
+    for seed in 0..20u64 {
+        let mut s = session_sim(seed);
+        for i in 0..40u32 {
+            s.command(A, Cmd::SendTo(B, i));
+        }
+        s.run_for(Duration::from_millis(1));
+        s.break_session(A, B);
+        s.run_until(Time::from_millis(2000));
+
+        let ended = s
+            .trace()
+            .events()
+            .iter()
+            .find_map(|e| match e {
+                TraceEvent::SessionEnded { at, a, b, .. } if (*a, *b) == (A, B) => Some(*at),
+                _ => None,
+            })
+            .expect("the break is recorded");
+        let reopened = s.trace().events().iter().find_map(|e| match e {
+            TraceEvent::SessionOpened { at, a, b, epoch } if (*a, *b) == (A, B) && *epoch > 1 => {
+                Some(*at)
+            }
+            _ => None,
+        });
+        assert!(reopened.is_none_or(|t| t > ended), "seed {seed}: nor may it reopen that instant");
+
+        let trailing = s.trace().events().iter().filter(|e| {
+            matches!(e, TraceEvent::Delivered { at, from, to, .. }
+                if pair_is(*from, *to) && *at > ended)
+        });
+        assert_eq!(trailing.count(), 0, "seed {seed}: no arrival may trail the ending");
+    }
+}
+
+fn pair_is(from: NodeId, to: NodeId) -> bool {
+    (from == A && to == B) || (from == B && to == A)
+}
+
+#[test]
 fn what_survives_a_break_is_a_prefix() {
     // Whatever the cut, the session was FIFO up to it — so the survivors are a prefix, never a
     // gap. This holds for every seed, including those where nothing is lost.

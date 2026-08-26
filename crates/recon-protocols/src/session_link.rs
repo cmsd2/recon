@@ -61,8 +61,12 @@ pub enum Ind<P> {
 /// Reliable ordered delivery within a session, and honesty across one.
 #[derive(Debug, Default)]
 pub struct SessionLink<P> {
-    /// The epoch believed current for each peer. One entry per peer ever talked to, and nothing
-    /// that grows with messages.
+    /// The epoch **currently in force** for each peer: inserted on an establishment and removed
+    /// on the matching ending. One entry per peer with a live session, and nothing that grows
+    /// with messages.
+    ///
+    /// Removing is the point. Keeping the number after the ending would report a dead session as
+    /// current, which is the opposite of what this layer exists to say.
     epochs: BTreeMap<NodeId, u64>,
     _payload: core::marker::PhantomData<P>,
 }
@@ -72,12 +76,12 @@ impl<P> SessionLink<P> {
         SessionLink { epochs: BTreeMap::new(), _payload: core::marker::PhantomData }
     }
 
-    /// The epoch this link believes current for `peer`, if it has seen one.
+    /// The epoch in force with `peer`, or `None` when there is no session with it.
     pub fn epoch(&self, peer: NodeId) -> Option<u64> {
         self.epochs.get(&peer).copied()
     }
 
-    /// How many peers this link holds state for. Its entire footprint.
+    /// How many peers this link currently holds a session with. Its entire footprint.
     pub fn tracked_peers(&self) -> usize {
         self.epochs.len()
     }
@@ -112,6 +116,9 @@ impl<P: Clone> Protocol for SessionLink<P> {
         // the only moment on which anything can be resent.
         match event {
             SessionEvent::Ended { peer, epoch } => {
+                // The session is gone, so the epoch is not current any more. Leaving it would
+                // have `epoch()` report a dead session as live.
+                self.epochs.remove(&peer);
                 cx.indicate(Ind::SessionEnded { peer, epoch });
             }
             SessionEvent::Established { peer, epoch } => {
