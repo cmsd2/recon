@@ -213,8 +213,11 @@ Two things follow for anyone writing a new rung:
 
 - Layers above the link may depend on its `Cmd` and `Ind` types and nothing else. That is the
   seam a session-aware or logged implementation gets swapped through.
-- `Sim::crash` currently preserves state, so it models a pause rather than a crash. Do not rely
-  on it to test what a restarted process actually faces.
+- `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile
+  state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause. What is
+  *not* yet modelled is anything surviving a crash: there is no stable storage, so a rung that
+  needs to remember across an incarnation — an epoch, a promise, a decision — has nowhere to put
+  it. That is a gap to close before any algorithm claims to survive a restart.
 
 ## Anti-patterns, all of them load-bearing history
 
