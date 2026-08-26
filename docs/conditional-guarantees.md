@@ -56,7 +56,7 @@ so rather than pretend.
 | Redundancy lives in | Survives | So it can bridge |
 |---|---|---|
 | memory | session change | a reconnect — resend what was unacknowledged |
-| stable storage | process restart | a crash — the book's *logged* variants |
+| stable storage | process restart | a crash — the book's *logged* variants, now implemented |
 | other processes | this process dying | a sender crash — reliable broadcast's whole purpose |
 
 That gives a second reading of the whole sequence. Each abstraction is not merely "stronger"; it bridges one
@@ -105,9 +105,14 @@ precise as Theorem 8 and its corollaries.
 
 There is a second conflation worth avoiding. The scope of "no duplication" is the **local**
 process's incarnation, not the peer's: it is *my* deduplication set that is volatile, so it is
-*my* restart that lets me deliver again. That boundary needs no event at all — it is the
-process's own `⟨Init⟩`, which the book's notation already has, and there is nobody to notify,
-because the process that would raise the event is the one that ceased to exist.
+*my* restart that lets me deliver again.
+
+That boundary needs no event **at its end**, because the process that would raise one is the one
+that ceased to exist. Its *beginning* is a different matter, and the distinction is easy to lose.
+An incarnation begins at the process's own `⟨Init⟩` or `⟨Recovery⟩` — exactly one of them, as the
+book has it — and both are observable by the process itself and can produce effects. That is where
+the work goes: retrieving what survived, re-announcing it, writing down what a first start must
+remember. A constructor cannot serve, because it runs in both cases and emits nothing.
 
 `SessionChanged` should be **additive**: the textbook implementation over the simulator never
 emits it, so every existing proof and test stays valid, while every layer written from now on is
@@ -199,9 +204,9 @@ Bridges:
     session(q)   by retaining unacknowledged messages in memory and resending them,
                  restoring PL1 across the boundary.
 Propagates:
-    nothing      the incarnation boundary is this process's own ⟨Init⟩; there is
-                 nobody to notify, and the peer's incarnation is not observable
-                 from here at all.
+    nothing      the incarnation *ends* with nobody left to notify, and the peer's
+                 incarnation is not observable from here at all. It *begins* at this
+                 process's own ⟨Init⟩ or ⟨Recovery⟩, which is where the work goes.
 ```
 
 ### How to read a scope tag

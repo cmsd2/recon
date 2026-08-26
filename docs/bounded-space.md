@@ -40,6 +40,22 @@ Every protocol above the failure detector violates the rule.
 | `perfect_link` | `delivered` | messages ever received ❌ |
 | `reliable_broadcast` | `delivered` | messages ever delivered ❌ |
 | `uniform_reliable_broadcast` | `pending` (with payloads), `ack`, `delivered` | messages ever seen ❌ |
+| `flooding_consensus` | `receivedfrom`, `proposals`, per round | **membership and rounds** ✅ |
+| `majority_ack_uniform_reliable_broadcast` | `pending`, `ack`, `delivered` | messages ever seen ❌ |
+| `stubborn_broadcast` | `peers`, and what is outstanding | **membership** ✅ |
+| `logged_link` | `delivered` — **in stable storage** | messages ever log-delivered ❌❌ |
+| `logged_uniform_reliable_broadcast` | `pending`, `delivered` — **in stable storage** | messages ever seen ❌❌ |
+
+The last two carry a double mark, and the second one is the point. Growth in memory costs a
+process its resident size; growth on disk costs that *and* a write proportional to the whole value
+on every change, since the durable state is stored in full rather than as a delta. A protocol that
+log-delivers `n` messages writes `O(n²)` bytes over its life.
+
+**The mechanism that would fix them is a delivered *cursor* rather than a delivered *set*.** The
+indication would say "everything up to sequence `n` is durable" instead of carrying a set, which is
+bounded by membership. It costs per-sender ordering, which the link beneath does not currently
+promise, and it weakens the guarantee to a scope in the way §"Bounding changes the guarantee"
+describes. It is a change with a proposal, not a cleanup.
 
 The stubborn link is the worst of them, and not only in space. It has a `Stop` command and
 **nothing ever calls it** — the perfect link never stops retransmission, because Algorithm 2.2

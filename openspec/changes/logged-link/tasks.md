@@ -92,15 +92,15 @@ branch; initialisation is its other side.
 
 ## 6. Recording it
 
-- [ ] 6.1 Update `docs/conditional-guarantees.md`: stable storage is no longer an unimplemented
+- [x] 6.1 Update `docs/conditional-guarantees.md`: stable storage is no longer an unimplemented
       entry in its table, and its reading that an incarnation boundary needs no event applies to
       the ending and not the beginning
-- [ ] 6.2 Update `docs/bounded-space.md`: the audit gains abstractions whose unbounded state is on disk,
+- [x] 6.2 Update `docs/bounded-space.md`: the audit gains abstractions whose unbounded state is on disk,
       and the bounded delivered-cursor is named as the mechanism that would fix them
-- [ ] 6.3 Add the three abstractions to the README with their status and space bounds, note what the
+- [x] 6.3 Add the three abstractions to the README with their status and space bounds, note what the
       fail-recovery model changes about indications, and refresh the test counts; verify the links
       resolve
-- [ ] 6.4 Record as notes in the change: whether the effect-plus-ordering-rule design survived
+- [x] 6.4 Record as notes in the change: whether the effect-plus-ordering-rule design survived
       contact with three algorithms, whether the crash-during-write fault found anything, and
       whether two independent consumers were enough to shape the primitive or a third would have
       changed it

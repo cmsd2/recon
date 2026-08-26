@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 261 tests, all in-process, a few seconds
+cargo test --workspace          # 310 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -77,12 +77,18 @@ pub trait Protocol {
     fn on_scope_end(&mut self, scope: Self::Scope, cx: &mut ProtoCx<'_, Self>) {}
 }
 
-pub enum Effect<M, I, T> {
+pub enum Effect<M, I, T, D> {
     Send { to: NodeId, msg: M },
     Indicate(I),
     SetTimer { after: Duration, token: T },
+    Store(D),
 }
 ```
+
+`Durable` is what a protocol keeps across a crash, and `Store` carries it in full rather than as a
+delta. A protocol that keeps nothing declares `Infallible`, and then a store cannot be constructed
+for it. Everything emitted after a store waits for that write to land, so a process cannot be seen
+by its peers to have made a promise it has no record of.
 
 `Scope` is the interval a guarantee holds over — a session, an incarnation, a deadline. A protocol
 with no scopes writes `type Scope = Infallible`, and a scope end for it cannot be constructed.
@@ -160,12 +166,40 @@ algorithms over a link that can end.
 | Uniform reliable broadcast | [`session_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_uniform_reliable_broadcast.rs) | transcription | unbounded |
 | Uniform reliable broadcast, majority-ack | [`session_majority_ack_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_majority_ack_uniform_reliable_broadcast.rs) | transcription, **no failure detector** | unbounded |
 
+There is a third stack besides these two: the fail-recovery protocols, below.
+
 The interesting result is that the two broadcast abstractions **diverge** here. Reliable broadcast relays
 once and keeps identifiers rather than payloads, so a relay lost to a session ending is never
 retried and its agreement is scoped to the sessions that carried it. Uniform reliable broadcast
 keeps payloads and consults a failure detector, so between resending on re-establishment and
 accusing a peer that never returns there is no third outcome. Both halves are tested, and the
 contrast is the point of `tests/session_broadcast.rs`.
+
+### Over stable storage — the fail-recovery model
+
+A crash-stop protocol tells the layer above `⟨ Deliver | m ⟩` once. A crash-recovery protocol
+cannot: it may crash immediately afterwards, and then nothing anywhere knows the indication
+happened — the message is lost in a notification that no longer exists. So these protocols write
+the message into a **durable log**, and the indication says only that the log may have changed. The
+layer above reads it, and must be idempotent, because the same log arrives again after every
+restart.
+
+| Protocol | Module | Book | Status | Space |
+|---|---|---|---|---|
+| Logged perfect link | [`logged_link.rs`](crates/recon-protocols/src/logged_link.rs) | Module 2.4, Alg. 2.3 | transcription | unbounded, **on disk** |
+| Stubborn broadcast | [`stubborn_broadcast.rs`](crates/recon-protocols/src/stubborn_broadcast.rs) | §3.5 | deployable | bounded by membership |
+| Logged uniform reliable broadcast | [`logged_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/logged_uniform_reliable_broadcast.rs) | Module 3.6, Alg. 3.8 | transcription | unbounded, **on disk** |
+
+Two things change besides the indication. **Startup becomes a branch** — a process with nothing in
+storage is initialised, one with something is recovered, exactly one runs, and both can emit
+effects. And **retransmission stops being waste**: a process that was down when a message was sent
+has no record of it and no way to ask, so the only thing that reaches it is a sender that never
+stopped trying. That is why stubborn broadcast does not deduplicate, and why these protocols are
+built over it rather than over the perfect link.
+
+`logged_link` buys one thing, and its suite shows it directly: no-duplication holds **across a
+restart**, where the perfect link — whose record is volatile — delivers the same message a second
+time on the same schedule.
 
 ### Detectors versus quorums
 
@@ -206,9 +240,9 @@ are built the other way round.
 ### Next
 
 Eventually perfect failure detection (Module 2.8, `◇P`) and eventual leader election (`Ω`), then
-the leader-driven family. Two things are missing for them: `Ω` and the detector beneath it, and
-**stable storage** — a crash now genuinely loses volatile state, so an abstraction that must remember an
-epoch or a promise across an incarnation has nowhere to put it.
+the leader-driven family. Stable storage was the blocker and is now in place, so what remains is
+`◇P` — whose `Restore` turns the set of believed-correct processes from a monotone shrinking one
+into a set that can grow again, which every guard written against it will need re-reading for.
 
 ## Examples
 
@@ -243,7 +277,8 @@ openspec/specs/
 ├── links/                             stubborn, perfect, session
 ├── failure-detection/                 perfect failure detector
 ├── broadcast/                         best-effort, reliable, uniform reliable,
-│                                      and the three session variants
+│                                      the session variants, majority-ack, and
+│                                      the logged ones
 └── consensus/                         flooding consensus
 ```
 
@@ -334,9 +369,10 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the broadcasts over perfect links | 11 / 15 / 17 |
 | `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the broadcasts over session links, and where the two diverge | 6 / 16 |
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, and what that changes | 18 / 15 |
+| `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, and what a restart forgets | 12 / 6 / 14 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, and what a false suspicion costs it | 21 |
 
-261 in total, all in one process, no ports opened.
+310 in total, all in one process, no ports opened.
 
 ## Licence
 
