@@ -68,7 +68,25 @@
 //!   rather than the book's two stores. Recovery replays the sequence and rebuilds both.
 //! - Messages are keyed by an identifier carrying the originator and a sequence number rather
 //!   than by content, so identical content broadcast twice is delivered twice.
+//! - The sequence number is therefore as durable as the log it keys, and recovery recomputes it
+//!   rather than resuming from zero. See the note below; the obligation is part of the departure.
 //! - No `Stop`: retransmission for ever is what reaches a recovered process.
+//!
+//! # The sequence number survives a crash, without being written
+//!
+//! Content-keyed identity, as the book has it, needs nothing restored: a payload names itself. An
+//! id-keyed departure owes the counter the same durability as the set it keys, or a recovered
+//! process re-mints `(me, 1)` for something *new* and two distinct payloads collide under one
+//! identifier — last-write-wins in `pending`, acks for the old counting toward the new, at most
+//! one of the two ever delivered locally, and different processes log-delivering different
+//! payloads under the same id. No-creation, validity and uniform agreement all fail, in the one
+//! module whose model expects a recovered process to keep working.
+//!
+//! Recovery recomputes it as the greatest `seq` over replayed records originating here, which is
+//! sound because every own broadcast appends its `Pending` record in the handler that emits it:
+//! a torn write discards that handler's sends, so no broadcast escapes without a record. The
+//! alternative — the counter in `Meta` — is also correct and costs a metadata write per
+//! broadcast, which is what buys nothing here.
 
 use core::time::Duration;
 use recon_core::{NodeId, Position, ProtoCx, Protocol};
@@ -233,13 +251,16 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
     /// branch here is guarded and idempotent.
     fn on_arrival(&mut self, from: NodeId, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let id = data.id;
-        let mut wrote = None;
 
         // Re-broadcast only on first sight. An identifier determines its payload, so re-inserting
         // cannot change what is pending — the returned Option is read only to learn whether this
         // was the first time.
         if self.log.pending.insert(id, data.payload.clone()).is_none() {
-            wrote = Some(data.payload.clone());
+            // Durable at the point of insertion, in this handler's own text: the re-broadcast is
+            // this process's acknowledgement, and under an eager sink it escapes before the
+            // handler returns. Everything in `pending` has a durable `Pending` record by
+            // construction, not by where control happens to leave.
+            cx.storage().append(Record::Pending(id, data.payload.clone()));
             self.rebroadcast(data.clone(), cx);
         }
 
@@ -252,12 +273,7 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
                 // could erase.
                 cx.storage().append(Record::Delivered(id, data.payload));
                 cx.indicate(Ind::Delivered(self.log.clone()));
-                return;
             }
-        }
-
-        if let Some(payload) = wrote {
-            cx.storage().append(Record::Pending(id, payload));
         }
     }
 }
@@ -297,19 +313,27 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
     /// `upon event ⟨ lurb, Recovery ⟩`.
     ///
     /// Re-announce the log, then re-broadcast everything pending — which is what rebuilds `ack`,
-    /// and why it need not be durable.
+    /// and why it need not be durable. The replay also restores the send counter, so a process
+    /// that goes on to broadcast something new does not reuse an identifier.
     fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
         // Nothing else is dispatched until this returns, so an empty index a moment ago is safe.
         let records: Vec<Record<P>> =
             cx.storage().read_from(Position::START).into_iter().cloned().collect();
         for r in records {
-            match r {
+            let id = match r {
                 Record::Pending(id, p) => {
                     self.log.pending.insert(id, p);
+                    id
                 }
                 Record::Delivered(id, p) => {
                     self.log.delivered.insert((id, p));
+                    id
                 }
+            };
+            // The counter is as durable as the set it keys. Resuming from zero would re-mint an
+            // identifier already in use for a different payload; see the module note.
+            if id.origin == self.me {
+                self.seq = self.seq.max(id.seq);
             }
         }
         cx.indicate(Ind::Delivered(self.log.clone()));

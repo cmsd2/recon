@@ -36,6 +36,11 @@ fn log_of(s: &Sim<Urb>, node: NodeId) -> Vec<(NodeId, u32)> {
     s.protocol(node).unwrap().log().delivered().map(|(id, p)| (id.origin, *p)).collect()
 }
 
+/// What `node` has log-delivered, with the identifiers it delivered them under.
+fn ids_of(s: &Sim<Urb>, node: NodeId) -> Vec<(BroadcastId, u32)> {
+    s.protocol(node).unwrap().log().delivered().map(|(id, p)| (*id, *p)).collect()
+}
+
 fn settle(s: &mut Sim<Urb>) {
     s.run_for(Duration::from_millis(800));
 }
@@ -181,6 +186,38 @@ fn acknowledgements_are_rebuilt_by_re_broadcasting_on_recovery() {
 }
 
 #[test]
+fn a_recovered_process_broadcasting_something_new_does_not_reuse_an_identifier() {
+    // Recovery restores what was written, and the counter that keys it. Resuming from zero would
+    // mint `(A, 1)` a second time for a different payload: `pending` would keep whichever landed
+    // last, acknowledgements for the old would count toward the new, the delivered-by-id guard
+    // would let at most one of the two through, and processes could log-deliver different
+    // payloads under one identifier.
+    //
+    // Resuming pre-crash work exercises replay; this exercises what replay must restore for the
+    // work that comes after.
+    for seed in 0..8u64 {
+        let mut s = sim(seed);
+        s.command(A, Cmd::Broadcast(1));
+        settle(&mut s);
+        assert_eq!(log_of(&s, A), vec![(A, 1)], "seed {seed}: delivered before the crash");
+
+        s.crash(A);
+        s.restart(A);
+        s.command(A, Cmd::Broadcast(2));
+        settle(&mut s);
+
+        for n in ALL {
+            let mut got = ids_of(&s, n);
+            got.sort();
+            let payloads: Vec<u32> = got.iter().map(|(_, p)| *p).collect();
+            assert_eq!(payloads, vec![1, 2], "seed {seed}: {n} log-delivered both, old and new");
+            assert_ne!(got[0].0, got[1].0, "seed {seed}: {n} under two distinct identifiers");
+            assert_eq!(got[1].0, BroadcastId { origin: A, seq: 2 }, "seed {seed}: {n}");
+        }
+    }
+}
+
+#[test]
 fn recovery_re_announces_what_was_already_log_delivered() {
     let mut s = sim(5);
     s.command(A, Cmd::Broadcast(3));
@@ -204,6 +241,50 @@ fn recovery_re_announces_what_was_already_log_delivered() {
         })
         .collect();
     assert!(after.first() == Some(&1), "told again on recovering: {after:?}");
+}
+
+#[test]
+fn dying_inside_the_write_never_log_delivers_without_a_record() {
+    // The claim the write-before-indicate ordering makes, checked with the fault it exists for.
+    // C dies inside a write, and the seed decides whether it landed. Either way, C must never
+    // have announced a log-delivery it cannot read back — the announcement is what a layer above
+    // acts on, and in this model a notification is the one thing that does not survive.
+    let mut landed = 0;
+    let mut lost = 0;
+    for seed in 0..40u64 {
+        let mut s = sim(seed);
+        s.crash_on_next_write(C);
+        s.command(A, Cmd::Broadcast(7));
+        s.run_for(Duration::from_millis(3)); // C sees it, writes, and dies in the write
+        assert_eq!(s.trace().deaths_in_writes(), 1, "seed {seed}: it died in the write");
+
+        let announced: Vec<usize> = s
+            .trace()
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                TraceEvent::Indicated { node, ind: Ind::Delivered(log), .. } if *node == C => {
+                    Some(log.delivered_count())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(announced.is_empty(), "seed {seed}: nothing escaped the doomed handler");
+
+        s.restart(C);
+        match s.protocol(C).unwrap().log().pending_count() {
+            0 => lost += 1,
+            _ => landed += 1,
+        }
+
+        // And the run finishes correctly whichever way the write went: the stubborn broadcast
+        // beneath never stops, so C rebuilds what it lost from the others.
+        settle(&mut s);
+        for n in ALL {
+            assert_eq!(log_of(&s, n), vec![(A, 7)], "seed {seed}: {n}");
+        }
+    }
+    assert!(landed > 0 && lost > 0, "both outcomes must occur: {landed} landed, {lost} lost");
 }
 
 // ------------------------------------------------- the majority boundary

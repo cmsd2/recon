@@ -32,6 +32,19 @@
 //!
 //! That identifier is the only thing this stack puts on the wire: the stubborn link below adds
 //! nothing, and best-effort broadcast above adds nothing.
+//!
+//! # The counter lives exactly as long as the set it keys
+//!
+//! Both are volatile, and a crash takes both, so the pairing holds: a restarted sender re-mints
+//! `(me, 1)` at exactly the point where every recipient's `delivered` has also been forgotten,
+//! and the recipient re-delivers the old messages anyway —
+//! `no_duplication_does_not_survive_the_recipient_restarting` records that. PL2 is scoped to an
+//! incarnation here, which is the crash-stop model's premise: a crashed process is not correct,
+//! and nothing is promised across the restart the simulator can nevertheless perform.
+//!
+//! The hazard to watch for is the mismatched pair — a durable set keyed by a volatile counter,
+//! where the recipient remembers what the sender has forgotten and discards new messages as
+//! duplicates. [`crate::logged_link`] is that configuration, and makes the counter durable.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol};

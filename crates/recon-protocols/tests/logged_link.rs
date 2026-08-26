@@ -111,6 +111,44 @@ fn the_log_is_durable_before_the_announcement_even_across_a_crash() {
     assert!(kept > 0, "and in some runs the write had already completed");
 }
 
+#[test]
+fn dying_inside_the_write_never_leaves_a_promise_without_a_record() {
+    // The previous test crashes on a timing window that may not straddle the append. This one
+    // arms the write itself, so the crash is *inside* it and the seed decides whether it landed —
+    // which is the only way to check the claim the write-before-indicate ordering makes. Either
+    // outcome is allowed; what is not allowed is B announcing a delivery it has no record of.
+    let mut landed = 0;
+    let mut lost = 0;
+    for seed in 0..60u64 {
+        let mut s = sim(seed);
+        s.crash_on_next_write(B);
+        s.command(A, Cmd::Send { to: B, msg: 9 });
+        s.run_for(Duration::from_millis(2)); // B receives, writes, and dies in the write
+        assert_eq!(s.trace().deaths_in_writes(), 1, "seed {seed}: it died in the write");
+
+        // Nothing was announced before the write, so nothing was announced at all: the effects of
+        // a handler that died are discarded.
+        assert!(logs(&s, B).is_empty(), "seed {seed}: no promise escaped the doomed handler");
+
+        // What it reads on recovering is the only evidence, exactly as `crash_on_next_write`
+        // documents. B always has *something* in storage — the metadata was written at its first
+        // start — so the question is whether the append is there, not whether anything is.
+        s.restart(B);
+        if log_of(&s, B) == vec![9] {
+            landed += 1;
+        } else {
+            lost += 1;
+            assert!(log_of(&s, B).is_empty(), "seed {seed}: lost cleanly, not half-written");
+        }
+
+        // Either way the stubborn link beneath is still retransmitting, so B ends up holding it
+        // exactly once — which is the guarantee, across the fault rather than in spite of it.
+        settle(&mut s);
+        assert_eq!(log_of(&s, B), vec![9], "seed {seed}");
+    }
+    assert!(landed > 0 && lost > 0, "both outcomes must occur: {landed} landed, {lost} lost");
+}
+
 // ------------------------------------------------- across a restart
 
 #[test]
@@ -243,10 +281,35 @@ fn the_durable_set_grows_with_distinct_messages_log_delivered() {
     settle(&mut s);
 
     assert_eq!(s.protocol(B).unwrap().log().len(), 12, "one entry per distinct message, for ever");
-    // One append per message log-delivered, and nothing rewritten on their account: this is the
+    // One append per message log-delivered, and the record itself never rewritten: this is the
     // whole point of appending rather than rewriting the record each time.
     assert_eq!(s.trace().appends(), 12, "one append per message, not a rewrite of the record");
-    assert_eq!(s.trace().metadata_writes(), 2, "one per process, at first start, and never again");
+    // The metadata is the send counter, so it is rewritten once per message *sent* — a single
+    // `u64` whose cost does not grow with what preceded it. Two more for the two first starts.
+    assert_eq!(s.trace().metadata_writes(), 2 + 12, "the counter, rewritten per send, not per set");
+}
+
+#[test]
+fn a_restarted_sender_does_not_reuse_an_identifier_the_recipient_has_logged() {
+    // The counter keys a set that outlives the incarnation that minted it. Resuming from zero
+    // would have B discard A's new messages as duplicates of the old — silently, permanently, and
+    // while the stubborn link beneath retransmitted them for ever.
+    for seed in 0..8u64 {
+        let mut s = sim(seed);
+        s.command(A, Cmd::Send { to: B, msg: 7 });
+        settle(&mut s);
+        assert_eq!(log_of(&s, B), vec![7], "seed {seed}: delivered before the crash");
+
+        s.crash(A);
+        s.restart(A);
+        s.command(A, Cmd::Send { to: B, msg: 8 });
+        settle(&mut s);
+
+        assert_eq!(log_of(&s, B), vec![7, 8], "seed {seed}: the new message is not a duplicate");
+        let ids: Vec<u32> =
+            s.protocol(B).unwrap().log().entries().map(|(id, _)| id.seq as u32).collect();
+        assert_eq!(ids, vec![1, 2], "seed {seed}: under two distinct identifiers");
+    }
 }
 
 #[test]
