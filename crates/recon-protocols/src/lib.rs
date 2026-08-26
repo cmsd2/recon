@@ -9,6 +9,7 @@
 pub mod best_effort_broadcast;
 pub mod flooding_consensus;
 pub mod logged_link;
+pub mod logged_uniform_reliable_broadcast;
 pub mod majority_ack_uniform_reliable_broadcast;
 pub mod perfect_failure_detector;
 pub mod perfect_link;
@@ -25,6 +26,7 @@ pub mod uniform_reliable_broadcast;
 pub use best_effort_broadcast::BestEffortBroadcast;
 pub use flooding_consensus::FloodingConsensus;
 pub use logged_link::LoggedLink;
+pub use logged_uniform_reliable_broadcast::LoggedUniformReliableBroadcast;
 pub use majority_ack_uniform_reliable_broadcast::MajorityAckUniformReliableBroadcast;
 pub use perfect_failure_detector::PerfectFailureDetector;
 pub use perfect_link::PerfectLink;

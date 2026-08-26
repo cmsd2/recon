@@ -58,9 +58,18 @@
 //!
 //! # Departures from the page
 //!
-//! - `⟨ Init ⟩` writing the empty set is omitted. A process that has written nothing is
-//!   constructed rather than recovered, which is the same distinction the initial store exists to
-//!   create, without a write that says nothing.
+//! - **`⟨ Init ⟩` is omitted, and with it the initial `store(∅)`.** The book has both handlers and
+//!   exactly one fires at startup: a first start runs `Init`, a restart runs `Recovery`. The
+//!   initial store is what makes that work — it puts an empty set in storage so that `retrieve` on
+//!   any later restart finds *something* rather than being undefined.
+//!
+//!   Here a process with nothing in storage is *constructed*, and `on_recovery` is called only
+//!   when something survived, so the distinction is drawn by which of the two happened rather than
+//!   by a write that says nothing. The two are not observably identical: after a crash that
+//!   preceded any real write, the book triggers `⟨ Deliver | ∅ ⟩` and this does not announce
+//!   anything at all. That is benign — an empty log tells the layer above nothing it does not
+//!   already have, and a layer above that has just been constructed is empty too — but it is a
+//!   difference, not merely a simplification.
 //! - `delivered` is keyed by sender and a per-sender sequence number rather than by message
 //!   content, for the reason [`crate::perfect_link`] gives: identical content sent twice is two
 //!   messages and must be delivered twice.

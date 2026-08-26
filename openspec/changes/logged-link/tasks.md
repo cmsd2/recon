@@ -54,21 +54,21 @@
 
 ## 5. Logged uniform reliable broadcast
 
-- [ ] 5.1 Transcribe Module 3.6 and Algorithm 3.8 over stubborn broadcast, quoting the pseudocode
+- [x] 5.1 Transcribe Module 3.6 and Algorithm 3.8 over stubborn broadcast, quoting the pseudocode
       and stating the status and space bound; verify a five-process run with no faults log-delivers
       everywhere
-- [ ] 5.2 Store `pending` and `delivered` and **not** `ack`; verify from the trace that no
+- [x] 5.2 Store `pending` and `delivered` and **not** `ack`; verify from the trace that no
       acknowledgement is ever written, and that a recovered process holds no acknowledgements
-- [ ] 5.3 Verify acknowledgements are rebuilt by re-broadcasting on recovery, and that a message
+- [x] 5.3 Verify acknowledgements are rebuilt by re-broadcasting on recovery, and that a message
       pending before a crash is log-delivered after it
-- [ ] 5.4 Verify validity and uniform agreement with a minority crashing and recovering repeatedly
-- [ ] 5.5 Verify uniform agreement when a process log-delivers and then crashes for ever, and when
+- [x] 5.4 Verify validity and uniform agreement with a minority crashing and recovering repeatedly
+- [x] 5.5 Verify uniform agreement when a process log-delivers and then crashes for ever, and when
       it log-delivers, crashes and recovers — asserting it does not log-deliver a second time
-- [ ] 5.6 Verify the majority boundary at an **even** membership as well as an odd one, for the
+- [x] 5.6 Verify the majority boundary at an **even** membership as well as an odd one, for the
       reason recorded in the majority-ack change: with an odd `N` the off-by-one is invisible
-- [ ] 5.7 Verify that without a majority the layer blocks rather than diverges, and that progress
+- [x] 5.7 Verify that without a majority the layer blocks rather than diverges, and that progress
       resumes when enough processes recover
-- [ ] 5.8 Verify every absence-of-violation assertion is paired with a minimum log-delivery count
+- [x] 5.8 Verify every absence-of-violation assertion is paired with a minimum log-delivery count
 
 ## 6. Recording it
 
