@@ -51,6 +51,14 @@ process its resident size; growth on disk costs that *and* a write proportional 
 on every change, since the durable state is stored in full rather than as a delta. A protocol that
 log-delivers `n` messages writes `O(n²)` bytes over its life.
 
+There are two halves to this and they want fixing together. The state is a *set* that grows, and
+the write is a *blob* rewritten in full. Bounding the state fixes the first; an append-only log
+fixes the second, and a cursor over such a log fixes both — which is why a protocol that keeps a
+log wants `Append` and a read from an offset, not `Store(whole_value)`. `Effect::Store` is right
+for a small piece of metadata that a protocol rewrites — an epoch, a promise — and wrong for
+anything that accumulates. Nothing in this repository accumulates on disk *and* is deployable yet,
+so the primitive has not been extended; a replicated log would be the first thing to force it.
+
 **The mechanism that would fix them is a delivered *cursor* rather than a delivered *set*.** The
 indication would say "everything up to sequence `n` is durable" instead of carrying a set, which is
 bounded by membership. It costs per-sender ordering, which the link beneath does not currently

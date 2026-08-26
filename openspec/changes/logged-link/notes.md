@@ -75,6 +75,39 @@ child's. Every protocol here has children that store nothing, so it costs nothin
 that does not will need a real design — a slot per participant, a parent that drives its child's
 writes explicitly, or a path-indexed store. Left undesigned deliberately.
 
+## The store effect is a blob write, and a real protocol wants a log
+
+Raised in review, and it is the same debt as the section below approached from the other side.
+
+`Effect::Store(D)` carries the protocol's whole durable state, and recovery hands back the last
+value written. For the two protocols here that is exactly right, because it is exactly what the
+page says — Algorithm 2.3 is `store(delivered)`, the whole set. It is not what a protocol that
+keeps a *log* wants. Such a protocol wants to append one entry, and on recovery to read from an
+offset rather than be handed everything.
+
+Three things follow, in increasing order of how much they change.
+
+**Appending is the cheap half.** An `Append(entry)` effect beside `Store(value)` would fix the
+`O(n²)` write cost directly, and needs nothing new in the model: it is still one-way, still
+fire-and-forget, still ordered before anything emitted after it.
+
+**Reading is the half that looks impossible and is not.** Effects are one-way, so "read from
+offset `n`" appears not to fit. But `SetTimer` is already a request whose answer arrives as an
+event, and a read can work the same way: emit `Read { from }`, receive the entries as an event.
+The cost is real though — a protocol that reads asynchronously becomes a state machine across the
+gap, where today recovery hands it everything in one call and it simply assigns.
+
+**The third option is that storage stops being an effect at all.** A log with `Append`, `Read` and
+`Truncate` on one side and "here are the entries" on the other is a *port* — the same shape as a
+link, with its own `Cmd` and `Ind`, composed as a child. That is more idiomatic here than a growing
+effect enum, and it would make the composition problem recorded above disappear, because a child
+that owns storage composes like any other child.
+
+Which of the three is right depends on what actually needs it, and nothing does yet. The natural
+first consumer is a replicated log, where append-and-read is the whole point rather than an
+optimisation. Recording it rather than building it is constraint 4 applied again — the same
+reasoning that left the storing-child composition undesigned.
+
 ## What is worse now
 
 The bounded-space position. These are the first protocols whose unbounded state is **on disk**, and
