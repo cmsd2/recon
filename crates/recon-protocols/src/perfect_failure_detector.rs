@@ -35,7 +35,7 @@
 //!     starttimer(Δ);
 //! ```
 //!
-//! Three departures from the page:
+//! Four departures from the page:
 //!
 //! - The book exchanges a request and a reply each round. This sends one unsolicited heartbeat
 //!   per round instead: with the same bound it distinguishes the same failures in half the
@@ -47,6 +47,35 @@
 //!   `timeout − period − Δ`. Accuracy still requires `timeout > period + Δ`.
 //! - `⟨P, Init⟩` *is* the init event, and this protocol has no commands at all. The first timer is
 //!   armed on the first tick request from the layer above.
+//! - **Heartbeats go on the wire directly, not through `pl`.** Algorithm 2.5 sends over perfect
+//!   links; this protocol is its own bottom layer and has no child. Under the synchronous
+//!   configuration the two are equivalent — the sim's synchronous mode zeroes the loss knob and
+//!   enforces the bound, so nothing is lost and a perfect link would add only deduplication that
+//!   an idempotent `last_heard` write does not need. Outside it they differ, and in the direction
+//!   that matters: a lost heartbeat is indistinguishable from a silent process, so loss forges
+//!   the very evidence this protocol accuses on. `accuracy_is_lost_when_the_timing_assumption_is`
+//!   is that difference, made to happen.
+//!
+//! # A stall has two sides, and the second one is worse
+//!
+//! The departure above covers the process a stall happens *to*: it misses a send and its peers
+//! accuse it, which the `timeout − period − Δ` margin is what tolerates. The other side is the
+//! stalled process itself, and it is not tolerated at all.
+//!
+//! A process descheduled for longer than `timeout` comes back holding a tick that is due and a
+//! `last_heard` for every peer that is now older than the timeout. The measurement is not wrong —
+//! it genuinely heard nothing for that long — so it accuses every one of them, and detection is
+//! permanent. `a_stalled_process_accuses_its_peers_when_it_comes_back` pins that, and the pair of
+//! suspension tests either side of it shows the margin still holds from the inside for a stall
+//! shorter than the timeout.
+//!
+//! This is the timing assumption failing rather than the implementation, and it fails in the one
+//! place the assumption is easiest to forget: Δ bounds the *network*, and a synchronous system
+//! bounds process scheduling too. A detector that discounts its own stall — noticing that far
+//! more than `period` elapsed between consecutive ticks, and treating that round as unmeasured —
+//! is a real technique and a real departure from the page, so it is a change with a proposal
+//! rather than something to add here. `Sim::resume` documents the same asymmetry from the
+//! simulator's side.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, Time};

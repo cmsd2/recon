@@ -188,7 +188,7 @@ fn a_brief_suspension_is_not_an_accusation() {
     s.run_for(Duration::from_millis(100));
     s.suspend(D);
     s.run_for(timeout() - period() - BOUND * 2);
-    s.restart(D);
+    s.resume(D);
     s.run_for(timeout() * 3);
 
     for n in [A, B, C] {
@@ -206,6 +206,51 @@ fn a_long_suspension_is_an_accusation() {
 
     for n in [A, B, C] {
         assert_eq!(accused(&s, n), vec![D], "{n} should have accused a long-silent D");
+    }
+}
+
+#[test]
+fn a_stalled_process_accuses_its_peers_when_it_comes_back() {
+    // The other side of a stall, which the two tests above do not look at: they check what A, B
+    // and C make of a silent D, never what D makes of them.
+    //
+    // A suspension holds what arrived, so nothing is lost — but it does not hold the clock. D's
+    // deferred tick fires having measured, correctly, that it heard nothing for the whole stall,
+    // and accuses every one of them. PFD2 says a detected process has crashed, and none had; the
+    // synchrony assumption is what failed, and a process descheduled past its own timeout is
+    // exactly that failure, seen from the inside. Pinned rather than fixed: a detector that
+    // discounts its own stall is a departure from the page and wants a proposal.
+    let mut s = sync_sim(15);
+    s.run_for(Duration::from_millis(100));
+    s.suspend(D);
+    s.run_for(timeout() * 3);
+    s.resume(D);
+    s.run_for(period());
+
+    let mut by_d = accused(&s, D);
+    by_d.sort();
+    assert_eq!(by_d, vec![A, B, C], "D accuses everyone it could not hear while it was away");
+    assert_eq!(
+        s.trace().drops(),
+        0,
+        "and not because anything was lost: the heartbeats were held, not dropped"
+    );
+}
+
+#[test]
+fn a_stall_shorter_than_the_timeout_costs_the_stalled_process_nothing() {
+    // The boundary from the inside, and what makes the test above a statement about the timeout
+    // rather than about suspension.
+    let mut s = sync_sim(16);
+    s.run_for(Duration::from_millis(100));
+    s.suspend(D);
+    s.run_for(timeout() - period() - BOUND * 2);
+    s.resume(D);
+    s.run_for(timeout() * 3);
+
+    assert!(accused(&s, D).is_empty(), "D accused nobody over a brief stall");
+    for n in [A, B, C] {
+        assert!(accused(&s, n).is_empty(), "{n} accused nobody either");
     }
 }
 

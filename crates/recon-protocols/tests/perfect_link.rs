@@ -269,7 +269,7 @@ fn no_duplication_holds_across_a_suspension() {
 
     s.suspend(B);
     s.run_until(Time::from_millis(200));
-    s.restart(B);
+    s.resume(B);
     s.run_until(Time::from_millis(400));
 
     assert_eq!(

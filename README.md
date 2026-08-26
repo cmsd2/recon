@@ -124,8 +124,12 @@ which is what TCP or QUIC gives you — reliable and ordered within a session, a
 ends an unknown suffix of what was in flight is simply gone. Sessions re-establish on their own,
 without either process sending, because that is what a reconnecting link does.
 
-Faults: `crash`, `suspend`, `restart`, `partition`, `heal`, `break_session`. Properties are
-asserted over `s.trace()`, never over protocol internals.
+Faults: `crash` then `restart` for failure, `suspend` then `resume` for a stall, plus
+`partition`, `heal` and `break_session`. The two pairs are distinct and not interchangeable: a
+crash loses volatile state and takes the startup branch on the way back, while a stall keeps its
+state and is *handed back* every timer, delivery and scope event that came due while it was away —
+dropping one would lose a message inside a session that never ended. What a stall does take is the
+clock. Properties are asserted over `s.trace()`, never over protocol internals.
 
 Files: [`sim.rs`](crates/recon-sim/src/sim.rs) · [`config.rs`](crates/recon-sim/src/config.rs) ·
 [`trace.rs`](crates/recon-sim/src/trace.rs) · [`codec.rs`](crates/recon-sim/src/codec.rs)

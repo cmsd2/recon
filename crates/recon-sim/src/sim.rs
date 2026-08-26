@@ -72,10 +72,15 @@ pub struct Sim<P: Protocol> {
     queue: BTreeMap<(Time, u64), Scheduled<P>>,
     nodes: BTreeMap<NodeId, Node<P>>,
     partitions: Option<Vec<BTreeSet<NodeId>>>,
-    /// Timers that came due while their process was suspended. A suspension preserves state, and
-    /// a pending timer is state, so these are re-armed on resume rather than discarded. A crash
-    /// destroys them instead — see `discard_timers_of`.
-    deferred: Vec<(NodeId, P::Timer)>,
+    /// Everything that came due for a process while it was suspended, in the order it came due:
+    /// timers, deliveries carried by a live session, and scope events.
+    ///
+    /// A suspension is a stall, not a failure, so nothing addressed to a suspended process is
+    /// dropped — dropping a delivery while its session stays up would lose a message with no
+    /// `SessionEnded` to say so, which is the one thing `docs/conditional-guarantees.md` forbids
+    /// of every layer and therefore of the simulator too. These are re-dispatched by `resume`.
+    /// A crash destroys them instead — see `discard_pending_of`.
+    deferred: Vec<(NodeId, Scheduled<P>)>,
     /// Rebuilds a process after a crash, since a crash loses volatile state.
     make: Box<dyn FnMut(NodeId) -> P>,
     /// The current epoch of the session between each pair, keyed by the pair in sorted order.
@@ -197,11 +202,6 @@ where
         self.schedule(self.now + after, Scheduled::Command { node, cmd });
     }
 
-    /// Crash `node`: it stops handling events and loses everything volatile.
-    ///
-    /// Its protocol state is replaced with a freshly initialised one and its pending timers are
-    /// discarded, so a restart resumes having forgotten what it delivered. This is what a real
-    /// process gets. For a pause that preserves state, use [`Sim::suspend`].
     /// Arm the next write by `node` to be the one it dies inside.
     ///
     /// Whether that write landed is decided by the seed, and the process cannot tell: what it
@@ -210,6 +210,12 @@ where
         self.doomed.insert(node);
     }
 
+    /// Crash `node`: it stops handling events and loses everything volatile.
+    ///
+    /// Its protocol state is replaced with a freshly initialised one, and its pending timers and
+    /// anything held for it are discarded, so a restart resumes having forgotten what it
+    /// delivered. This is what a real process gets. For a stall that preserves state, use
+    /// [`Sim::suspend`].
     pub fn crash(&mut self, node: NodeId) {
         let fresh = (self.make)(node);
         if let Some(n) = self.nodes.get_mut(&node) {
@@ -218,7 +224,7 @@ where
         } else {
             return;
         }
-        self.discard_timers_of(node);
+        self.discard_pending_of(node);
         if self.config.is_session_based() {
             self.end_sessions_of(node);
         }
@@ -226,9 +232,16 @@ where
         self.trace.push(TraceEvent::Crashed { at, node });
     }
 
-    /// Suspend `node`: it stops handling events but keeps its state and its timers.
+    /// Suspend `node`: it stops handling events but keeps its state, its timers, and everything
+    /// addressed to it while it is away.
     ///
-    /// Not what a crash does. Use it to model a process that is merely unreachable or stalled.
+    /// Not what a crash does. This is a *stall* — the process is descheduled and comes back
+    /// having missed nothing, because the timers, deliveries and scope events that came due
+    /// meanwhile were held rather than dropped. Losing them would be losing a message inside a
+    /// session that never ended, which is the one thing this model forbids of a layer.
+    ///
+    /// For unreachability use [`Sim::partition`], and for failure [`Sim::crash`]. Resume with
+    /// [`Sim::resume`]; [`Sim::restart`] is for a crashed process and re-runs its startup branch.
     pub fn suspend(&mut self, node: NodeId) {
         if let Some(n) = self.nodes.get_mut(&node) {
             n.liveness = Liveness::Suspended;
@@ -237,15 +250,39 @@ where
         }
     }
 
-    /// Resume `node`, whether it crashed or was suspended.
+    /// Resume a *suspended* `node`: everything held while it was away is dispatched now.
     ///
-    /// Timers that came due while it was suspended fire now. A crashed process has none, since
-    /// the crash discarded them along with the rest of its volatile state.
-    pub fn restart(&mut self, node: NodeId) {
-        if !self.nodes.contains_key(&node) {
-            return;
+    /// No startup branch runs. Nothing was lost, so there is nothing to recover and nothing to
+    /// initialise — replaying `on_init` or `on_recovery` over intact volatile state would be
+    /// telling a process it restarted when it did not. That is what separates this from
+    /// [`Sim::restart`].
+    ///
+    /// Note what a resumed process is *not* told: that time passed. Its clock ran while it could
+    /// not read it, so anything that measures silence — a failure detector — comes back with
+    /// stale evidence and a timer due immediately. That is what a stall does to a real process,
+    /// and it is why the synchronous model excludes one.
+    pub fn resume(&mut self, node: NodeId) {
+        match self.nodes.get_mut(&node) {
+            Some(n) if n.liveness == Liveness::Suspended => n.liveness = Liveness::Running,
+            Some(_) => panic!("resume({node}): not suspended — restart() is for a crash"),
+            None => return,
         }
-        self.nodes.get_mut(&node).expect("just checked").liveness = Liveness::Running;
+        let at = self.now;
+        self.trace.push(TraceEvent::Resumed { at, node });
+        self.release_deferred(node);
+    }
+
+    /// Restart a *crashed* `node`, which takes its startup branch.
+    ///
+    /// A crash discarded its volatile state, its timers, and anything that was on its way, so
+    /// there is nothing held to release. What survived is in storage, and is handed back through
+    /// `on_recovery`. For a suspension use [`Sim::resume`].
+    pub fn restart(&mut self, node: NodeId) {
+        match self.nodes.get_mut(&node) {
+            Some(n) if n.liveness == Liveness::Crashed => n.liveness = Liveness::Running,
+            Some(_) => panic!("restart({node}): not crashed — resume() is for a suspension"),
+            None => return,
+        }
         let at = self.now;
         self.trace.push(TraceEvent::Restarted { at, node });
 
@@ -261,22 +298,23 @@ where
         } else {
             self.run_handler(node, |p, cx| p.on_init(cx));
         }
+    }
 
-        let due: Vec<P::Timer> = {
-            let mut keep = Vec::new();
-            let mut due = Vec::new();
-            for (n, token) in self.deferred.drain(..) {
-                if n == node {
-                    due.push(token);
-                } else {
-                    keep.push((n, token));
-                }
+    /// Re-dispatch everything held while `node` was suspended, in the order it came due.
+    fn release_deferred(&mut self, node: NodeId) {
+        let at = self.now;
+        let mut keep = Vec::new();
+        let mut due = Vec::new();
+        for (n, item) in self.deferred.drain(..) {
+            if n == node {
+                due.push(item);
+            } else {
+                keep.push((n, item));
             }
-            self.deferred = keep;
-            due
-        };
-        for token in due {
-            self.schedule(at, Scheduled::Timer { node, token });
+        }
+        self.deferred = keep;
+        for item in due {
+            self.schedule(at, item);
         }
     }
 
@@ -285,9 +323,9 @@ where
         self.nodes.get(&node).map(|n| n.liveness != Liveness::Running).unwrap_or(false)
     }
 
-    /// Timers are volatile state, so a crash takes them with it — including any held while the
-    /// process was suspended.
-    fn discard_timers_of(&mut self, node: NodeId) {
+    /// Timers and undelivered messages are lost with the incarnation that was waiting for them,
+    /// so a crash takes them — including everything held while the process was suspended.
+    fn discard_pending_of(&mut self, node: NodeId) {
         self.deferred.retain(|(n, _)| *n != node);
         let doomed: Vec<(Time, u64)> = self
             .queue
@@ -347,7 +385,7 @@ where
     fn dispatch(&mut self, item: Scheduled<P>) {
         match item {
             Scheduled::Command { node, cmd } => {
-                if self.crashed(node) {
+                if self.stopped(node) {
                     return;
                 }
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
@@ -358,7 +396,13 @@ where
                 self.schedule(at, Scheduled::Reconnect);
             }
             Scheduled::ScopeEvent { node, scope } => {
-                if self.crashed(node) {
+                if self.suspended(node) {
+                    // A local notification, not a network message: held for the same reason a
+                    // timer is. A stalled process has not stopped existing.
+                    self.deferred.push((node, Scheduled::ScopeEvent { node, scope }));
+                    return;
+                }
+                if self.stopped(node) {
                     return;
                 }
                 self.run_handler(node, |p, cx| p.on_scope_event(scope, cx));
@@ -366,10 +410,10 @@ where
             Scheduled::Timer { node, token } => {
                 if self.suspended(node) {
                     // Held, not dropped: the process still exists and will want this.
-                    self.deferred.push((node, token));
+                    self.deferred.push((node, Scheduled::Timer { node, token }));
                     return;
                 }
-                if self.crashed(node) {
+                if self.stopped(node) {
                     return;
                 }
                 let at = self.now;
@@ -377,7 +421,14 @@ where
                 self.run_handler(node, |p, cx| p.on_timer(token, cx));
             }
             Scheduled::Deliver { from, to, msg } => {
-                if self.crashed(to) {
+                if self.suspended(to) {
+                    // Held. Dropping it would lose a message inside a session that is still up,
+                    // with no `SessionEnded` raised — the model's own invariant, broken by the
+                    // model. The recipient sees it when it resumes, as it would after a stall.
+                    self.deferred.push((to, Scheduled::Deliver { from, to, msg }));
+                    return;
+                }
+                if self.stopped(to) {
                     let at = self.now;
                     self.trace.push(TraceEvent::Dropped {
                         at,
@@ -399,11 +450,21 @@ where
         }
     }
 
+    /// Stopped with its state intact — a stall, from which everything held is replayed.
     fn suspended(&self, node: NodeId) -> bool {
         self.nodes.get(&node).map(|n| n.liveness == Liveness::Suspended).unwrap_or(false)
     }
 
+    /// Stopped having lost everything volatile, or never here at all.
+    ///
+    /// Distinct from [`Sim::stopped`], and the distinction matters: what is owed to a crashed
+    /// process is nothing, and what is owed to a suspended one is everything, later.
     fn crashed(&self, node: NodeId) -> bool {
+        self.nodes.get(&node).map(|n| n.liveness == Liveness::Crashed).unwrap_or(true)
+    }
+
+    /// Not handling events, for either reason.
+    fn stopped(&self, node: NodeId) -> bool {
         self.nodes.get(&node).map(|n| n.liveness != Liveness::Running).unwrap_or(true)
     }
 
@@ -471,7 +532,7 @@ where
         let at = self.now;
         self.trace.push(TraceEvent::Sent { at, from, to, msg: msg.clone() });
 
-        if self.crashed(from) {
+        if self.stopped(from) {
             self.trace.push(TraceEvent::Dropped {
                 at,
                 from,
@@ -690,6 +751,8 @@ where
         if self.sessions.contains_key(&key) {
             return true;
         }
+        // Strictly crashed: a suspended process still exists, and the scope event it is owed is
+        // held for it rather than skipped.
         if !self.connected(a, b) || self.crashed(a) || self.crashed(b) {
             return false;
         }

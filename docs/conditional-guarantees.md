@@ -130,8 +130,20 @@ them.
 ## What the simulator can and cannot express
 
 `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile state
-and `crash` then `restart` is amnesia. `Sim::suspend` is the pause. A restarted process therefore
-does face what it actually faces: having forgotten what it delivered.
+and `crash` then `restart` is amnesia. `Sim::suspend` with `Sim::resume` is the pause, and it is a
+*stall*: everything that came due while the process was away — timers, deliveries carried by a
+session that stayed up, scope events — is held and dispatched on resume, and no startup branch
+re-runs over state that was never lost. A restarted process therefore does face what it actually
+faces: having forgotten what it delivered. A resumed one faces what *it* actually faces: having
+missed nothing except the passage of time.
+
+That asymmetry is the sim obeying its own rule. Dropping an in-session delivery to a suspended
+process would lose a message with no `SessionEnded` to account for it, which is the thing this
+document forbids of every layer; holding it is the only alternative that does not require ending
+the session. But the clock is not held, so a process stalled past a timeout comes back with
+measurements it made honestly and cannot trust — see
+`crates/recon-protocols/src/perfect_failure_detector.rs`, which accuses every peer in exactly that
+case and says why that is the synchrony assumption failing rather than a bug.
 
 What is still missing is the other half — **nothing survives a crash**, because there is no stable
 storage. An abstraction that must remember an epoch, a promise or a decision across an incarnation has

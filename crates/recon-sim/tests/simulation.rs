@@ -445,7 +445,7 @@ fn a_suspension_preserves_state() {
 
     s.suspend(A);
     assert!(s.is_stopped(A));
-    s.restart(A);
+    s.resume(A);
     assert_eq!(s.protocol(A).unwrap().seen, 2, "a suspension is a pause, not a failure");
 }
 
@@ -457,7 +457,7 @@ fn a_suspended_process_handles_nothing_while_stopped() {
     s.run_until(Time::from_millis(10));
     assert_eq!(s.protocol(A).unwrap().seen, 0);
 
-    s.restart(A);
+    s.resume(A);
     s.command(A, CountCmd::Bump);
     s.run_until(Time::from_millis(20));
     assert_eq!(s.protocol(A).unwrap().seen, 1);
@@ -484,7 +484,7 @@ fn a_suspension_keeps_pending_timers() {
 
     s.suspend(A);
     s.run_until(Time::from_millis(50));
-    s.restart(A);
+    s.resume(A);
     s.run_until(Time::from_millis(500));
     assert_eq!(s.trace().timer_fires(), 1, "a suspension keeps what a crash would lose");
 }
@@ -637,9 +637,106 @@ fn a_timer_due_during_a_suspension_fires_on_resume() {
     s.run_for(Duration::from_millis(100)); // the timer comes due here, while suspended
     assert_eq!(s.trace().timer_fires(), 0, "nothing fires while suspended");
 
-    s.restart(A);
+    s.resume(A);
     s.run_for(Duration::from_millis(10));
     assert_eq!(s.trace().timer_fires(), 1, "and it fires once the process is back");
+}
+
+#[test]
+fn a_delivery_due_during_a_suspension_arrives_on_resume() {
+    // The invariant the model imposes on every layer, imposed on the model: a message is
+    // delivered, or the scope carrying it ends. Dropping it while the process is merely stalled
+    // and its session is still up would be neither.
+    let mut s = session_sim(21);
+    s.run_for(Duration::from_millis(50)); // the session comes up
+    assert!(s.has_session(A, B));
+
+    s.suspend(B);
+    s.command(A, Cmd::SendTo(B, 7));
+    s.run_for(Duration::from_millis(200));
+    assert_eq!(arrivals(&s, B), Vec::<u32>::new(), "nothing arrives while stalled");
+    assert_eq!(s.trace().drops(), 0, "and nothing is dropped either");
+    assert_eq!(s.trace().session_ends(), 0, "the session never ended, so nothing may be lost");
+
+    s.resume(B);
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(arrivals(&s, B), vec![7], "held, and handed over once the stall is past");
+}
+
+#[test]
+fn a_suspension_holds_deliveries_outside_a_session_too() {
+    // A stall is not loss. Loss is what the `loss` knob is for, and it is drawn per message and
+    // recorded as a drop; a process being descheduled is neither.
+    let mut s: Sim<Parrot> = Sim::new(Config::default().seed(23), &[A, B, C], |me| Parrot { me });
+    s.suspend(A);
+    for i in 0..5u32 {
+        s.command(B, Cmd::SendTo(A, i));
+    }
+    s.run_for(Duration::from_millis(200));
+    assert_eq!(arrivals(&s, A), Vec::<u32>::new(), "nothing arrives while stalled");
+    assert_eq!(s.trace().drops(), 0, "and nothing is dropped on its account");
+
+    s.resume(A);
+    s.run_for(Duration::from_millis(50));
+    let mut got = arrivals(&s, A);
+    got.sort();
+    assert_eq!(got, vec![0, 1, 2, 3, 4], "all five, once it is back");
+}
+
+#[test]
+fn a_crash_discards_deliveries_held_during_a_suspension() {
+    // Held for a stall, lost to a failure — and in the session model the crash ends the session,
+    // so the loss is announced rather than silent.
+    let mut s = session_sim(22);
+    s.run_for(Duration::from_millis(50));
+    s.suspend(B);
+    s.command(A, Cmd::SendTo(B, 7));
+    s.run_for(Duration::from_millis(200));
+
+    s.crash(B);
+    assert!(!s.has_session(A, B), "the crash ends the session that was carrying it");
+    s.restart(B);
+    s.run_for(Duration::from_millis(200));
+    assert!(!arrivals(&s, B).contains(&7), "a crash loses what a suspension was holding");
+}
+
+#[test]
+fn resuming_is_not_restarting() {
+    // A resumed process never lost anything, so it takes no startup branch: replaying `on_init`
+    // or `on_recovery` over intact state would tell it it restarted when it did not.
+    let mut s = counters();
+    s.command(A, CountCmd::Bump);
+    s.run_for(Duration::from_millis(10));
+    let before = s.trace().len();
+
+    s.suspend(A);
+    s.resume(A);
+
+    let after = &s.trace().events()[before..];
+    assert!(after.iter().any(|e| matches!(e, TraceEvent::Suspended { node, .. } if *node == A)));
+    assert!(after.iter().any(|e| matches!(e, TraceEvent::Resumed { node, .. } if *node == A)));
+    assert!(
+        !after
+            .iter()
+            .any(|e| matches!(e, TraceEvent::Recovered { .. } | TraceEvent::Restarted { .. })),
+        "no startup branch: {after:?}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "not crashed")]
+fn restarting_a_suspended_process_is_a_mistake_that_says_so() {
+    let mut s = counters();
+    s.suspend(A);
+    s.restart(A);
+}
+
+#[test]
+#[should_panic(expected = "not suspended")]
+fn resuming_a_crashed_process_is_a_mistake_that_says_so() {
+    let mut s = counters();
+    s.crash(A);
+    s.resume(A);
 }
 
 #[test]

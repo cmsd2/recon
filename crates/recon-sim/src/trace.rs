@@ -48,7 +48,9 @@ pub enum TraceEvent<M, I, T> {
     Crashed { at: Time, node: NodeId },
     /// A process was suspended, keeping its state.
     Suspended { at: Time, node: NodeId },
-    /// A process restarted.
+    /// A suspended process resumed, and everything held for it was dispatched.
+    Resumed { at: Time, node: NodeId },
+    /// A crashed process restarted, and took its startup branch.
     Restarted { at: Time, node: NodeId },
     /// A durable write. `kind` distinguishes rewriting metadata from appending, so a claim about
     /// a protocol's write cost can be checked rather than asserted.
@@ -77,6 +79,7 @@ impl<M, I, T> TraceEvent<M, I, T> {
             | TraceEvent::SuffixLost { at, .. }
             | TraceEvent::Crashed { at, .. }
             | TraceEvent::Suspended { at, .. }
+            | TraceEvent::Resumed { at, .. }
             | TraceEvent::Restarted { at, .. }
             | TraceEvent::Wrote { at, .. }
             | TraceEvent::DiedWriting { at, .. }

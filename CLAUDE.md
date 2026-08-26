@@ -241,17 +241,21 @@ Three things follow for anyone writing a new abstraction:
 - Layers above the link may depend on its `Cmd` and `Ind` types and nothing else. That is the
   seam a session-aware or logged implementation gets swapped through.
 - `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile
-  state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause. What
-  survives a crash is what was written through `Cx::storage` — a synchronous `Store` with one
-  rewritten metadata value and an appended entry sequence — and is read back in `on_recovery`;
-  `Sim::crash_on_next_write` models dying inside the write, with the seed deciding whether it
-  landed.
+  state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause, and
+  `Sim::resume` ends it — a *stall*, in which timers, deliveries and scope events are held rather
+  than dropped and no startup branch re-runs. The two are not interchangeable and each rejects
+  the other's process. What survives a crash is what was written through `Cx::storage` — a
+  synchronous `Store` with one rewritten metadata value and an appended entry sequence — and is
+  read back in `on_recovery`; `Sim::crash_on_next_write` models dying inside the write, with the
+  seed deciding whether it landed.
 - **The simulator is subject to the same invariants as the layers.** A new simulator capability
   is checked against `docs/conditional-guarantees.md` before it merges, with one question: can it
   lose something without raising the event that says so? Silently absorbing a scope end is the
   cardinal sin wherever it lives, and the sim is where it most recently appeared — suspension
   dropping in-session deliveries while the session stayed up, with no `SessionEnded` ever
-  raised.
+  raised. That one is fixed: a suspension now holds what it cannot deliver. What a stall still
+  takes is the clock, which no amount of holding gives back — see the failure detector's note on
+  the accusing side.
 
 ## Anti-patterns, all of them load-bearing history
 

@@ -247,6 +247,32 @@ fn both_session_reports_reach_the_layer_above() {
 // ------------------------- what dropping the detector removed
 
 #[test]
+fn a_stalled_process_misses_nothing_because_its_session_never_ended() {
+    // The fault the layer's guarantee actually rests on: a process stalls across a broadcast and
+    // its sessions stay up throughout. Uniform agreement says every correct process delivers, and
+    // a process that was merely descheduled is correct — so a message lost to the stall with no
+    // `SessionEnded` to account for it would break the guarantee permanently, and silently.
+    for seed in 0..8u64 {
+        let mut s = sim(seed);
+        s.run_for(Duration::from_millis(50)); // sessions up
+        assert!(s.has_session(A, B), "seed {seed}");
+
+        s.suspend(B);
+        s.command(A, Cmd::Broadcast(9));
+        s.run_for(Duration::from_millis(400));
+        assert!(delivered(&s, B).is_empty(), "seed {seed}: B is stalled and delivers nothing");
+        assert!(s.has_session(A, B), "seed {seed}: and its session never ended");
+
+        s.resume(B);
+        settle(&mut s);
+        for n in ALL {
+            assert_eq!(delivered(&s, n), vec![(A, 9)], "seed {seed}: {n}");
+        }
+        assert_eq!(session_reports(&s, B).0, 0, "seed {seed}: B was never told a session ended");
+    }
+}
+
+#[test]
 fn a_peer_that_never_returns_needs_no_accusation() {
     // E is cut off for good. The all-ack version cannot deliver until its detector accuses E.
     // Here nobody judges E at all: four of five is a majority, and that is the whole condition.
