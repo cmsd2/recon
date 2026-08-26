@@ -113,15 +113,16 @@ because the process that would raise the event is the one that ceased to exist.
 emits it, so every existing proof and test stays valid, while every layer written from now on is
 forced to decide what it does about it.
 
-## What the simulator cannot currently express
+## What the simulator can and cannot express
 
-`Sim::crash` sets a flag and preserves the protocol's state, so `restart` resumes with everything
-intact. That is a pause, not a crash. No real process recovers its memory.
+`Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile state
+and `crash` then `restart` is amnesia. `Sim::suspend` is the pause. A restarted process therefore
+does face what it actually faces: having forgotten what it delivered.
 
-So the simulator today models crash-stop with suspension, and cannot exercise the case a restarted
-process actually faces: having forgotten what it delivered. That gap matters by the time uniform
-reliable broadcast and consensus arrive, and it is cheaper to close in `recon-sim` than to
-discover at rung six.
+What is still missing is the other half — **nothing survives a crash**, because there is no stable
+storage. A rung that must remember an epoch, a promise or a decision across an incarnation has
+nowhere to put it, so the logged variants of these abstractions cannot be written at all. That is
+the gap to close before anything in the fail-recovery model.
 
 ## What not to build yet
 
@@ -139,7 +140,8 @@ What is worth doing early, because the simulator can already produce the fault:
 
 1. Model scope-end events in `recon-sim`, driven by crash/restart, so they can be tested before
    any transport exists.
-2. Make crash actually lose state, with an opt-in for the current suspend-and-resume behaviour.
+2. ~~Make crash actually lose state, with an opt-in for the current suspend-and-resume
+   behaviour.~~ Done: `crash` rebuilds from the constructor, `suspend` preserves.
 3. Write the boundary down: layers above the link may depend on its `Cmd` and `Ind` types and
    nothing else. That is the seam a second implementation will be swapped through.
 
