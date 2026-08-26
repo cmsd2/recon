@@ -1088,7 +1088,7 @@ fn a_write_is_durable_when_it_returns() {
         s.crash(A);
         s.restart(A);
         assert_eq!(s.protocol(A).unwrap().total, 7, "seed {seed}");
-        assert_eq!(s.trace().writes_lost(), 0, "seed {seed}: nothing was lost");
+        assert_eq!(s.trace().deaths_in_writes(), 0, "seed {seed}: nothing died mid-write");
     }
 }
 
@@ -1145,7 +1145,7 @@ fn nothing_decided_on_a_write_that_killed_the_process_escapes_it() {
         s.command(A, LedgerCmd::RecordAndTell(4, B));
         s.run_for(Duration::from_millis(100));
 
-        assert_eq!(s.trace().writes_lost(), 1, "seed {seed}: the process died in the write");
+        assert_eq!(s.trace().deaths_in_writes(), 1, "seed {seed}: the process died in the write");
         assert_eq!(
             s.trace().deliveries().filter(|(_, to, _)| *to == B).count(),
             0,
@@ -1161,7 +1161,7 @@ fn a_send_after_a_write_that_returned_does_go_out() {
     s.command(A, LedgerCmd::RecordAndTell(3, B));
     s.run_for(Duration::from_millis(50));
     assert_eq!(s.trace().deliveries().filter(|(_, to, _)| *to == B).count(), 1);
-    assert_eq!(s.trace().writes_lost(), 0);
+    assert_eq!(s.trace().deaths_in_writes(), 0);
 }
 
 #[test]
@@ -1264,7 +1264,7 @@ fn a_run_with_writes_crashes_and_recoveries_reproduces_from_its_seed() {
         s.restart(A);
         s.command(A, LedgerCmd::Record(2));
         s.run_for(Duration::from_millis(80));
-        (s.trace().len(), s.protocol(A).unwrap().total, s.trace().writes_lost())
+        (s.trace().len(), s.protocol(A).unwrap().total, s.trace().deaths_in_writes())
     };
     for seed in 0..12u64 {
         assert_eq!(run(seed), run(seed), "seed {seed} must reproduce exactly");

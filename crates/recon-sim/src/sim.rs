@@ -445,7 +445,7 @@ where
             // anyway, so nothing decided on the strength of that write can escape.
             effects.clear();
             self.effects = effects;
-            self.trace.push(TraceEvent::WriteLost { at, node });
+            self.trace.push(TraceEvent::DiedWriting { at, node });
             self.crash(node);
             return;
         }

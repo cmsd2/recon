@@ -53,8 +53,10 @@ pub enum TraceEvent<M, I, T> {
     /// A durable write. `kind` distinguishes rewriting metadata from appending, so a claim about
     /// a protocol's write cost can be checked rather than asserted.
     Wrote { at: Time, node: NodeId, kind: WriteKind },
-    /// A process died inside a write; whether it landed is decided by the seed.
-    WriteLost { at: Time, node: NodeId },
+    /// A process died inside a write. Whether that write landed is decided by the seed and is
+    /// deliberately not recorded: the point of the fault is that nobody knows until the recovered
+    /// process reads its storage back.
+    DiedWriting { at: Time, node: NodeId },
     /// A restarted process was given back what it had written. `had_state` is false when it had
     /// written nothing and started as if for the first time.
     Recovered { at: Time, node: NodeId, had_state: bool },
@@ -77,7 +79,7 @@ impl<M, I, T> TraceEvent<M, I, T> {
             | TraceEvent::Suspended { at, .. }
             | TraceEvent::Restarted { at, .. }
             | TraceEvent::Wrote { at, .. }
-            | TraceEvent::WriteLost { at, .. }
+            | TraceEvent::DiedWriting { at, .. }
             | TraceEvent::Recovered { at, .. } => *at,
         }
     }
@@ -201,9 +203,12 @@ impl<M, I, T> Trace<M, I, T> {
         self.events.iter().filter(|e| matches!(e, TraceEvent::Wrote { .. })).count()
     }
 
-    /// How many writes were outstanding when their process crashed, and lost with it.
-    pub fn writes_lost(&self) -> usize {
-        self.events.iter().filter(|e| matches!(e, TraceEvent::WriteLost { .. })).count()
+    /// How many times a process died inside a write.
+    ///
+    /// Not how many writes were *lost*: the seed decides that, and the trace does not say, which
+    /// is the whole content of the fault.
+    pub fn deaths_in_writes(&self) -> usize {
+        self.events.iter().filter(|e| matches!(e, TraceEvent::DiedWriting { .. })).count()
     }
 
     /// How many restarts recovered durable state, as opposed to starting afresh.
