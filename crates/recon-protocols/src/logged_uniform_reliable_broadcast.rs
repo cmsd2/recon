@@ -142,6 +142,10 @@ pub struct LoggedUniformReliableBroadcast<P: Ord> {
     log: Logged<P>,
     /// Volatile, and rebuilt by re-broadcasting on recovery. Not written down.
     ack: BTreeMap<BroadcastId, BTreeSet<NodeId>>,
+    /// Names each fan-out to the stubborn broadcast beneath. Volatile, and matched to the child's
+    /// own volatile state — a crash takes both, so nothing outlives the counter that keys it.
+    /// Not the durable [`BroadcastId`]: nothing here is ever stopped, so the two never meet.
+    beb_seq: u64,
     beb: StubbornBroadcast<Data<P>>,
     inbox: Vec<sbeb::Ind<Data<P>>>,
     send_inbox: Vec<sbeb::Ind<Data<P>>>,
@@ -159,6 +163,7 @@ impl<P: Ord> LoggedUniformReliableBroadcast<P> {
             members: n,
             log: Logged::default(),
             ack: BTreeMap::new(),
+            beb_seq: 0,
             beb: StubbornBroadcast::new(me, members, interval),
             inbox: Vec::new(),
             send_inbox: Vec::new(),
@@ -207,13 +212,15 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
     fn rebroadcast(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let mut send_inbox = core::mem::take(&mut self.send_inbox);
         send_inbox.clear();
+        self.beb_seq += 1;
+        let id = sbeb::BroadcastId(self.beb_seq);
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
                 &mut send_inbox,
-                |ccx| beb.on_cmd(sbeb::Cmd::Broadcast(data), ccx),
+                |ccx| beb.on_cmd(sbeb::Cmd::Broadcast { id, msg: data }, ccx),
             );
         }
         debug_assert!(send_inbox.is_empty(), "broadcasting must not deliver synchronously");

@@ -18,6 +18,10 @@
 //! perfect link's job, not this one's.
 //!
 //! ```text
+//! upon event ⟨ sl, Init ⟩ do
+//!     sent := ∅;
+//!     starttimer(Δ);
+//!
 //! upon event ⟨ sl, Send | q, m ⟩ do
 //!     trigger ⟨ fll, Send | q, m ⟩;
 //!     sent := sent ∪ {(q, m)};
@@ -29,6 +33,15 @@
 //! upon event ⟨ fll, Deliver | p, m ⟩ do
 //!     trigger ⟨ sl, Deliver | p, m ⟩;
 //! ```
+//!
+//! # Departures from the page
+//!
+//! - The book's `⟨ Init ⟩` starts the timer unconditionally and runs it for ever. This arms it
+//!   lazily instead, when there is something to retransmit; see `arm`. Behaviourally equivalent,
+//!   and it lets a run reach quiescence rather than tick indefinitely.
+//! - Each transmission is named by a [`SendId`] so the layer above can retire it with
+//!   [`Cmd::Stop`]. The book has no such request and never lets go. See [`Cmd::Send`] for the
+//!   precondition that naming brings with it.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol};
@@ -45,6 +58,12 @@ pub struct SendId(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<M> {
     /// Transmit `msg` to `to`, and keep transmitting it until stopped.
+    ///
+    /// **`id` must not name a transmission that is still live.** Reusing one replaces the earlier
+    /// transmission outright: it stops being retransmitted, and SL1 lapses for it silently —
+    /// there is no indication, and nothing above is told a promise was withdrawn. The identifier
+    /// is the caller's to allocate, so the uniqueness is the caller's to hold; `debug_assert`
+    /// checks it in debug builds.
     Send { id: SendId, to: NodeId, msg: M },
     /// Stop retransmitting the transmission named `id`.
     Stop { id: SendId },
@@ -117,6 +136,9 @@ impl<M: Clone> Protocol for StubbornLink<M> {
     fn on_cmd(&mut self, cmd: Cmd<M>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
             Cmd::Send { id, to, msg } => {
+                // Reuse would retire the earlier transmission with no indication that its SL1 had
+                // lapsed. See the precondition on `Cmd::Send`.
+                debug_assert!(!self.sent.contains_key(&id), "SendId {id:?} is still live");
                 cx.send(to, msg.clone());
                 self.sent.insert(id, (to, msg));
                 self.arm(cx);

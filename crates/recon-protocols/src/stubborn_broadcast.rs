@@ -30,22 +30,36 @@
 //!
 //! - The message carries no identifier, because nothing here deduplicates. That leaves the layer
 //!   above to name its own messages, which is what it already does.
-//! - `Stop` is offered so a caller that knows a message is everywhere can retire it. Nothing in
-//!   this repository calls it, and the space note above is honest about what that costs.
+//! - `Stop` is offered so a caller that knows a message is everywhere can retire it. The book has
+//!   no such request and never lets go; what is outstanding is the whole of the space claim
+//!   above, so a `Stop` nobody can name would make that claim rest on nothing. The caller names
+//!   the broadcast, and one name retires the fan-out of `N` link transmissions it became.
+//!
+//!   Nothing in this repository calls it yet: [`crate::logged_uniform_reliable_broadcast`] never
+//!   stops, because retransmission for ever is what reaches a recovered process, and its space is
+//!   unbounded for that reason and says so.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::stubborn_link::{self as sl, SendId, StubbornLink};
+
+/// Names one broadcast, so the caller can later retire it.
+///
+/// Distinct from the [`SendId`]s beneath: one broadcast becomes `N` stubborn transmissions, and
+/// the caller has no way to name those — they are minted here. The layer above allocates this,
+/// and the same rule applies as to a `SendId`: it must not name a broadcast that is still live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BroadcastId(pub u64);
 
 /// Requests from the layer above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {
-    /// Broadcast `msg`, and keep transmitting it until stopped.
-    Broadcast(P),
-    /// Stop retransmitting an earlier broadcast.
-    Stop { id: SendId },
+    /// Broadcast `msg` as `id`, and keep transmitting it until stopped.
+    Broadcast { id: BroadcastId, msg: P },
+    /// Stop retransmitting the broadcast named `id`, on every link it went out over.
+    Stop { id: BroadcastId },
 }
 
 /// Indications to the layer above.
@@ -60,6 +74,9 @@ pub enum Ind<P> {
 pub struct StubbornBroadcast<P> {
     peers: BTreeSet<NodeId>,
     seq: u64,
+    /// What each live broadcast became: one stubborn transmission per peer. Bounded by
+    /// membership times what is outstanding, and this is what `Stop` needs in order to work.
+    outstanding: BTreeMap<BroadcastId, Vec<SendId>>,
     link: StubbornLink<P>,
     inbox: Vec<sl::Ind<P>>,
 }
@@ -69,12 +86,23 @@ impl<P> StubbornBroadcast<P> {
     pub fn new(me: NodeId, members: impl IntoIterator<Item = NodeId>, interval: Duration) -> Self {
         let mut peers: BTreeSet<NodeId> = members.into_iter().collect();
         peers.insert(me);
-        StubbornBroadcast { peers, seq: 0, link: StubbornLink::new(interval), inbox: Vec::new() }
+        StubbornBroadcast {
+            peers,
+            seq: 0,
+            outstanding: BTreeMap::new(),
+            link: StubbornLink::new(interval),
+            inbox: Vec::new(),
+        }
     }
 
     /// The process set. This layer's whole state, besides what is still being transmitted.
     pub fn peers(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.peers.iter().copied()
+    }
+
+    /// How many broadcasts are still being retransmitted. Nothing retires one but [`Cmd::Stop`].
+    pub fn outstanding_count(&self) -> usize {
+        self.outstanding.len()
     }
 }
 
@@ -115,19 +143,27 @@ impl<P: Clone> Protocol for StubbornBroadcast<P> {
 
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
-            Cmd::Broadcast(msg) => {
+            Cmd::Broadcast { id, msg } => {
+                debug_assert!(!self.outstanding.contains_key(&id), "BroadcastId {id:?} is live");
                 let peers: Vec<NodeId> = self.peers.iter().copied().collect();
+                let mut sends = Vec::with_capacity(peers.len());
                 for q in peers {
                     self.seq += 1;
-                    let id = SendId(self.seq);
+                    let send = SendId(self.seq);
+                    sends.push(send);
                     let msg = msg.clone();
                     self.with_link(cx, |link, ccx| {
-                        link.on_cmd(sl::Cmd::Send { id, to: q, msg }, ccx)
+                        link.on_cmd(sl::Cmd::Send { id: send, to: q, msg }, ccx)
                     });
                 }
+                self.outstanding.insert(id, sends);
             }
             Cmd::Stop { id } => {
-                self.with_link(cx, |link, ccx| link.on_cmd(sl::Cmd::Stop { id }, ccx))
+                // One name, `N` transmissions. The link cannot do this itself: it never learns
+                // that the fan-out was one broadcast.
+                for send in self.outstanding.remove(&id).unwrap_or_default() {
+                    self.with_link(cx, |link, ccx| link.on_cmd(sl::Cmd::Stop { id: send }, ccx));
+                }
             }
         }
     }
