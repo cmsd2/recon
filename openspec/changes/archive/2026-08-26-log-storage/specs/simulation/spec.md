@@ -83,7 +83,7 @@ never interrupted is not correct.
 
 ### Requirement: Storage activity is visible in the trace
 
-Writes, appends, writes lost to a crash, and whether a recovering process found anything SHALL
+Writes, appends, deaths inside a write, and whether a recovering process found anything SHALL
 appear in the trace, so that properties about durability can be asserted over the trace rather than
 over protocol internals.
 
@@ -92,10 +92,12 @@ over protocol internals.
 - **WHEN** a test needs to establish that something was durable before a message was sent
 - **THEN** it can determine that from the trace alone
 
-#### Scenario: A write lost to a crash is distinguishable from one that landed
+#### Scenario: Dying inside a write is visible, and its outcome is not
 
 - **WHEN** a process is killed inside a write
-- **THEN** the trace records that a write was lost, separately from the writes that completed
+- **THEN** the trace records that it died writing, separately from the writes that completed, and
+  does NOT record whether that write landed — the recovering process reading what survived is the
+  only evidence either way
 
 #### Scenario: Rewriting and appending are distinguishable
 
