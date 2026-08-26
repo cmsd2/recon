@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 207 tests, all in-process, about two seconds
+cargo test --workspace          # 228 tests, all in-process, about two seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -143,6 +143,7 @@ The bottom rung, fair-loss links, is not a module: it is what the simulator prov
 | Best-effort broadcast | [`best_effort_broadcast.rs`](crates/recon-protocols/src/best_effort_broadcast.rs) | Module 3.1, Alg. 3.1 | deployable | bounded by membership |
 | Reliable broadcast | [`reliable_broadcast.rs`](crates/recon-protocols/src/reliable_broadcast.rs) | Module 3.2, Alg. 3.3 | transcription | unbounded |
 | Uniform reliable broadcast | [`uniform_reliable_broadcast.rs`](crates/recon-protocols/src/uniform_reliable_broadcast.rs) | Module 3.3, Alg. 3.4 | transcription | unbounded |
+| Flooding consensus | [`flooding_consensus.rs`](crates/recon-protocols/src/flooding_consensus.rs) | Module 5.1, Alg. 5.1 | academic, fail-stop | bounded by membership and rounds |
 
 ### Over session links — what a deployment would run
 
@@ -164,10 +165,29 @@ keeps payloads and consults a failure detector, so between resending on re-estab
 accusing a peer that never returns there is no third outcome. Both halves are tested, and the
 contrast is the point of `tests/session_broadcast.rs`.
 
+### Consensus, and what it rests on
+
+Flooding consensus is the last rung on the fair-loss ladder, and the only one whose limitation is
+not about space. Its state is bounded — one proposal set and one heard-from set per round, at most
+`N` rounds — but its **agreement rests entirely on the failure detector never being wrong**. The
+book's own proof of agreement invokes strong accuracy by name, and one false suspicion splits the
+decision permanently.
+
+The asymmetry is the reason it is worth having written. Losing the detector's *accuracy* costs
+safety: two correct processes decide differently, and nothing detects or repairs it. Losing its
+*completeness* costs only liveness: everyone blocks, but nobody is wrong. `tests/flooding_consensus.rs`
+provokes the first with a partition inside synchronous mode, then heals it and shows both decisions
+still standing — because a decision is irrevocable and both were taken before the system stabilised.
+
+That is what a perfect failure detector is worth, and it is why the algorithms that get deployed
+are built the other way round.
+
 ### Next
 
-Consensus. The ladder's order is fixed by constraint 6, and reliable broadcast was the milestone
-that proved the composition model holds.
+Eventually perfect failure detection (Module 2.8, `◇P`) and eventual leader election (`Ω`), then
+the leader-driven family. Two things are missing for them: `Ω` and the detector beneath it, and
+**stable storage** — a crash now genuinely loses volatile state, so a rung that must remember an
+epoch or a promise across an incarnation has nowhere to put it.
 
 ## Examples
 
@@ -201,8 +221,9 @@ openspec/specs/
 ├── simulation/                        determinism, faults, sessions, the trace
 ├── links/                             stubborn, perfect, session
 ├── failure-detection/                 perfect failure detector
-└── broadcast/                         best-effort, reliable, uniform reliable,
-                                       and the three session variants
+├── broadcast/                         best-effort, reliable, uniform reliable,
+│                                      and the three session variants
+└── consensus/                         flooding consensus
 ```
 
 Work is proposed, applied and archived through OpenSpec. In Claude Code these are slash commands
@@ -291,8 +312,9 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/perfect_failure_detector.rs` | completeness and accuracy, and where accuracy is lost | 13 |
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the ladder over perfect links | 11 / 15 / 17 |
 | `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the ladder over session links, and where the two rungs diverge | 6 / 16 |
+| [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, and what a false suspicion costs it | 21 |
 
-207 in total, all in one process, no ports opened.
+228 in total, all in one process, no ports opened.
 
 ## Licence
 

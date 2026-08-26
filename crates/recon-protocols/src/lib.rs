@@ -7,6 +7,7 @@
 //! The bottom rung, fair-loss links, is not here: it is what the simulator provides.
 
 pub mod best_effort_broadcast;
+pub mod flooding_consensus;
 pub mod perfect_failure_detector;
 pub mod perfect_link;
 pub mod reliable_broadcast;
@@ -18,6 +19,7 @@ pub mod stubborn_link;
 pub mod uniform_reliable_broadcast;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
+pub use flooding_consensus::FloodingConsensus;
 pub use perfect_failure_detector::PerfectFailureDetector;
 pub use perfect_link::PerfectLink;
 pub use reliable_broadcast::ReliableBroadcast;
