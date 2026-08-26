@@ -74,6 +74,22 @@ messages.
 - **WHEN** a process recovers
 - **THEN** the layer above is notified of the retrieved log-delivered set
 
+### Requirement: A first start writes the empty state down
+
+On starting with nothing in storage, this layer SHALL write its empty pending and log-delivered
+sets, for the reason `links/logged-link` gives: it is what makes every later restart a recovery.
+It SHALL NOT repeat that write on recovering.
+
+#### Scenario: The first start is durable
+
+- **WHEN** a process starts with nothing in storage
+- **THEN** the empty state is written, without anything having been broadcast
+
+#### Scenario: Recovering does not repeat the initial write
+
+- **WHEN** a process recovers
+- **THEN** it does not write the retrieved state back
+
 ### Requirement: Delivery waits for a majority
 
 A message SHALL be log-delivered once more than half of the processes have been seen to

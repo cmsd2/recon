@@ -1,10 +1,12 @@
+# links/logged-link Specification
+
 ## Purpose
 
 Perfect-link guarantees restated over *log-delivery*: instead of being told a message arrived, the
 layer above is told that the durable record of arrivals has changed, and reads it. That is what
 lets a restarted process know what it already delivered instead of delivering it again.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Delivery is logged, and the indication names the log
 
@@ -79,6 +81,27 @@ sent to it by that process.
 
 - **WHEN** a run completes
 - **THEN** every entry in every durable set corresponds to an earlier send by the named sender
+
+### Requirement: A first start writes the empty log down
+
+On starting with nothing in storage, this layer SHALL write its empty log, so that every later
+restart of the process retrieves something and takes the recovery path rather than beginning
+afresh. It SHALL NOT repeat that write on recovering, which would overwrite what was retrieved.
+
+#### Scenario: The first start is durable
+
+- **WHEN** a process starts with nothing in storage
+- **THEN** an empty log is written, without any message having arrived
+
+#### Scenario: A crash before any message still recovers
+
+- **WHEN** a process starts, writes nothing further, crashes and restarts
+- **THEN** it retrieves the empty log and is recovered rather than initialised again
+
+#### Scenario: Recovering does not repeat the initial write
+
+- **WHEN** a process recovers
+- **THEN** it does not write the retrieved log back
 
 ### Requirement: Recovery re-announces the log
 
