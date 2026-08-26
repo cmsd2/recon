@@ -1411,3 +1411,67 @@ fn a_run_with_writes_crashes_and_recoveries_reproduces_from_its_seed() {
         assert_eq!(run(seed), run(seed), "seed {seed} must reproduce exactly");
     }
 }
+
+// ------------------------- that the scope bridge is opt-in, and what forgetting it costs
+
+/// Records every scope event it is given, and nothing else. `Scope` is inhabited, so this one
+/// *can* be told — which is what makes forgetting to tell it observable.
+struct Listener {
+    heard: Vec<recon_core::SessionEvent>,
+}
+
+impl Protocol for Listener {
+    type Cmd = ();
+    type Ind = ();
+    type Msg = ();
+    type Timer = ();
+    type Scope = recon_core::SessionEvent;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
+
+    fn on_cmd(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_msg(&mut self, _: NodeId, (): (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_scope_event(&mut self, e: recon_core::SessionEvent, _cx: &mut ProtoCx<'_, Self>) {
+        self.heard.push(e);
+    }
+}
+
+fn listeners(deliver: bool) -> Sim<Listener> {
+    let mut s: Sim<Listener> = Sim::new(Config::default().seed(31).sessions(), &[A, B], |_| {
+        Listener { heard: Vec::new() }
+    });
+    if deliver {
+        s.deliver_session_events();
+    }
+    s
+}
+
+#[test]
+fn forgetting_deliver_session_events_silently_disables_the_whole_bridge() {
+    // `deliver_session_events` is opt-in and nothing compile-checks it: the bound lives on the
+    // method, so a protocol that declares no scopes cannot call it, and one that does is free not
+    // to. A driver that forgets gets a run where sessions open and close and no layer is ever
+    // told — every resend clause dead, every `[session]` tag unearned, and not one test failing
+    // to say so. This pins that, so the hazard is at least written down in a place that runs.
+    let mut without = listeners(false);
+    without.run_for(Duration::from_millis(50));
+    without.break_session(A, B);
+    without.run_for(Duration::from_millis(500));
+    assert!(without.trace().session_ends() > 0, "the sessions really did open and close");
+    assert!(
+        without.protocol(A).unwrap().heard.is_empty(),
+        "and A was told nothing at all: this is the failure that makes no noise"
+    );
+
+    let mut with = listeners(true);
+    with.run_for(Duration::from_millis(50));
+    with.break_session(A, B);
+    with.run_for(Duration::from_millis(500));
+    let heard = &with.protocol(A).unwrap().heard;
+    assert!(
+        heard.iter().any(|e| matches!(e, recon_core::SessionEvent::Established { .. }))
+            && heard.iter().any(|e| matches!(e, recon_core::SessionEvent::Ended { .. })),
+        "with the opt-in, both boundaries arrive: {heard:?}"
+    );
+}

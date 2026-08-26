@@ -848,6 +848,12 @@ where
     ///
     /// Opt-in, like the codec check: a protocol that declares no scopes cannot receive one, and
     /// the bound lives only on this method so ordinary runs need nothing.
+    ///
+    /// **Forgetting this is silent, and it disables everything the session layers do.** Sessions
+    /// still open, end and lose their suffixes; no layer is ever told, so every resend clause is
+    /// dead, every `[session]` tag is unearned, and nothing fails to say so. A session-based run
+    /// of a protocol whose `Scope` is inhabited should call it, and
+    /// `forgetting_deliver_session_events_silently_disables_the_whole_bridge` is what that costs.
     pub fn deliver_session_events(&mut self) {
         self.session_scope = Some(P::Scope::from);
     }

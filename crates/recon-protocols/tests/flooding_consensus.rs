@@ -165,6 +165,62 @@ fn a_round_completes_on_a_crash_indication_alone() {
     assert_eq!(a.round(), 2);
 }
 
+#[test]
+fn a_decided_from_an_accused_sender_is_discarded() {
+    // `such that p ∈ correct ∧ decision = ⊥`. A process that has wrongly accused the decider
+    // throws its decision away — half of why a false suspicion is unrecoverable, and the arm the
+    // end-to-end suite never reaches, because under a perfect detector nobody is wrongly accused.
+    //
+    // Driven directly: the fault is a detector that lies, and the simulator's synchronous mode
+    // exists precisely to stop it lying.
+    let mut s = sim(1);
+    propose_all(&mut s, [4, 4, 4, 4]);
+    settle(&mut s);
+    let (decider, wire) = s
+        .trace()
+        .events()
+        .iter()
+        .find_map(|e| match e {
+            TraceEvent::Sent { from, to, msg: Wire::Broadcast(w), .. }
+                if *to != *from && matches!(w.payload, Flood::Decided(_)) =>
+            {
+                Some((*from, Wire::Broadcast(w.clone())))
+            }
+            _ => None,
+        })
+        .expect("some process broadcast its decision");
+
+    let mut r = ChaCha8Rng::seed_from_u64(0);
+    let at = Time::from_offset(detect_after() * 3);
+
+    // A hears no heartbeat at all, so one tick beyond the timeout accuses every peer. It has not
+    // proposed, so `correct = {A}` cannot complete a round either: A is undecided and wrong.
+    let mut accuser = fc(A);
+    step(&mut accuser, Event::Init, Time::ZERO, &mut r);
+    step(&mut accuser, Event::Timer(Timer::Detector(Tick)), at, &mut r);
+    assert!(!accuser.correct().any(|p| p == decider), "A has accused the decider");
+    assert!(accuser.decision().is_none(), "and decided nothing of its own");
+
+    let fx = step(&mut accuser, Event::Msg { from: decider, msg: wire.clone() }, at, &mut r);
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Indicate(Ind::Decide(_)))),
+        "the decision of an accused process is discarded, however correct it was"
+    );
+    assert_eq!(accuser.decision(), None, "so A is still undecided, and now permanently split");
+
+    // Non-vacuity: the very same message, at a process that has accused nobody, decides. Without
+    // this the assertion above would pass on a protocol that ignored DECIDED entirely.
+    let mut listener = fc(A);
+    step(&mut listener, Event::Init, Time::ZERO, &mut r);
+    let fx =
+        step(&mut listener, Event::Msg { from: decider, msg: wire }, Time::from_millis(1), &mut r);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Indicate(Ind::Decide(_)))),
+        "the same message from a process still in `correct` decides"
+    );
+    assert!(listener.decision().is_some());
+}
+
 /// The message this broadcast addressed to `to`, if any.
 fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], to: NodeId) -> Option<Wire<u32>> {
     fx.iter().find_map(|e| match e {
