@@ -66,7 +66,7 @@
 //! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, absurd};
+use recon_core::{NodeId, ProtoCx, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -220,7 +220,7 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, absurd, &mut inbox, |ccx| {
+            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut inbox, |ccx| {
                 f(beb, ccx)
             });
         }
@@ -242,7 +242,7 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         inbox.clear();
         {
             let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, Timer::Detector, absurd, &mut inbox, |ccx| {
+            cx.with_child_consuming(Wire::Detector, Timer::Detector, &mut inbox, |ccx| {
                 f(detector, ccx)
             });
         }
@@ -278,13 +278,9 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                Wire::Broadcast,
-                Timer::Broadcast,
-                absurd,
-                &mut relay_inbox,
-                |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
-            );
+            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut relay_inbox, |ccx| {
+                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
+            });
         }
         debug_assert!(
             relay_inbox.is_empty(),
@@ -331,7 +327,8 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     /// Failure detection begins here, as Module 2.6 has it. It used to need a `Start` command
     /// because there was no init event to hang the detector's first timer on.

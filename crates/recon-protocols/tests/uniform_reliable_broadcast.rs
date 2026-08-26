@@ -284,7 +284,8 @@ where
     Pr::Msg: Clone + PartialEq,
     Pr::Ind: Clone,
     Pr::Timer: Clone,
-    Pr::Durable: Clone,
+    Pr::Meta: Clone,
+    Pr::Entry: Clone,
     F: FnMut(NodeId) -> Pr + 'static,
 {
     let mut s: Sim<Pr> = Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, make);

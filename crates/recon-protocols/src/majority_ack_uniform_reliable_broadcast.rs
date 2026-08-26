@@ -76,7 +76,7 @@
 //!   nothing to start, failure detection having gone.
 //! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
 
-use recon_core::{NodeId, ProtoCx, Protocol, absurd};
+use recon_core::{NodeId, ProtoCx, Protocol};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
@@ -187,7 +187,6 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut inbox,
                 |ccx| f(beb, ccx),
             );
@@ -223,7 +222,6 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut relay_inbox,
                 |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
             );
@@ -273,7 +271,8 @@ impl<P: Clone> Protocol for MajorityAckUniformReliableBroadcast<P> {
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

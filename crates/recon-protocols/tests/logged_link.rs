@@ -57,7 +57,7 @@ fn a_first_receipt_is_logged_and_then_announced() {
     // The write precedes the announcement: nothing is told to the layer above that is not
     // already durable.
     let stored_at = s.trace().events().iter().find_map(|e| match e {
-        TraceEvent::Stored { at, node } if *node == B => Some(*at),
+        TraceEvent::Wrote { at, node, .. } if *node == B => Some(*at),
         _ => None,
     });
     let told_at = s.trace().events().iter().find_map(|e| match e {
@@ -185,6 +185,27 @@ fn recovery_re_announces_the_log_with_no_message_having_arrived() {
     assert!(logs(&s, B).len() > announced);
 }
 
+#[test]
+fn a_retransmission_arriving_straight_after_recovery_is_recognised() {
+    // Task 4.4 in its observable form: recovery read the record within the handler, so the very
+    // next retransmission is suppressed rather than log-delivered a second time.
+    let mut s = sim(9);
+    s.command(A, Cmd::Send { to: B, msg: 4 });
+    s.run_for(Duration::from_millis(200));
+    let appended = s.trace().appends();
+
+    s.crash(B);
+    s.restart(B);
+    settle(&mut s);
+
+    assert_eq!(log_of(&s, B), vec![4]);
+    assert_eq!(s.trace().appends(), appended, "nothing was appended again after recovering");
+    assert!(
+        s.trace().deliveries().filter(|(_, to, _)| *to == B).count() > 1,
+        "and retransmissions did keep arriving"
+    );
+}
+
 // ------------------------------------------------- the stated limits
 
 #[test]
@@ -222,15 +243,10 @@ fn the_durable_set_grows_with_distinct_messages_log_delivered() {
     settle(&mut s);
 
     assert_eq!(s.protocol(B).unwrap().log().len(), 12, "one entry per distinct message, for ever");
-    assert!(s.trace().writes_completed() > 0, "and it is on disk, not merely in memory");
-
-    // Writes coalesce: a store issued while an earlier one is still outstanding replaces it, so
-    // there are fewer completions than arrivals. That is safe only because the durable value is
-    // the whole log rather than a delta — a later value always contains an earlier one.
-    assert!(
-        s.trace().writes_completed() <= 12,
-        "coalescing can only reduce the count, never raise it"
-    );
+    // One append per message log-delivered, and nothing rewritten on their account: this is the
+    // whole point of appending rather than rewriting the record each time.
+    assert_eq!(s.trace().appends(), 12, "one append per message, not a rewrite of the record");
+    assert_eq!(s.trace().metadata_writes(), 2, "one per process, at first start, and never again");
 }
 
 #[test]

@@ -106,9 +106,9 @@ of, which is the failure the fail-recovery model exists to prevent. Indications 
 same reason at one remove: an indication is how the layer above learns something, and what it
 usually does next is send.
 
-The rule is *positional*: an effect emitted before a write is not held. A synchronous write
-therefore SHALL mark its position among the effects, so that the driver can tell which effects
-preceded it and which followed.
+This follows from the write being durable when it returns rather than being a separate obligation
+on the driver: an effect emitted after a write is emitted after the write has landed, because the
+handler could not have reached it otherwise. A driver has nothing to hold and nothing to order.
 
 #### Scenario: A promise is durable before it is made
 
@@ -120,15 +120,15 @@ preceded it and which followed.
 - **WHEN** a protocol writes and then raises an indication in response to one event
 - **THEN** the write is durable before the layer above is notified
 
-#### Scenario: What preceded the write is not held
+#### Scenario: A send with no write before it costs nothing
 
-- **WHEN** a protocol sends and then writes in response to one event
-- **THEN** the message leaves the process without waiting for the write
+- **WHEN** a protocol sends without writing in response to an event
+- **THEN** the message leaves the process with no write involved
 
 #### Scenario: A crash between the two loses the message, not the record
 
-- **WHEN** a process crashes after the write and before the send
-- **THEN** on recovery the stored state is present, and the message was never sent
+- **WHEN** a process is killed inside a write whose handler would have gone on to send
+- **THEN** no peer receives that message, whether or not the write itself landed
 
 ## ADDED Requirements
 
@@ -139,10 +139,13 @@ randomness and the effect sink. The handle SHALL offer, synchronously: reading a
 metadata value, appending an entry, reading the entries from a given position onward, and asking
 for the current end position.
 
-Synchronous means the call returns before the operation is durable, and that what was written is
-visible to any later read in the same process incarnation. It does **not** mean durable. Durability
-remains deferred and remains the driver's business, in the same way that a write to a page cache
-returns long before the data is on a disk.
+A write SHALL be durable when it returns. A protocol is a synchronous state machine, so the return
+of the write call is the only point at which a driver can synchronise with it — after the handler
+returns, the sends are already in the driver's hands. A write therefore blocks, as `fsync` does.
+
+A read SHALL be synchronous too. That is honest while the record is mirrored in memory; for a
+record larger than memory a read is a real disk read, and that is a stated bound of this interface
+rather than a property of it.
 
 Storage supplied this way is the same kind of thing as the current time and the random source:
 state the driver hands the protocol so that it can be made virtual and seeded. It is not IO
@@ -152,6 +155,11 @@ performed by the protocol.
 
 - **WHEN** a protocol appends an entry and then reads from a position before it, within one event
 - **THEN** the entry is among what it reads, without waiting for anything
+
+#### Scenario: A write that returned cannot be lost
+
+- **WHEN** a protocol writes and the process crashes at any point after that call returned
+- **THEN** the recovering process reads what was written
 
 #### Scenario: Reading does not require the answer to arrive later
 

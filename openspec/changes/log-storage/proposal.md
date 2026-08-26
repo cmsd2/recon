@@ -19,13 +19,16 @@ link that had not finished loading its `delivered` set when a retransmission arr
 log-deliver a duplicate, which is the one property that protocol exists to provide.
 
 The resolution is to stop treating storage as an effect and give the protocol a **synchronous
-interface** instead: `get`/`set` for metadata, `append` and `read_from` for a log. Synchronous is
-not the same as durable — the call returns immediately and is visible to later reads in the same
-process, while durability stays deferred and stays the driver's business, exactly as a write to a
-page cache returns before `fsync`. That makes storage precisely analogous to `cx.now()` and
-`cx.rng()`: state the driver supplies so it can be made virtual and seeded. Recovery stays
-synchronous, so the invariant survives untouched and needs no recovering state, no held messages,
-and no reply events.
+interface** instead: `get`/`set` for metadata, `append` and `read_from` for a log. That makes
+storage precisely analogous to `cx.now()` and `cx.rng()` — state the driver supplies so it can be
+made virtual and seeded — and recovery stays synchronous, so the startup invariant survives
+untouched and needs no recovering state, no held messages, and no reply events.
+
+**A write is durable when it returns.** A protocol is a synchronous state machine, so the return of
+a write call is the *only* point at which a driver can synchronise with it: after the handler
+returns, the sends are already in the driver's hands. Anything weaker would let a process be seen
+by its peers to have made a promise it has no record of, and there would be no place left to stop
+it. The cost is that a write blocks, which is what `fsync` does and what the guarantee requires.
 
 ## What Changes
 
@@ -37,10 +40,14 @@ and no reply events.
   that keeps nothing declares them uninhabited — so `set` and `append` take an argument nobody can
   construct and a write stays a compile error, exactly as `Durable = Infallible` does today. Reads
   become vacuous rather than forbidden, which is harmless.
-- **The ordering rule survives positionally.** It is currently enforced because `Effect::Store`
-  sits in the effect stream and the driver holds everything emitted after it. A synchronous write
-  pushes a *marker* into the same stream — the value travels by the handle, the position by the
-  marker — so nothing observable leaves a process before the write it depends on is durable.
+- **The ordering rule becomes a property of the call.** It is currently enforced because
+  `Effect::Store` sits in the effect stream and the driver holds everything emitted after it. A
+  synchronous write that is durable on return needs no holding: nothing emitted after it can leave
+  before it, because it has already happened. The rule stops being a driver obligation.
+- **The crash-during-write fault is armed rather than incidental.** With no window in which a write
+  is outstanding, the only way to observe one that did not land is to kill the process inside it.
+  The simulator gains a way to say so, and the write that killed it may or may not have taken
+  effect, decided by the seed and invisible to the recovering process.
 - **Both logged protocols convert from rewriting to appending**, which is what makes this a change
   rather than a refactor: their write cost goes from `O(n²)` to `O(n)`, and `read_from` is used for
   real rather than for demonstration.
@@ -62,10 +69,10 @@ not do before.
 
 - `protocol-core`: the effect vocabulary loses its store variant; the durable-state declaration
   becomes a metadata type and an entry type; a new requirement covers the synchronous interface and
-  what it does and does not promise; the write-ordering requirement is restated in terms of a
-  synchronous write rather than an effect.
-- `simulation`: storage gains an append-only log beside the metadata value, with the
-  crash-during-write behaviour extended to cover both.
+  the durable-on-return promise; the write-ordering requirement becomes a consequence of that
+  promise rather than a driver obligation.
+- `simulation`: storage gains an append-only log beside the metadata value, and the
+  crash-during-write fault becomes something a test arms explicitly.
 - `links/logged-link`: the durable record becomes an appended log with metadata, and the module's
   space statement changes from "unbounded, and rewritten in full" to "unbounded, appended once".
 - `broadcast/logged-uniform-reliable-broadcast`: the same.
@@ -76,7 +83,8 @@ not do before.
   one fewer effect variant. Every protocol declares the two types; all but two declare them
   uninhabited and are otherwise untouched.
 - `recon-sim`: a per-process store with a metadata slot and an append-only log, both part of the
-  seeded state and both subject to the interrupted-write fault.
+  seeded state, plus `crash_on_next_write` to arm the interrupted-write fault. The configurable
+  write latency goes: with writes durable on return there is nothing for it to delay.
 - Two protocol modules rewritten around append; their suites gain assertions about what is written
   rather than only what is remembered.
 - **This supersedes part of the change archived immediately before it.** `Effect::Store` and

@@ -109,6 +109,14 @@ What dates it, and what to do:
 Check the relative links still resolve when files move. The README claims specific test counts and
 specific statuses; if you cannot verify a claim you are about to write, do not write it.
 
+The same-commit rule is not only the README's. A module's quoted pseudocode, its departures
+list, and any document in `docs/` that a change dates are updated **in the commit that dates
+them** — this repository's method is reading code against its quoted contract, so a stale quote
+asserts an algorithm the code deliberately does not implement. When a test forces a change to a
+clause, the quote changes in that commit. (This has already happened once: a docstring kept
+quoting the deadlocking variant of a resend clause that its own inline comment said a test had
+replaced.)
+
 ## The constraints that govern the rewrite
 
 These come from `docs/postmortem.md` §5. They are ordering rules, not style preferences —
@@ -163,6 +171,25 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
 - **Every property test asserts non-vacuity.** An absence-of-violation property is satisfied by a
   protocol that does nothing; `crates/recon-protocols/tests/method.rs` demonstrates that and
   guards against it.
+- **Identity is as durable as the state it keys.** An identifier that crosses the wire or lands
+  in storage outlives the handler that minted it, so its generator is state with a scope: say
+  which scope it survives — incarnation, session, forever — and persist it or re-derive it in
+  `on_recovery`. A durable set keyed by a volatile counter is the specific bug to look for; the
+  2026-08 audit found it three times, always downstream of the documented id-keyed departure
+  from the book's content-keyed identity. A departure's obligations are part of the departure.
+- **Durable-before-visible holds in code order.** The write precedes the emission of any effect
+  that reveals it, in the handler's own text — never by relying on the driver to buffer effects
+  until the handler returns. `Cx` explicitly supports eager sinks.
+- **A fault knob nobody spends is a claim nobody tested.** When the simulator gains a fault —
+  `crash_on_next_write`, suspension, session breaks — every protocol whose stated guarantee that
+  fault threatens gets a test injecting it, in that protocol's own suite, not only in the
+  simulator's. And recovery tests include the process doing something *new* after recovering,
+  not only resuming old work: resuming exercises replay, new work exercises what replay forgot
+  to restore.
+- **Failure analyses cover both roles.** Document and test both the process a failure happens to
+  and the processes observing it — an accusation has an accuser and an accused, a stall has a
+  staller and its peers. The audits found analyses that covered exactly one side, and the bug
+  was on the other.
 
 ## Transcriptions vs implementations — read `docs/bounded-space.md`
 
@@ -209,15 +236,22 @@ ending only if its redundancy outlives it: memory survives a reconnect, stable s
 restart, other processes survive this one dying. **A layer that cannot bridge must propagate.**
 Silently absorbing a scope end is the bug the first attempt shipped.
 
-Two things follow for anyone writing a new abstraction:
+Three things follow for anyone writing a new abstraction:
 
 - Layers above the link may depend on its `Cmd` and `Ind` types and nothing else. That is the
   seam a session-aware or logged implementation gets swapped through.
 - `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile
-  state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause. What is
-  *not* yet modelled is anything surviving a crash: there is no stable storage, so an abstraction that
-  needs to remember across an incarnation — an epoch, a promise, a decision — has nowhere to put
-  it. That is a gap to close before any algorithm claims to survive a restart.
+  state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause. What
+  survives a crash is what was written through `Cx::storage` — a synchronous `Store` with one
+  rewritten metadata value and an appended entry sequence — and is read back in `on_recovery`;
+  `Sim::crash_on_next_write` models dying inside the write, with the seed deciding whether it
+  landed.
+- **The simulator is subject to the same invariants as the layers.** A new simulator capability
+  is checked against `docs/conditional-guarantees.md` before it merges, with one question: can it
+  lose something without raising the event that says so? Silently absorbing a scope end is the
+  cardinal sin wherever it lives, and the sim is where it most recently appeared — suspension
+  dropping in-session deliveries while the session stayed up, with no `SessionEnded` ever
+  raised.
 
 ## Anti-patterns, all of them load-bearing history
 

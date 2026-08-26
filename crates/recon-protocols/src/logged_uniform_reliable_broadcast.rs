@@ -3,9 +3,11 @@
 //! Cachin, Guerraoui & Rodrigues, Module 3.6 and Algorithm 3.8 ("Logged Majority-Ack Uniform
 //! Reliable Broadcast").
 //!
-//! **Status: transcription. Space: unbounded — and on disk.** `pending` and `delivered` grow with
-//! every message handled, as in [`crate::majority_ack_uniform_reliable_broadcast`], except that
-//! here they are written down. See `docs/bounded-space.md`.
+//! **Status: transcription. Space: unbounded — and on disk. Write cost: a fixed number of appends
+//! per message.** `pending` and `delivered` grow with every message handled, as in
+//! [`crate::majority_ack_uniform_reliable_broadcast`], except that here they are written down.
+//! Each is recorded by appending one entry, so the cost of recording a message does not depend on
+//! how many preceded it; the record itself is still unbounded. See `docs/bounded-space.md`.
 //!
 //! **Assumption: a correct majority, `N > 2f`** — where in this model a *correct* process is one
 //! that always recovers from its crashes, and what it knows after recovering is what it wrote.
@@ -62,15 +64,14 @@
 //! # Departures from the page
 //!
 //! - `⟨ Init ⟩` is here and performs the book's initial store, as [`crate::logged_link`] does.
-//! - `pending` and `delivered` are written together as one value, because the durable state is
-//!   one value in full — see [`recon_core::Protocol::Durable`]. The book stores them separately;
-//!   nothing here depends on the difference.
+//! - `pending` and `delivered` share one appended sequence, distinguished by a tag on each entry,
+//!   rather than the book's two stores. Recovery replays the sequence and rebuilds both.
 //! - Messages are keyed by an identifier carrying the originator and a sequence number rather
 //!   than by content, so identical content broadcast twice is delivered twice.
 //! - No `Stop`: retransmission for ever is what reaches a recovered process.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, absurd};
+use recon_core::{NodeId, Position, ProtoCx, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -108,6 +109,15 @@ impl<P: Ord> Logged<P> {
     pub fn pending_count(&self) -> usize {
         self.pending.len()
     }
+}
+
+/// One thing written down. Replaying these in order rebuilds `pending` and `delivered`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Record<P> {
+    /// Seen, and being re-broadcast until a majority has it.
+    Pending(BroadcastId, P),
+    /// Log-delivered.
+    Delivered(BroadcastId, P),
 }
 
 /// Requests from the layer above.
@@ -184,7 +194,6 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut inbox,
                 |ccx| f(beb, ccx),
             );
@@ -203,7 +212,6 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut send_inbox,
                 |ccx| beb.on_cmd(sbeb::Cmd::Broadcast(data), ccx),
             );
@@ -218,13 +226,13 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
     /// branch here is guarded and idempotent.
     fn on_arrival(&mut self, from: NodeId, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let id = data.id;
-        let mut wrote = false;
+        let mut wrote = None;
 
         // Re-broadcast only on first sight. An identifier determines its payload, so re-inserting
         // cannot change what is pending — the returned Option is read only to learn whether this
         // was the first time.
         if self.log.pending.insert(id, data.payload.clone()).is_none() {
-            wrote = true;
+            wrote = Some(data.payload.clone());
             self.rebroadcast(data.clone(), cx);
         }
 
@@ -232,17 +240,17 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
             let acked = self.ack.get(&id).map(|a| a.len()).unwrap_or(0);
             let already = self.log.delivered.iter().any(|(i, _)| *i == id);
             if 2 * acked > self.members && !already {
-                self.log.delivered.insert((id, data.payload));
-                // Durable first, announced second: the layer above must not learn of a delivery
-                // that a crash could erase.
-                cx.store(self.log.clone());
+                self.log.delivered.insert((id, data.payload.clone()));
+                // Durable before announced: the layer above must not learn of a delivery a crash
+                // could erase.
+                cx.storage().append(Record::Delivered(id, data.payload));
                 cx.indicate(Ind::Delivered(self.log.clone()));
                 return;
             }
         }
 
-        if wrote {
-            cx.store(self.log.clone());
+        if let Some(payload) = wrote {
+            cx.storage().append(Record::Pending(id, payload));
         }
     }
 }
@@ -253,19 +261,21 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
     type Msg = Data<P>;
     type Timer = crate::stubborn_link::Retransmit;
     type Scope = core::convert::Infallible;
-    /// `pending` and `delivered`, in one value. `ack` is not here, by design.
-    type Durable = Logged<P>;
+    /// Nothing is rewritten; the metadata is written once so a restart finds something.
+    type Meta = ();
+    /// One record per message seen or log-delivered. `ack` is not among them, by design.
+    type Entry = Record<P>;
 
     /// `⟨ lurb, Init ⟩ do delivered := ∅; pending := ∅; ...; store(pending, delivered)`.
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
-        cx.store(self.log.clone());
+        cx.storage().set(());
     }
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;
         let id = BroadcastId { origin: self.me, seq: self.seq };
         self.log.pending.insert(id, msg.clone());
-        cx.store(self.log.clone());
+        cx.storage().append(Record::Pending(id, msg.clone()));
         self.rebroadcast(Data { id, payload: msg }, cx);
     }
 
@@ -281,8 +291,20 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
     ///
     /// Re-announce the log, then re-broadcast everything pending — which is what rebuilds `ack`,
     /// and why it need not be durable.
-    fn on_recovery(&mut self, log: Logged<P>, cx: &mut ProtoCx<'_, Self>) {
-        self.log = log;
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        // Nothing else is dispatched until this returns, so an empty index a moment ago is safe.
+        let records: Vec<Record<P>> =
+            cx.storage().read_from(Position::START).into_iter().cloned().collect();
+        for r in records {
+            match r {
+                Record::Pending(id, p) => {
+                    self.log.pending.insert(id, p);
+                }
+                Record::Delivered(id, p) => {
+                    self.log.delivered.insert((id, p));
+                }
+            }
+        }
         cx.indicate(Ind::Delivered(self.log.clone()));
         let outstanding: Vec<Data<P>> = self
             .log

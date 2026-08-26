@@ -36,7 +36,7 @@
 //! What this layer does do is report the session events upward rather than absorb them, so that a
 //! layer which *can* act is not denied the signal.
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, absurd};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -127,13 +127,9 @@ impl<P: Clone> SessionReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                Timer::Broadcast,
-                absurd,
-                &mut inbox,
-                |ccx| f(beb, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, Timer::Broadcast, &mut inbox, |ccx| {
+                f(beb, ccx)
+            });
         }
         for ind in inbox.drain(..) {
             match ind {
@@ -169,7 +165,6 @@ impl<P: Clone> SessionReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 Timer::Broadcast,
-                absurd,
                 &mut relay_inbox,
                 |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
             );
@@ -189,7 +184,8 @@ impl<P: Clone> Protocol for SessionReliableBroadcast<P> {
     type Timer = Timer;
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

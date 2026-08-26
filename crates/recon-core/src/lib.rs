@@ -15,11 +15,13 @@ pub mod error;
 pub mod node;
 pub mod protocol;
 pub mod session;
+pub mod store;
 pub mod time;
 
 pub use cx::{Cx, EffectSink};
-pub use effect::{Effect, absurd};
+pub use effect::{Effect, WriteKind};
 pub use node::NodeId;
-pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step};
+pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step, step_in};
 pub use session::SessionEvent;
+pub use store::{MemStore, NoStore, Position, Store};
 pub use time::Time;

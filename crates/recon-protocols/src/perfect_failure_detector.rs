@@ -169,7 +169,8 @@ impl Protocol for PerfectFailureDetector {
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     /// `⟨ P, Init ⟩ do alive := Π; detected := ∅; starttimer(Δ)`.
     ///

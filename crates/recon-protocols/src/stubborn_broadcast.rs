@@ -34,7 +34,7 @@
 //!   this repository calls it, and the space note above is honest about what that costs.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, absurd};
+use recon_core::{NodeId, ProtoCx, Protocol};
 use std::collections::BTreeSet;
 
 use crate::stubborn_link::{self as sl, SendId, StubbornLink};
@@ -91,7 +91,6 @@ impl<P: Clone> StubbornBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut inbox,
                 |ccx| f(link, ccx),
             );
@@ -111,7 +110,8 @@ impl<P: Clone> Protocol for StubbornBroadcast<P> {
     type Timer = sl::Retransmit;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: what it is transmitting is rebuilt by the layer above on recovery.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {

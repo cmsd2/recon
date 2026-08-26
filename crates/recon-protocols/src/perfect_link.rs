@@ -34,7 +34,7 @@
 //! nothing, and best-effort broadcast above adds nothing.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, absurd};
+use recon_core::{NodeId, ProtoCx, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -128,13 +128,9 @@ impl<P: Clone> PerfectLink<P> {
         inbox.clear();
         {
             let stubborn = &mut self.stubborn;
-            cx.with_child_consuming(
-                core::convert::identity,
-                Timer::Stubborn,
-                absurd,
-                &mut inbox,
-                |ccx| f(stubborn, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
+                f(stubborn, ccx)
+            });
         }
         for ind in inbox.drain(..) {
             let sl::Ind::Deliver { from, msg: Wire { id, payload } } = ind;
@@ -154,7 +150,8 @@ impl<P: Clone> Protocol for PerfectLink<P> {
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Send { to, msg }: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

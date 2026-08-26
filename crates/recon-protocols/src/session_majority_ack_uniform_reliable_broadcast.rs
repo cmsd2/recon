@@ -66,7 +66,7 @@
 //! - No `Init` event and no `Start` command; there is nothing to start.
 //! - Neither `ack` nor `pending` is garbage collected, as in the book.
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, absurd};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::session_best_effort_broadcast::{self as beb, SessionBestEffortBroadcast};
@@ -175,7 +175,6 @@ impl<P: Clone> SessionMajorityAckUniformReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut inbox,
                 |ccx| f(beb, ccx),
             );
@@ -246,7 +245,6 @@ impl<P: Clone> SessionMajorityAckUniformReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut send_inbox,
                 |ccx| f(beb, ccx),
             );
@@ -293,7 +291,8 @@ impl<P: Clone> Protocol for SessionMajorityAckUniformReliableBroadcast<P> {
     /// Inherited from the link: a session ending is a scope boundary this layer must see.
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

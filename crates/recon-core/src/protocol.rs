@@ -22,21 +22,16 @@ pub trait Protocol {
     /// Tokens identifying this protocol's own timers.
     type Timer;
 
-    /// What this protocol writes down so that it survives a crash.
+    /// The durable value this protocol rewrites: a position, a count, an epoch. Small enough that
+    /// rewriting it costs nothing.
     ///
-    /// The value carried by [`Effect::Store`] is this type *in full*, not a delta: recovery hands
-    /// back the last one written and nothing else. Declaring it is how a reader learns what a
-    /// process would still know after restarting, without having to work out which fields happen
-    /// to get written.
-    ///
-    /// A protocol that keeps nothing durably declares [`core::convert::Infallible`], and then no
-    /// store effect can be constructed for it and [`Protocol::on_recovery`] can never be called —
-    /// the same check-rather-than-trust that [`Protocol::Scope`] uses.
-    ///
-    /// A parent may compose only a child whose durable type is uninhabited. There is no mapping
-    /// from a child's durable state into a parent's, because a parent's contains its own fields
-    /// as well; see [`crate::effect::absurd`].
-    type Durable;
+    /// A protocol keeping nothing durably declares this and [`Protocol::Entry`] as
+    /// [`core::convert::Infallible`], and then a write cannot be constructed — the same
+    /// check-rather-than-trust that [`Protocol::Scope`] uses.
+    type Meta;
+
+    /// The durable entries this protocol appends: what accumulates.
+    type Entry;
 
     /// Scopes whose ending this protocol's guarantees depend on, and whose ends it can observe.
     ///
@@ -74,19 +69,18 @@ pub trait Protocol {
     /// a write. Volatile setup belongs there; anything a first start must *do* belongs here.
     fn on_init(&mut self, _cx: &mut ProtoCx<'_, Self>) {}
 
-    /// Resume from durable state after a crash.
+    /// Resume after a crash, reading what survived.
     ///
     /// Distinct from construction, and deliberately: the algorithms that need it *act* on
-    /// recovering — re-announcing the log they had already delivered, re-sending what was still
+    /// recovering — re-announcing what they had already delivered, re-sending what was still
     /// pending — and those are effects, which a constructor cannot emit.
     ///
-    /// Volatile state is whatever `new` established; `durable` is the last value stored before
-    /// the crash. Exactly one of this and [`Protocol::on_init`] runs at startup: a process with
-    /// nothing in storage is initialised, one with something is recovered, never both.
+    /// What survived is read from [`Cx::storage`] rather than handed over, since a protocol may
+    /// need only part of it. Exactly one of this and [`Protocol::on_init`] runs at startup.
     ///
-    /// The default does nothing, which is unreachable for a protocol whose `Durable` is
-    /// uninhabited.
-    fn on_recovery(&mut self, _durable: Self::Durable, _cx: &mut ProtoCx<'_, Self>) {}
+    /// Nothing else is dispatched between being told to recover and this returning, which is what
+    /// makes it safe to hold state not yet loaded.
+    fn on_recovery(&mut self, _cx: &mut ProtoCx<'_, Self>) {}
 
     /// Handle the ending of a scope this protocol's guarantees depended on.
     ///
@@ -104,20 +98,17 @@ pub type ProtoCx<'a, P> = Cx<
     <P as Protocol>::Msg,
     <P as Protocol>::Ind,
     <P as Protocol>::Timer,
-    <P as Protocol>::Durable,
+    <P as Protocol>::Meta,
+    <P as Protocol>::Entry,
 >;
 
 /// The effect type for a given protocol.
-pub type ProtoEffect<P> = Effect<
-    <P as Protocol>::Msg,
-    <P as Protocol>::Ind,
-    <P as Protocol>::Timer,
-    <P as Protocol>::Durable,
->;
+pub type ProtoEffect<P> =
+    Effect<<P as Protocol>::Msg, <P as Protocol>::Ind, <P as Protocol>::Timer>;
 
 /// An event a protocol can be given. Used by drivers and by the test helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event<C, M, T, S, D> {
+pub enum Event<C, M, T, S> {
     Cmd(C),
     Msg {
         from: NodeId,
@@ -128,8 +119,8 @@ pub enum Event<C, M, T, S, D> {
     ScopeEnd(S),
     /// This process is starting for the first time, with nothing written down.
     Init,
-    /// This process restarted, and here is what it had written down.
-    Recovery(D),
+    /// This process restarted, and something it wrote down survived.
+    Recovery,
 }
 
 /// The event type for a given protocol.
@@ -138,7 +129,6 @@ pub type ProtoEvent<P> = Event<
     <P as Protocol>::Msg,
     <P as Protocol>::Timer,
     <P as Protocol>::Scope,
-    <P as Protocol>::Durable,
 >;
 
 /// Deliver one event to `p` and return the effects it emitted.
@@ -152,16 +142,32 @@ pub fn step<P: Protocol + ?Sized>(
     now: Time,
     rng: &mut dyn RngCore,
 ) -> Vec<ProtoEffect<P>> {
+    let mut store = crate::store::MemStore::default();
+    step_in(p, event, now, rng, &mut store)
+}
+
+/// Deliver one event to `p` against a store the caller owns, and return the effects it emitted.
+///
+/// [`step`] gives the protocol a fresh store each call, which is right for one that keeps nothing
+/// durably and wrong for one that does — a write in one call would be invisible in the next. A
+/// test that cares about what survives passes its own store here and can inspect it afterwards.
+pub fn step_in<P: Protocol + ?Sized>(
+    p: &mut P,
+    event: ProtoEvent<P>,
+    now: Time,
+    rng: &mut dyn RngCore,
+    store: &mut dyn crate::store::Store<P::Meta, P::Entry>,
+) -> Vec<ProtoEffect<P>> {
     let mut effects = Vec::new();
     {
-        let mut cx = Cx::new(&mut effects, now, rng);
+        let mut cx = Cx::new(&mut effects, now, rng, store);
         match event {
             Event::Cmd(c) => p.on_cmd(c, &mut cx),
             Event::Msg { from, msg } => p.on_msg(from, msg, &mut cx),
             Event::Timer(t) => p.on_timer(t, &mut cx),
             Event::ScopeEnd(s) => p.on_scope_end(s, &mut cx),
             Event::Init => p.on_init(&mut cx),
-            Event::Recovery(d) => p.on_recovery(d, &mut cx),
+            Event::Recovery => p.on_recovery(&mut cx),
         }
     }
     effects

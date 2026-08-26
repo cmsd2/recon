@@ -4,7 +4,7 @@
 //! was sent, what arrived, what was lost, and what each protocol claimed to deliver, which is
 //! exactly the vocabulary the guarantees are written in.
 
-use recon_core::{NodeId, Time};
+use recon_core::{NodeId, Time, WriteKind};
 
 /// Why a message never arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,11 +50,10 @@ pub enum TraceEvent<M, I, T> {
     Suspended { at: Time, node: NodeId },
     /// A process restarted.
     Restarted { at: Time, node: NodeId },
-    /// A protocol asked for its durable state to be written. Not yet durable.
-    Storing { at: Time, node: NodeId },
-    /// A write became durable. Anything held behind it leaves the process now.
-    Stored { at: Time, node: NodeId },
-    /// A write was outstanding when the process crashed, and was lost with it.
+    /// A durable write. `kind` distinguishes rewriting metadata from appending, so a claim about
+    /// a protocol's write cost can be checked rather than asserted.
+    Wrote { at: Time, node: NodeId, kind: WriteKind },
+    /// A process died inside a write; whether it landed is decided by the seed.
     WriteLost { at: Time, node: NodeId },
     /// A restarted process was given back what it had written. `had_state` is false when it had
     /// written nothing and started as if for the first time.
@@ -77,8 +76,7 @@ impl<M, I, T> TraceEvent<M, I, T> {
             | TraceEvent::Crashed { at, .. }
             | TraceEvent::Suspended { at, .. }
             | TraceEvent::Restarted { at, .. }
-            | TraceEvent::Storing { at, .. }
-            | TraceEvent::Stored { at, .. }
+            | TraceEvent::Wrote { at, .. }
             | TraceEvent::WriteLost { at, .. }
             | TraceEvent::Recovered { at, .. } => *at,
         }
@@ -182,9 +180,25 @@ impl<M, I, T> Trace<M, I, T> {
         })
     }
 
-    /// How many writes became durable.
-    pub fn writes_completed(&self) -> usize {
-        self.events.iter().filter(|e| matches!(e, TraceEvent::Stored { .. })).count()
+    /// How many entries were appended.
+    pub fn appends(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Wrote { kind: WriteKind::Append, .. }))
+            .count()
+    }
+
+    /// How many times the metadata was replaced.
+    pub fn metadata_writes(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Wrote { kind: WriteKind::Set, .. }))
+            .count()
+    }
+
+    /// How many writes happened, of either kind.
+    pub fn writes(&self) -> usize {
+        self.events.iter().filter(|e| matches!(e, TraceEvent::Wrote { .. })).count()
     }
 
     /// How many writes were outstanding when their process crashed, and lost with it.

@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 310 tests, all in-process, a few seconds
+cargo test --workspace          # 317 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -77,18 +77,19 @@ pub trait Protocol {
     fn on_scope_end(&mut self, scope: Self::Scope, cx: &mut ProtoCx<'_, Self>) {}
 }
 
-pub enum Effect<M, I, T, D> {
+pub enum Effect<M, I, T> {
     Send { to: NodeId, msg: M },
     Indicate(I),
     SetTimer { after: Duration, token: T },
-    Store(D),
 }
 ```
 
-`Durable` is what a protocol keeps across a crash, and `Store` carries it in full rather than as a
-delta. A protocol that keeps nothing declares `Infallible`, and then a store cannot be constructed
-for it. Everything emitted after a store waits for that write to land, so a process cannot be seen
-by its peers to have made a promise it has no record of.
+Stable storage is supplied through the context, like time and randomness, rather than emitted as an
+effect: `cx.storage()` offers a `Meta` value that is replaced and an `Entry` sequence that is
+appended, plus a read from a position. A write is durable when it returns, which is the only point
+at which a driver can synchronise with a synchronous protocol — so a process cannot be seen by its
+peers to have made a promise it has no record of. A protocol that keeps nothing declares both types
+`Infallible`, and then a write cannot be constructed for it.
 
 `Scope` is the interval a guarantee holds over — a session, an incarnation, a deadline. A protocol
 with no scopes writes `type Scope = Infallible`, and a scope end for it cannot be constructed.
@@ -361,15 +362,15 @@ cargo test --workspace -- --nocapture                 # with output
 
 | Suite | Covers | Tests |
 |---|---|---|
-| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism | 17 |
-| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, the trace | 54 |
+| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism | 23 |
+| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace | 68 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | `tests/stubborn_link.rs`, `perfect_link.rs`, `session_link.rs` | the links | 13 / 16 / 10 |
-| `tests/perfect_failure_detector.rs` | completeness and accuracy, and where accuracy is lost | 13 |
+| `tests/perfect_failure_detector.rs` | completeness and accuracy, and where accuracy is lost | 14 |
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the broadcasts over perfect links | 11 / 15 / 17 |
 | `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the broadcasts over session links, and where the two diverge | 6 / 16 |
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, and what that changes | 18 / 15 |
-| `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, and what a restart forgets | 12 / 6 / 14 |
+| `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, and what a restart forgets | 13 / 6 / 16 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, and what a false suspicion costs it | 21 |
 
 310 in total, all in one process, no ports opened.

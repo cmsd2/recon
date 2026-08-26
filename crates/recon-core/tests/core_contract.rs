@@ -4,7 +4,10 @@ use core::convert::Infallible;
 use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Cx, Effect, EffectSink, Event, NodeId, ProtoCx, Protocol, Time, absurd, step};
+use recon_core::{
+    Cx, Effect, EffectSink, Event, MemStore, NoStore, NodeId, Position, ProtoCx, Protocol, Store,
+    Time, step, step_in,
+};
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -35,7 +38,8 @@ impl Protocol for Echo {
     type Timer = Tick;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Ping(n): Ping, cx: &mut ProtoCx<'_, Self>) {
         cx.send(B, Ping(n));
@@ -102,7 +106,8 @@ impl Protocol for Chooser {
     type Timer = ();
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Choose: Choose, cx: &mut ProtoCx<'_, Self>) {
         let pick: u32 = cx.rng().random_range(0..1_000_000);
@@ -193,25 +198,26 @@ impl Protocol for Wrapper {
     type Timer = WrapTimer;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, absurd, |ccx| {
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
             child.on_cmd(cmd, ccx)
         });
     }
 
     fn on_msg(&mut self, from: NodeId, WrapMsg::Inner(inner): WrapMsg, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, absurd, |ccx| {
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
             child.on_msg(from, inner, ccx)
         });
     }
 
     fn on_timer(&mut self, WrapTimer::Inner(inner): WrapTimer, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, absurd, |ccx| {
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
             child.on_timer(inner, ccx)
         });
     }
@@ -264,25 +270,22 @@ impl Protocol for Outer {
     type Timer = OuterTimer;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, absurd, |ccx| {
-            inner.on_cmd(cmd, ccx)
-        });
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_cmd(cmd, ccx));
     }
     fn on_msg(&mut self, from: NodeId, OuterMsg::Down(m): OuterMsg, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, absurd, |ccx| {
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| {
             inner.on_msg(from, m, ccx)
         });
     }
     fn on_timer(&mut self, OuterTimer::Down(t): OuterTimer, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, absurd, |ccx| {
-            inner.on_timer(t, ccx)
-        });
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_timer(t, ccx));
     }
 }
 
@@ -310,16 +313,14 @@ struct CountingSink {
     sends: usize,
     indications: usize,
     timers: usize,
-    stores: usize,
 }
 
-impl<M, I, T, D> EffectSink<M, I, T, D> for CountingSink {
-    fn emit(&mut self, effect: Effect<M, I, T, D>) {
+impl<M, I, T> EffectSink<M, I, T> for CountingSink {
+    fn emit(&mut self, effect: Effect<M, I, T>) {
         match effect {
             Effect::Send { .. } => self.sends += 1,
             Effect::Indicate(_) => self.indications += 1,
             Effect::SetTimer { .. } => self.timers += 1,
-            Effect::Store(_) => self.stores += 1,
         }
     }
 }
@@ -330,7 +331,8 @@ fn a_protocol_runs_against_a_non_allocating_sink() {
     let mut sink = CountingSink::default();
     let mut r = rng(0);
     {
-        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r);
+        let mut none = NoStore;
+        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none);
         let mut p = Echo::default();
         p.on_cmd(Ping(1), &mut cx);
         p.on_msg(A, Ping(1), &mut cx);
@@ -344,7 +346,8 @@ fn composition_works_against_a_non_allocating_sink() {
     let mut sink = CountingSink::default();
     let mut r = rng(0);
     {
-        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r);
+        let mut none = NoStore;
+        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none);
         let mut w = Wrapper { child: Echo::default() };
         w.on_cmd(Ping(1), &mut cx);
     }
@@ -354,19 +357,21 @@ fn composition_works_against_a_non_allocating_sink() {
 #[test]
 fn a_reused_buffer_settles_its_capacity() {
     // The ordinary driver case: one Vec, reused, so allocation is amortised to nothing.
-    let mut buf: Vec<Effect<WrapMsg, WrapInd, WrapTimer, Infallible>> = Vec::new();
+    let mut buf: Vec<Effect<WrapMsg, WrapInd, WrapTimer>> = Vec::new();
     let mut r = rng(0);
     let mut w = Wrapper { child: Echo::default() };
 
     for _ in 0..4 {
         buf.clear();
-        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r);
+        let mut none = NoStore;
+        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none);
         w.on_cmd(Ping(1), &mut cx);
     }
     let settled = buf.capacity();
     for _ in 0..200 {
         buf.clear();
-        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r);
+        let mut none = NoStore;
+        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none);
         w.on_cmd(Ping(1), &mut cx);
     }
     assert_eq!(buf.capacity(), settled, "a reused buffer must not regrow per event");
@@ -376,18 +381,15 @@ fn a_reused_buffer_settles_its_capacity() {
 
 #[test]
 fn mapping_preserves_effect_shape() {
-    let e: Effect<u8, u8, u8, Infallible> = Effect::Send { to: A, msg: 1 };
-    assert_eq!(
-        e.map(|m| m + 1, |i| i, |t| t, absurd::<Infallible>),
-        Effect::Send { to: A, msg: 2 }
-    );
+    let e: Effect<u8, u8, u8> = Effect::Send { to: A, msg: 1 };
+    assert_eq!(e.map(|m| m + 1, |i| i, |t| t), Effect::Send { to: A, msg: 2 });
 
-    let e: Effect<u8, u8, u8, Infallible> = Effect::Indicate(1);
-    assert_eq!(e.map(|m| m, |i| i + 1, |t| t, absurd::<Infallible>), Effect::Indicate(2));
+    let e: Effect<u8, u8, u8> = Effect::Indicate(1);
+    assert_eq!(e.map(|m| m, |i| i + 1, |t| t), Effect::Indicate(2));
 
-    let e: Effect<u8, u8, u8, Infallible> = Effect::SetTimer { after: Duration::ZERO, token: 1 };
+    let e: Effect<u8, u8, u8> = Effect::SetTimer { after: Duration::ZERO, token: 1 };
     assert_eq!(
-        e.map(|m| m, |i| i, |t| t + 1, absurd::<Infallible>),
+        e.map(|m| m, |i| i, |t| t + 1),
         Effect::SetTimer { after: Duration::ZERO, token: 2 }
     );
 }
@@ -413,7 +415,8 @@ impl Protocol for Scoped {
     type Timer = ();
     type Scope = WindowClosed;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
@@ -451,13 +454,16 @@ impl Protocol for Counter {
     type Msg = ();
     type Timer = ();
     type Scope = Infallible;
-    /// The whole of what survives a crash, in one value.
-    type Durable = Total;
+    /// Rewritten each time; a running total does not accumulate.
+    type Meta = Total;
+    /// One entry per bump, appended.
+    type Entry = u32;
 
     fn on_cmd(&mut self, add: u32, cx: &mut ProtoCx<'_, Self>) {
         self.total += add;
-        // Written down, and only then announced. Order matters and is visible here.
-        cx.store(Total(self.total));
+        // Durable before announced, and one append rather than a rewrite of every bump so far.
+        cx.storage().append(add);
+        cx.storage().set(Total(self.total));
         cx.indicate(Total(self.total));
     }
 
@@ -465,91 +471,100 @@ impl Protocol for Counter {
     fn on_timer(&mut self, _t: (), _cx: &mut ProtoCx<'_, Self>) {}
 
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
-        // First-start-only: writes the starting value down so a later restart recovers rather
-        // than beginning again.
-        cx.store(Total(self.total));
+        // First-start-only: a later restart then recovers rather than beginning again.
+        cx.storage().set(Total(self.total));
     }
 
-    fn on_recovery(&mut self, Total(total): Total, cx: &mut ProtoCx<'_, Self>) {
-        self.total = total;
-        // Recovering produces an effect — which is why it is an event and not a constructor.
-        cx.indicate(Total(total));
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        // Read, not handed over. Recovering emits an effect, which is why it is an event.
+        self.total = cx.storage().get().map(|Total(t)| *t).unwrap_or(0);
+        cx.indicate(Total(self.total));
     }
 }
 
 #[test]
-fn a_protocol_with_no_durable_state_cannot_emit_a_store() {
-    // `Echo` declares `type Durable = Infallible`, so `Effect::Store(..)` has no value it could
-    // carry and `on_recovery` can never be called. Checked by the compiler, not trusted.
-    fn _absurd(d: <Echo as Protocol>::Durable) -> ! {
-        match d {}
+fn a_protocol_with_no_durable_state_cannot_write() {
+    // `Echo` declares both durable types uninhabited, so `set` and `append` take an argument that
+    // cannot be constructed. Checked by the compiler, not trusted.
+    fn _absurd_meta(m: <Echo as Protocol>::Meta) -> ! {
+        match m {}
+    }
+    fn _absurd_entry(e: <Echo as Protocol>::Entry) -> ! {
+        match e {}
     }
 
-    // Its effects therefore never contain a store, and the default recovery handler is
-    // unreachable rather than merely unused.
+    // Reading stays callable and finds nothing, which is harmless.
+    let mut st: MemStore<Infallible, Infallible> = MemStore::default();
+    assert!(st.get().is_none());
     let mut p = Echo::default();
-    let fx = step(&mut p, Event::Msg { from: A, msg: Ping(1) }, Time::ZERO, &mut rng(0));
-    assert!(!fx.iter().any(|e| matches!(e, Effect::Store(_))));
+    let fx =
+        step_in(&mut p, Event::Msg { from: A, msg: Ping(1) }, Time::ZERO, &mut rng(0), &mut st);
+    assert_eq!(fx, vec![Effect::Indicate(Echoed(1))]);
 }
 
 #[test]
-fn what_is_durable_is_declared_and_emitted_in_full() {
+fn a_write_is_durable_when_it_returns() {
+    let mut st = MemStore::default();
     let mut p = Counter::default();
-    let fx = step(&mut p, Event::Cmd(3), Time::ZERO, &mut rng(0));
+    step_in(&mut p, Event::Cmd(3), Time::ZERO, &mut rng(0), &mut st);
 
-    // The store carries the whole durable value, not a delta, and precedes the announcement.
-    assert_eq!(fx, vec![Effect::Store(Total(3)), Effect::Indicate(Total(3))]);
+    assert_eq!(st.get(), Some(&Total(3)), "readable at once, and already durable");
+    assert_eq!(st.len(), 1, "one append, not a rewrite of everything so far");
 
-    let fx = step(&mut p, Event::Cmd(4), Time::ZERO, &mut rng(0));
-    assert_eq!(
-        fx,
-        vec![Effect::Store(Total(7)), Effect::Indicate(Total(7))],
-        "in full, not a delta"
-    );
+    step_in(&mut p, Event::Cmd(4), Time::ZERO, &mut rng(0), &mut st);
+    assert_eq!(st.get(), Some(&Total(7)));
+    assert_eq!(st.len(), 2, "still one append per bump");
 }
 
 #[test]
-fn a_recovered_protocol_is_given_what_survived_and_may_act_on_it() {
+fn a_protocol_reads_back_what_it_wrote() {
+    let mut st = MemStore::default();
+    let mut p = Counter::default();
+    for n in 1..=3 {
+        step_in(&mut p, Event::Cmd(n), Time::ZERO, &mut rng(0), &mut st);
+    }
+    let all: Vec<u32> = st.read_from(Position::START).into_iter().copied().collect();
+    assert_eq!(all, vec![1, 2, 3]);
+    assert_eq!(st.read_from(Position(1)).len(), 2, "a suffix, from a recorded position");
+    assert_eq!(st.end(), Position(3));
+}
+
+#[test]
+fn a_recovered_protocol_reads_what_survived_and_may_act_on_it() {
+    let mut st = MemStore::default();
+    st.set(Total(7));
+
     // A fresh instance, as a crash would produce: volatile state empty.
     let mut p = Counter::default();
     assert_eq!(p.total, 0);
 
-    let fx = step(&mut p, Event::Recovery(Total(7)), Time::ZERO, &mut rng(0));
-    assert_eq!(p.total, 7, "the durable state came back");
+    let fx = step_in(&mut p, Event::Recovery, Time::ZERO, &mut rng(0), &mut st);
+    assert_eq!(p.total, 7, "read from the store, not handed over");
     assert_eq!(fx, vec![Effect::Indicate(Total(7))], "and recovering emitted an effect");
 }
 
 #[test]
 fn exactly_one_of_init_and_recovery_runs_and_init_can_write() {
-    // The book's branch. A first start must be able to *do* things a restart must not — writing
-    // an initial value down is the standard case, and repeating it on recovery would overwrite
-    // what was being recovered. The constructor cannot serve: it runs in both cases and emits
-    // nothing.
-    let mut fresh = Counter::default();
-    let init = step(&mut fresh, Event::Init, Time::ZERO, &mut rng(0));
-    assert_eq!(init, vec![Effect::Store(Total(0))], "the initial write has somewhere to happen");
+    // A first start must be able to do what a restart must not: writing an initial value down.
+    // Repeating it on recovery would overwrite what was just read.
+    let mut fresh = MemStore::default();
+    step_in(&mut Counter::default(), Event::Init, Time::ZERO, &mut rng(0), &mut fresh);
+    assert_eq!(fresh.get(), Some(&Total(0)), "the initial write has somewhere to happen");
 
-    let mut restarted = Counter::default();
-    let recovered = step(&mut restarted, Event::Recovery(Total(9)), Time::ZERO, &mut rng(0));
-    assert!(
-        !recovered.iter().any(|e| matches!(e, Effect::Store(_))),
-        "and recovering does not repeat it, which would clobber what it just retrieved"
-    );
-    assert_eq!(restarted.total, 9);
+    let mut existing = MemStore::default();
+    existing.set(Total(9));
+    let mut p = Counter::default();
+    step_in(&mut p, Event::Recovery, Time::ZERO, &mut rng(0), &mut existing);
+    assert_eq!(existing.get(), Some(&Total(9)), "recovering did not write over what it read");
+    assert_eq!(p.total, 9);
 }
 
 #[test]
 fn a_first_start_is_distinguishable_from_a_recovery() {
-    // Nothing was stored, so nothing is recovered: the protocol is only ever constructed. The
-    // distinction is which of the two happened, and it is visible in the effects.
-    let mut fresh = Counter::default();
-    let first = step(&mut fresh, Event::Cmd(1), Time::ZERO, &mut rng(0));
-    assert_eq!(first, vec![Effect::Store(Total(1)), Effect::Indicate(Total(1))]);
-
-    let mut restarted = Counter::default();
-    let recovered = step(&mut restarted, Event::Recovery(Total(9)), Time::ZERO, &mut rng(0));
-    assert_eq!(recovered, vec![Effect::Indicate(Total(9))], "no store: nothing new was decided");
-    assert_ne!(first, recovered);
+    let mut fresh = MemStore::default();
+    assert!(fresh.is_empty(), "nothing written: this is a first start");
+    step_in(&mut Counter::default(), Event::Init, Time::ZERO, &mut rng(0), &mut fresh);
+    assert!(!fresh.is_empty(), "and afterwards a restart would recover");
 }
 
 #[test]
@@ -589,7 +604,8 @@ impl Protocol for Bridger {
     type Timer = ();
     type Scope = BridgerScope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
@@ -603,7 +619,6 @@ impl Protocol for Bridger {
         cx.with_child_consuming(
             |_: ()| (),
             |_: ()| (),
-            absurd,
             &mut inbox,
             |ccx| child.on_scope_end(w, ccx),
         );
@@ -631,7 +646,8 @@ impl Protocol for Propagator {
     type Timer = ();
     type Scope = PropagatorScope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
@@ -647,7 +663,6 @@ impl Protocol for Propagator {
         cx.with_child_consuming(
             |_: ()| (),
             |_: ()| (),
-            absurd,
             &mut inbox,
             |ccx| child.on_scope_end(w, ccx),
         );

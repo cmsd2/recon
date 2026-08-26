@@ -2,8 +2,8 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 2.4 and Algorithm 2.3 ("Log Delivered").
 //!
-//! **Status: transcription. Space: unbounded — and on disk.** `delivered` grows with every
-//! distinct message log-delivered and nothing retires an entry, exactly as
+//! **Status: transcription. Space: unbounded — and on disk. Write cost: one append per message.**
+//! `delivered` grows with every distinct message log-delivered and nothing retires an entry, as
 //! [`crate::perfect_link`] does, except that here the growth is a file rather than a heap. See
 //! `docs/bounded-space.md`; the fix is a delivered *cursor* rather than a delivered *set*, and it
 //! is a change with a proposal.
@@ -69,16 +69,17 @@
 //! - No `Stop`: the stubborn link beneath retransmits for ever, which in this model is a feature —
 //!   it is how a process that was down when a message was sent receives it after recovering.
 //!
-//! # Writes coalesce, and that is safe here for a specific reason
+//! # The write cost is linear, not quadratic
 //!
-//! Messages arriving close together each write the log, and a write issued while an earlier one is
-//! still outstanding replaces it — so a run log-delivers more messages than it completes writes.
-//! That is safe only because the durable value is the **whole log** rather than a delta: a later
-//! value always contains an earlier one, so superseding loses nothing. A layer that stored deltas
-//! could not be composed with this simulator, and should not be written.
+//! One append per message log-delivered, and the metadata written once at first start. Rewriting
+//! the whole set on each arrival would cost `O(n²)` over a run, which is the failure mode
+//! `docs/bounded-space.md` calls unbounded *work*: small per item, and growing without limit.
+//!
+//! The record still grows without limit, so this remains a transcription. What appending changes
+//! is the cost of adding to it, not its size.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, absurd};
+use recon_core::{NodeId, Position, ProtoCx, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -185,7 +186,6 @@ impl<P: Clone + Ord> LoggedLink<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 core::convert::identity,
-                absurd,
                 &mut inbox,
                 |ccx| f(link, ccx),
             );
@@ -203,10 +203,11 @@ impl<P: Clone + Ord> LoggedLink<P> {
             // written and nothing is announced.
             return;
         }
-        self.delivered.entries.insert((wire.id, wire.payload));
-        // Written down *before* the layer above is told, so that a crash in between leaves the
-        // message in the log rather than in a notification that no longer exists.
-        cx.store(self.delivered.clone());
+        let entry = (wire.id, wire.payload);
+        self.delivered.entries.insert(entry.clone());
+        // One append, not a rewrite — and durable before the layer above is told, so a crash in
+        // between leaves the message in the record rather than in a lost notification.
+        cx.storage().append(entry);
         cx.indicate(Ind::Delivered(self.delivered.clone()));
     }
 }
@@ -217,16 +218,17 @@ impl<P: Clone + Ord> Protocol for LoggedLink<P> {
     type Msg = Wire<P>;
     type Timer = sl::Retransmit;
     type Scope = core::convert::Infallible;
-    /// The log, in full. It is the only thing this layer would miss after a crash.
-    type Durable = Log<P>;
+    /// Written once, at first start, so a later restart finds something.
+    type Meta = ();
+    /// One log-delivered message; appended, so the write cost is linear rather than quadratic.
+    type Entry = (MsgId, P);
 
     /// `⟨ lpl, Init ⟩ do delivered := ∅; store(delivered)`.
     ///
-    /// The initial write is what makes the book's branch real: after it, storage holds something,
-    /// so every later restart takes the recovery path rather than starting afresh. A protocol
-    /// whose first act must be written down — an epoch, say — depends on exactly this.
+    /// The initial write is what makes the branch real: after it, storage holds something, so
+    /// every later restart takes the recovery path rather than starting afresh.
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
-        cx.store(self.delivered.clone());
+        cx.storage().set(());
     }
 
     fn on_cmd(&mut self, Cmd::Send { to, msg }: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
@@ -249,10 +251,15 @@ impl<P: Clone + Ord> Protocol for LoggedLink<P> {
 
     /// `upon event ⟨ lpl, Recovery ⟩ do retrieve(delivered); trigger ⟨ lpl, Deliver | delivered ⟩`.
     ///
-    /// The layer above is told again, because the notification sent before the crash may have
-    /// been lost with the incarnation that sent it.
-    fn on_recovery(&mut self, delivered: Log<P>, cx: &mut ProtoCx<'_, Self>) {
-        self.delivered = delivered;
+    /// The record is read here rather than handed over. Nothing else is dispatched until this
+    /// returns, which is what makes it safe to have held an empty index a moment ago.
+    ///
+    /// The layer above is told again: the notification sent before the crash may have been lost
+    /// with the incarnation that sent it.
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let entries: Vec<(MsgId, P)> =
+            cx.storage().read_from(Position::START).into_iter().cloned().collect();
+        self.delivered = Log { entries: entries.into_iter().collect() };
         cx.indicate(Ind::Delivered(self.delivered.clone()));
     }
 }

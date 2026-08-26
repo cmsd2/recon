@@ -90,7 +90,8 @@ impl<P: Clone> Protocol for SessionLink<P> {
     type Timer = ();
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
-    type Durable = core::convert::Infallible;
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Send { to, msg }: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         // No sequence number, no retransmission buffer, no record kept. The session is

@@ -10,22 +10,16 @@ use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
-use recon_core::{Cx, Effect, NodeId, ProtoCx, ProtoEffect, Protocol, SessionEvent, Time};
+use recon_core::{
+    Cx, Effect, MemStore, NodeId, Position, ProtoCx, ProtoEffect, Protocol, SessionEvent, Store,
+    Time, WriteKind,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Round-trips one message through the wire codec, when codec checking is enabled.
 type CodecCheck<M> = fn(&M) -> Result<M, CodecError>;
 
 /// Something scheduled to happen at a point in virtual time.
-/// An effect emitted after a store, waiting for that write to become durable.
-///
-/// Indications wait too, not only sends: an indication is how the layer above learns something,
-/// and what it does next is usually to send. Letting one past would defeat the rule by one hop.
-enum Held<P: Protocol> {
-    Send { to: NodeId, msg: P::Msg },
-    Indicate(P::Ind),
-}
-
 enum Scheduled<P: Protocol> {
     Deliver {
         from: NodeId,
@@ -47,11 +41,6 @@ enum Scheduled<P: Protocol> {
     /// Retry establishing every session that is not up. A deployed link keeps trying on its own
     /// rather than waiting for the layers above to transmit, so the model does too.
     Reconnect,
-    /// A write to stable storage has become durable. Anything the protocol asked to send after
-    /// asking for the write leaves the process now, and not before.
-    WriteComplete {
-        node: NodeId,
-    },
 }
 
 /// Whether a process is handling events, and if not, why.
@@ -100,15 +89,11 @@ pub struct Sim<P: Protocol> {
     /// Turns a session ending into whatever the protocol calls a scope. Absent unless the
     /// protocol opted in, exactly as the codec check does.
     session_scope: Option<fn(SessionEvent) -> P::Scope>,
-    /// What each process has written down and had confirmed durable. Survives a crash; a
-    /// restart hands it back through `Protocol::on_recovery`.
-    storage: BTreeMap<NodeId, P::Durable>,
-    /// A write asked for but not yet durable. A crash while one is outstanding may or may not
-    /// keep it, decided by the seeded source — which is the fault this models.
-    writing: BTreeMap<NodeId, P::Durable>,
-    /// Messages a protocol asked to send after asking for a write, held until the write is
-    /// durable. This is the ordering rule: a promise is written down before it is made.
-    held: BTreeMap<NodeId, Vec<Held<P>>>,
+    /// What each process can read: everything it has written, durable or not. A protocol reads
+    /// its own writes back at once, which is what makes the interface synchronous.
+    storage: BTreeMap<NodeId, MemStore<P::Meta, P::Entry>>,
+    /// Processes whose next write is fatal — dying mid-`fsync`.
+    doomed: BTreeSet<NodeId>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
     effects: Vec<ProtoEffect<P>>,
     codec_check: Option<CodecCheck<P::Msg>>,
@@ -120,7 +105,8 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
-    P::Durable: Clone,
+    P::Meta: Clone,
+    P::Entry: Clone,
 {
     /// Build a run over `nodes`, constructing each process with `make`.
     pub fn new(
@@ -149,8 +135,7 @@ where
             last_delivery: BTreeMap::new(),
             session_scope: None,
             storage: BTreeMap::new(),
-            writing: BTreeMap::new(),
-            held: BTreeMap::new(),
+            doomed: BTreeSet::new(),
             trace: Trace::default(),
             effects: Vec::new(),
             codec_check: None,
@@ -192,6 +177,11 @@ where
         self.nodes.get(&node).map(|n| &n.protocol)
     }
 
+    /// Borrow what a process has written down. `None` if it has written nothing.
+    pub fn storage(&self, node: NodeId) -> Option<&MemStore<P::Meta, P::Entry>> {
+        self.storage.get(&node)
+    }
+
     /// The processes in this run, in a stable order.
     pub fn nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.nodes.keys().copied()
@@ -212,6 +202,14 @@ where
     /// Its protocol state is replaced with a freshly initialised one and its pending timers are
     /// discarded, so a restart resumes having forgotten what it delivered. This is what a real
     /// process gets. For a pause that preserves state, use [`Sim::suspend`].
+    /// Arm the next write by `node` to be the one it dies inside.
+    ///
+    /// Whether that write landed is decided by the seed, and the process cannot tell: what it
+    /// reads on recovering is the only evidence.
+    pub fn crash_on_next_write(&mut self, node: NodeId) {
+        self.doomed.insert(node);
+    }
+
     pub fn crash(&mut self, node: NodeId) {
         let fresh = (self.make)(node);
         if let Some(n) = self.nodes.get_mut(&node) {
@@ -224,19 +222,6 @@ where
         if self.config.is_session_based() {
             self.end_sessions_of(node);
         }
-        // A write that had not completed may or may not have taken effect, and the recovering
-        // process has no way to tell which. All or nothing: never a mixture.
-        if let Some(durable) = self.writing.remove(&node) {
-            let at = self.now;
-            if self.rng.random::<bool>() {
-                self.storage.insert(node, durable);
-                self.trace.push(TraceEvent::Stored { at, node });
-            } else {
-                self.trace.push(TraceEvent::WriteLost { at, node });
-            }
-        }
-        // Anything held behind that write never left the process.
-        self.held.remove(&node);
         let at = self.now;
         self.trace.push(TraceEvent::Crashed { at, node });
     }
@@ -269,11 +254,12 @@ where
         // are effects, which a constructor cannot emit.
         // Exactly one branch, as the book has it: something in storage means recovery, nothing
         // means this incarnation is starting afresh and takes the first-start path instead.
-        let recovered = self.storage.get(&node).cloned();
-        self.trace.push(TraceEvent::Recovered { at, node, had_state: recovered.is_some() });
-        match recovered {
-            Some(durable) => self.run_handler(node, |p, cx| p.on_recovery(durable, cx)),
-            None => self.run_handler(node, |p, cx| p.on_init(cx)),
+        let survived = self.storage.get(&node).map(|s| !s.is_empty()).unwrap_or(false);
+        self.trace.push(TraceEvent::Recovered { at, node, had_state: survived });
+        if survived {
+            self.run_handler(node, |p, cx| p.on_recovery(cx));
+        } else {
+            self.run_handler(node, |p, cx| p.on_init(cx));
         }
 
         let due: Vec<P::Timer> = {
@@ -366,25 +352,6 @@ where
                 }
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
             }
-            Scheduled::WriteComplete { node } => {
-                if let Some(durable) = self.writing.remove(&node) {
-                    self.storage.insert(node, durable);
-                    let at = self.now;
-                    self.trace.push(TraceEvent::Stored { at, node });
-                }
-                // Only now may what was held leave the process.
-                if let Some(pending) = self.held.remove(&node) {
-                    for h in pending {
-                        match h {
-                            Held::Send { to, msg } => self.transmit(node, to, msg),
-                            Held::Indicate(ind) => {
-                                let at = self.now;
-                                self.trace.push(TraceEvent::Indicated { at, node, ind });
-                            }
-                        }
-                    }
-                }
-            }
             Scheduled::Reconnect => {
                 self.reconnect_sweep();
                 let at = self.now + self.config.reconnect_interval;
@@ -445,38 +412,47 @@ where
         let mut effects = core::mem::take(&mut self.effects);
         effects.clear();
 
+        // Drawn before the handler runs, so the store need not borrow the generator the context
+        // already holds.
+        // Armed until a write actually happens: a handler that writes nothing is not the one.
+        let doomed = self.doomed.contains(&node);
+        let keep = doomed && self.rng.random::<bool>();
+        let mut writes: Vec<WriteKind> = Vec::new();
+        let mut died = false;
+
         {
             let Some(n) = self.nodes.get_mut(&node) else {
                 self.effects = effects;
                 return;
             };
-            let mut cx = Cx::new(&mut effects, self.now, &mut self.rng);
+            let inner = self.storage.entry(node).or_default();
+            let mut store =
+                FaultyStore { inner, writes: &mut writes, doomed, keep, died: &mut died };
+            let mut cx = Cx::new(&mut effects, self.now, &mut self.rng, &mut store);
             f(&mut n.protocol, &mut cx);
         }
 
-        // The ordering rule. Once a write has been asked for, everything this handler sends
-        // afterwards waits until that write is durable — so a process cannot be seen by its peers
-        // to have made a promise it has no record of.
-        let mut writing = false;
+        let at = self.now;
+        if !writes.is_empty() {
+            self.doomed.remove(&node);
+        }
+        for kind in writes {
+            self.trace.push(TraceEvent::Wrote { at, node, kind });
+        }
+
+        if died {
+            // Everything the handler went on to do is discarded — a crash loses volatile state
+            // anyway, so nothing decided on the strength of that write can escape.
+            effects.clear();
+            self.effects = effects;
+            self.trace.push(TraceEvent::WriteLost { at, node });
+            self.crash(node);
+            return;
+        }
+
         for effect in effects.drain(..) {
             match effect {
-                Effect::Store(durable) => {
-                    let at = self.now;
-                    self.writing.insert(node, durable);
-                    self.trace.push(TraceEvent::Storing { at, node });
-                    self.schedule(
-                        at + self.config.write_latency,
-                        Scheduled::WriteComplete { node },
-                    );
-                    writing = true;
-                }
-                Effect::Send { to, msg } if writing => {
-                    self.held.entry(node).or_default().push(Held::Send { to, msg });
-                }
                 Effect::Send { to, msg } => self.transmit(node, to, msg),
-                Effect::Indicate(ind) if writing => {
-                    self.held.entry(node).or_default().push(Held::Indicate(ind));
-                }
                 Effect::Indicate(ind) => {
                     let at = self.now;
                     self.trace.push(TraceEvent::Indicated { at, node, ind });
@@ -592,7 +568,8 @@ where
     P::Msg: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
     P::Ind: Clone,
     P::Timer: Clone,
-    P::Durable: Clone,
+    P::Meta: Clone,
+    P::Entry: Clone,
 {
     /// Round-trip every delivered message through the wire codec.
     ///
@@ -614,7 +591,8 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
-    P::Durable: Clone,
+    P::Meta: Clone,
+    P::Entry: Clone,
 {
     /// The current epoch of the session between `a` and `b`, if one is established.
     pub fn session_epoch(&self, a: NodeId, b: NodeId) -> Option<u64> {
@@ -769,7 +747,8 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
-    P::Durable: Clone,
+    P::Meta: Clone,
+    P::Entry: Clone,
     P::Scope: From<SessionEvent>,
 {
     /// Deliver session events to the protocol as scope events.
@@ -778,5 +757,61 @@ where
     /// the bound lives only on this method so ordinary runs need nothing.
     pub fn deliver_session_events(&mut self) {
         self.session_scope = Some(P::Scope::from);
+    }
+}
+
+/// The store a protocol writes through: records what happened, and can kill the process.
+///
+/// When `doomed`, the first write applies or does not by a coin drawn before the handler ran, and
+/// the process is then killed.
+struct FaultyStore<'a, Me, En> {
+    inner: &'a mut MemStore<Me, En>,
+    writes: &'a mut Vec<WriteKind>,
+    doomed: bool,
+    keep: bool,
+    died: &'a mut bool,
+}
+
+impl<Me, En> FaultyStore<'_, Me, En> {
+    /// Whether the write takes effect. Recorded either way: it was attempted.
+    fn allow(&mut self, kind: WriteKind) -> bool {
+        self.writes.push(kind);
+        if !self.doomed {
+            return true;
+        }
+        if *self.died {
+            // The process is already gone; the handler is still running only because a synchronous
+            // call cannot be interrupted. Nothing more it does reaches the disk.
+            return false;
+        }
+        *self.died = true;
+        self.keep
+    }
+}
+
+impl<Me, En> Store<Me, En> for FaultyStore<'_, Me, En> {
+    fn get(&self) -> Option<&Me> {
+        self.inner.get()
+    }
+
+    fn set(&mut self, meta: Me) {
+        if self.allow(WriteKind::Set) {
+            self.inner.set(meta);
+        }
+    }
+
+    fn append(&mut self, entry: En) -> Position {
+        if self.allow(WriteKind::Append) {
+            return self.inner.append(entry);
+        }
+        self.inner.end()
+    }
+
+    fn read_from(&self, from: Position) -> Vec<&En> {
+        self.inner.read_from(from)
+    }
+
+    fn end(&self) -> Position {
+        self.inner.end()
     }
 }

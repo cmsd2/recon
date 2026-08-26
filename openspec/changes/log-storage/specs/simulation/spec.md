@@ -36,32 +36,35 @@ the run's deterministic state, so that a seed reproduces a run including everyth
 
 ### Requirement: A write takes time and can be interrupted by a crash
 
-A write SHALL NOT become durable instantaneously, and the simulator SHALL be able to crash a
-process while one is outstanding. When that happens the write SHALL have taken effect or not,
-chosen by the seeded source, and the recovering process SHALL have no way to tell which case it is
-in beyond reading what survived.
+A write SHALL be durable when it returns: once a write call has returned, no subsequent crash can
+take it. A synchronous state machine offers no later point at which a driver could wait on a
+protocol's behalf, so a process must not be able to be seen to have made a promise it has no record
+of.
 
-A write being *visible* to the writing process is immediate and separate: what a protocol writes it
-can read back at once, within the same incarnation. What a crash decides is whether it was ever
-durable.
+The simulator SHALL therefore be able to kill a process *inside* a write, on request. When that
+happens the write SHALL have taken effect or not, chosen by the seeded source; any further write in
+the same handler SHALL NOT take effect; everything the handler went on to emit SHALL be discarded;
+and the recovering process SHALL have no way to tell which case it is in beyond reading what
+survived.
 
 This is the fault that finds the bugs. An algorithm that is correct only when writes are atomic and
-instantaneous is not correct.
+never interrupted is not correct.
 
 #### Scenario: An outstanding write may or may not survive
 
-- **WHEN** a process is crashed while a write is outstanding, across many seeds
+- **WHEN** a process is armed to die in its next write and then writes, across many seeds
 - **THEN** some runs recover the new state and some recover the old, and both are legitimate
 
 #### Scenario: An outstanding append may or may not survive
 
-- **WHEN** a process is crashed while an append is outstanding, across many seeds
+- **WHEN** a process is armed to die in its next write and that write is an append, across many
+  seeds
 - **THEN** some runs read the entry back and some do not, and both are legitimate
 
 #### Scenario: A completed write always survives
 
-- **WHEN** a write has completed before the crash
-- **THEN** the recovering process reads it in every run
+- **WHEN** a write has returned before the crash
+- **THEN** the recovering process reads it in every run, whatever the seed
 
 #### Scenario: A partially written value is never retrieved
 
@@ -73,9 +76,14 @@ instantaneous is not correct.
 - **WHEN** a crash interrupts a sequence of appends
 - **THEN** what survives is a prefix of what was appended, never a sequence with a hole in it
 
+#### Scenario: Nothing decided on an interrupted write escapes the process
+
+- **WHEN** a process is killed inside a write and its handler went on to send a message
+- **THEN** no peer receives that message
+
 ### Requirement: Storage activity is visible in the trace
 
-Writes, appends, their becoming durable, and whether a recovering process found anything SHALL
+Writes, appends, writes lost to a crash, and whether a recovering process found anything SHALL
 appear in the trace, so that properties about durability can be asserted over the trace rather than
 over protocol internals.
 
@@ -83,6 +91,11 @@ over protocol internals.
 
 - **WHEN** a test needs to establish that something was durable before a message was sent
 - **THEN** it can determine that from the trace alone
+
+#### Scenario: A write lost to a crash is distinguishable from one that landed
+
+- **WHEN** a process is killed inside a write
+- **THEN** the trace records that a write was lost, separately from the writes that completed
 
 #### Scenario: Rewriting and appending are distinguishable
 

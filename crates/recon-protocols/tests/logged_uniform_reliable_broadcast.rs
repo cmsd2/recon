@@ -148,7 +148,7 @@ fn acknowledgements_are_never_written_down() {
         s.protocol(C).unwrap().acknowledged_by(id).count() >= s.protocol(C).unwrap().majority(),
         "C had accumulated acknowledgements before the crash"
     );
-    assert!(s.trace().writes_completed() > 0, "and had written something — but not those");
+    assert!(s.trace().writes() > 0, "and had written something — but not those");
 
     s.crash(C);
     s.restart(C);
@@ -290,6 +290,72 @@ fn the_durable_state_grows_with_messages_handled() {
     let log = s.protocol(B).unwrap().log();
     assert_eq!(log.delivered_count(), 6, "one entry per message, for ever");
     assert_eq!(log.pending_count(), 6, "and pending is never pruned either");
+}
+
+#[test]
+fn each_message_costs_a_fixed_number_of_appends_and_no_rewrites() {
+    // What appending buys: the cost of recording a message does not depend on how many were
+    // recorded before it. Rewriting the whole record would make it grow with every message.
+    let counts: Vec<usize> = [1usize, 2, 4]
+        .iter()
+        .map(|n| {
+            let mut s = sim(9);
+            for v in 0..*n as u32 {
+                s.command(A, Cmd::Broadcast(v));
+            }
+            settle(&mut s);
+            s.trace().appends()
+        })
+        .collect();
+
+    let per = counts[0];
+    assert_eq!(counts, vec![per, 2 * per, 4 * per], "linear in messages: {counts:?}");
+
+    let mut s = sim(9);
+    s.command(A, Cmd::Broadcast(0));
+    settle(&mut s);
+    assert_eq!(
+        s.trace().metadata_writes(),
+        ALL.len(),
+        "and the metadata is written once per process, at first start, never per message"
+    );
+}
+
+#[test]
+fn recovery_reads_re_announces_and_re_broadcasts_with_nothing_in_between() {
+    // The three things recovery must do, done as one uninterruptible step: read what survived,
+    // tell the layer above, and put back on the wire what was still pending.
+    let mut s = sim(10);
+    s.command(A, Cmd::Broadcast(2));
+    s.run_for(Duration::from_micros(1)); // A has it pending; nothing has arrived anywhere
+    assert_eq!(log_of(&s, A), vec![], "not yet log-delivered");
+
+    let at = s.now();
+    s.crash(A);
+    s.restart(A);
+
+    let after: Vec<_> = s
+        .trace()
+        .events()
+        .iter()
+        .skip_while(|e| {
+            !matches!(e, TraceEvent::Recovered { node, at: t, .. }
+            if *node == A && *t >= at)
+        })
+        .collect();
+    assert!(matches!(after[0], TraceEvent::Recovered { had_state: true, .. }));
+    assert!(
+        matches!(after[1], TraceEvent::Indicated { node, .. } if *node == A),
+        "the announcement is the very next thing"
+    );
+    assert!(
+        after[2..].iter().take(ALL.len()).all(|e| matches!(e, TraceEvent::Sent { from, .. }
+            if *from == A)),
+        "and then it re-broadcast what was pending, still without handling anything"
+    );
+
+    settle(&mut s);
+    assert_eq!(log_of(&s, A), vec![(A, 2)], "which is how it finished the job");
 }
 
 #[test]
