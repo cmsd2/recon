@@ -1,0 +1,290 @@
+//! Majority-ack uniform reliable broadcast.
+//!
+//! Cachin, Guerraoui & Rodrigues, Module 3.3 and Algorithm 3.5 ("Majority-Ack Uniform Reliable
+//! Broadcast").
+//!
+//! **Status: transcription. Space: unbounded.** `pending`, `ack` and `delivered` grow exactly as
+//! in [`crate::uniform_reliable_broadcast`]; removing the detector removes a timing assumption,
+//! not the collection debt. See `docs/bounded-space.md`.
+//!
+//! **Assumption: a correct majority, `N > 2f`.** That is the whole of what this layer rests on. It
+//! is a standing property of the deployment rather than a moment-to-moment property of the
+//! network, and it is the same trade the leader-driven consensus algorithms make.
+//!
+//! # What changed, and what it bought
+//!
+//! Algorithm 3.4 delivers when every process still *believed correct* has relayed a message. That
+//! belief comes from a perfect failure detector, and
+//! `uniform_agreement_breaks_when_the_timing_assumption_is_withdrawn` shows what one wrong belief
+//! costs: a live process is dropped from `correct`, the condition is satisfied too early, and a
+//! message is delivered by some processes and not others.
+//!
+//! Algorithm 3.5 asks a different question of the same record, and the book states the change
+//! exactly:
+//!
+//! ```text
+//! // Except for the function candeliver(·) below and for the absence of ⟨ Crash ⟩ events
+//! // triggered by the perfect failure detector, it is the same as Algorithm 3.4.
+//!
+//! function candeliver(m) returns Boolean is
+//!     return #(ack[m]) > N/2;
+//! ```
+//!
+//! There is no set of believed-correct processes, so no process is ever excluded, so no wrong
+//! judgement about who has crashed can be made. What is left is arithmetic over a record this
+//! layer already kept. The rest of the algorithm — `pending`, the relay on first sight, the
+//! identifier carrying the originator — is [`crate::uniform_reliable_broadcast`] unchanged:
+//!
+//! ```text
+//! upon event ⟨ urb, Broadcast | m ⟩ do
+//!     pending := pending ∪ {(self, m)};
+//!     trigger ⟨ beb, Broadcast | [DATA, self, m] ⟩;
+//!
+//! upon event ⟨ beb, Deliver | p, [DATA, s, m] ⟩ do
+//!     ack[m] := ack[m] ∪ {p};
+//!     if (s, m) ∉ pending then
+//!         pending := pending ∪ {(s, m)};
+//!         trigger ⟨ beb, Broadcast | [DATA, s, m] ⟩;
+//!
+//! upon exists (s, m) ∈ pending such that candeliver(m) ∧ m ∉ delivered do
+//!     delivered := delivered ∪ {m};
+//!     trigger ⟨ urb, Deliver | s, m ⟩;
+//! ```
+//!
+//! # When the assumption fails, this layer blocks rather than diverges
+//!
+//! With `N ≤ 2f` — half or more of the processes crashed, or a partition leaving no majority
+//! anywhere — no message reaches a majority and nothing further is delivered. That is a *worse
+//! liveness* failure and no safety failure at all, which is the opposite of what happens to
+//! Algorithm 3.4 when its detector is wrong. A blocked cluster can be repaired by restoring
+//! processes; a split delivery cannot be repaired by anything.
+//!
+//! # Departures from the page
+//!
+//! - The predicate is written `2 · #(ack[m]) > N` rather than `#(ack[m]) > N/2`. The book means
+//!   real division; integer division gives the same answer for every `N`, but only by an argument
+//!   the reader has to reconstruct.
+//! - `N` is the full membership including this process, and a process's own relay counts like any
+//!   other, because best-effort broadcast sends to the sender too.
+//! - `ack` and `delivered` are keyed by an identifier carrying the originator and a per-sender
+//!   sequence number, not by message content — as in the all-ack version, so that identical
+//!   content broadcast twice is delivered twice.
+//! - This layer has one child, so it has no wire type of its own: the message *is* the broadcast
+//!   child's. It is the first place in this stack where a wire type gets simpler going up, and
+//!   removing an assumption is what did it.
+//! - There is no `Init` event and no `Start` command. `new` establishes the state and there is
+//!   nothing to start, failure detection having gone.
+//! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
+
+use recon_core::{NodeId, ProtoCx, Protocol};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
+use crate::uniform_reliable_broadcast::{BroadcastId, Data};
+
+/// The message type: the broadcast child's, unwrapped.
+///
+/// With one child there is nothing to multiplex and no discriminant to add. Compare
+/// [`crate::uniform_reliable_broadcast::Wire`], which needs an enum because a detector also sends.
+pub type Msg<P> = <BestEffortBroadcast<Data<P>> as Protocol>::Msg;
+
+/// Requests from the layer above. Broadcasting is the only one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cmd<P> {
+    Broadcast(P),
+}
+
+/// Indications to the layer above.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ind<P> {
+    /// `from` is the process that originated the message, never a relayer.
+    Deliver { from: NodeId, msg: P },
+}
+
+/// Timers, which are the broadcast child's re-wrapped.
+pub type Timer = beb::Timer;
+
+/// Broadcast with uniform agreement, resting on a correct majority and on nothing else.
+#[derive(Debug)]
+pub struct MajorityAckUniformReliableBroadcast<P> {
+    me: NodeId,
+    seq: u64,
+    /// How many processes there are. The denominator of the majority, and fixed.
+    members: usize,
+    /// Seen and not yet delivered, with the payload kept for delivery.
+    pending: BTreeMap<BroadcastId, P>,
+    /// Which processes have been seen to relay each message.
+    ack: BTreeMap<BroadcastId, BTreeSet<NodeId>>,
+    delivered: BTreeSet<BroadcastId>,
+    beb: BestEffortBroadcast<Data<P>>,
+    beb_inbox: Vec<beb::Ind<Data<P>>>,
+    /// A relay re-enters the child while its own inbox is in use, so it needs a buffer of its
+    /// own. By construction it stays empty; the assertion in `relay` records why.
+    relay_inbox: Vec<beb::Ind<Data<P>>>,
+}
+
+impl<P> MajorityAckUniformReliableBroadcast<P> {
+    /// Broadcast among `members`, which must include `me`.
+    ///
+    /// The guarantees hold while more than half of `members` are correct. There is no timing
+    /// parameter, because there is no timeout: nothing here waits on a clock.
+    pub fn new(
+        me: NodeId,
+        members: impl IntoIterator<Item = NodeId>,
+        retransmit: core::time::Duration,
+    ) -> Self {
+        let mut members: BTreeSet<NodeId> = members.into_iter().collect();
+        members.insert(me);
+        let n = members.len();
+        MajorityAckUniformReliableBroadcast {
+            me,
+            seq: 0,
+            members: n,
+            pending: BTreeMap::new(),
+            ack: BTreeMap::new(),
+            delivered: BTreeSet::new(),
+            beb: BestEffortBroadcast::new(me, members, retransmit),
+            beb_inbox: Vec::new(),
+            relay_inbox: Vec::new(),
+        }
+    }
+
+    /// How many distinct messages have been delivered upward.
+    pub fn delivered_count(&self) -> usize {
+        self.delivered.len()
+    }
+
+    /// Messages seen but not yet deliverable.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Which processes have relayed `id`, for tests watching the majority form.
+    pub fn acknowledged_by(&self, id: BroadcastId) -> impl Iterator<Item = NodeId> + '_ {
+        self.ack.get(&id).into_iter().flatten().copied()
+    }
+
+    /// How many processes a message must be relayed by before it can be delivered.
+    pub fn majority(&self) -> usize {
+        self.members / 2 + 1
+    }
+}
+
+impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
+    /// Run the broadcast child, then act on what it reported.
+    fn with_beb(
+        &mut self,
+        cx: &mut ProtoCx<'_, Self>,
+        f: impl FnOnce(
+            &mut BestEffortBroadcast<Data<P>>,
+            &mut ProtoCx<'_, BestEffortBroadcast<Data<P>>>,
+        ),
+    ) {
+        let mut inbox = core::mem::take(&mut self.beb_inbox);
+        inbox.clear();
+        {
+            let beb = &mut self.beb;
+            cx.with_child_consuming(
+                core::convert::identity,
+                core::convert::identity,
+                &mut inbox,
+                |ccx| f(beb, ccx),
+            );
+        }
+        for ind in inbox.drain(..) {
+            let beb::Ind::Deliver { from, msg: Data { id, payload } } = ind;
+            self.on_beb_deliver(from, id, payload, cx);
+        }
+        self.beb_inbox = inbox;
+        self.check_deliverable(cx);
+    }
+
+    /// `upon event ⟨ beb, Deliver | p, [DATA, s, m] ⟩`.
+    fn on_beb_deliver(
+        &mut self,
+        from: NodeId,
+        id: BroadcastId,
+        payload: P,
+        cx: &mut ProtoCx<'_, Self>,
+    ) {
+        self.ack.entry(id).or_default().insert(from);
+        if self.pending.insert(id, payload.clone()).is_none() {
+            self.relay(Data { id, payload }, cx);
+        }
+    }
+
+    /// Re-broadcast, so the message survives its originator's crash.
+    fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
+        let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
+        relay_inbox.clear();
+        {
+            let beb = &mut self.beb;
+            cx.with_child_consuming(
+                core::convert::identity,
+                core::convert::identity,
+                &mut relay_inbox,
+                |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
+            );
+        }
+        debug_assert!(
+            relay_inbox.is_empty(),
+            "relaying must not deliver synchronously; if it does, on_beb_deliver can recurse"
+        );
+        self.relay_inbox = relay_inbox;
+    }
+
+    /// `upon exists (s, m) ∈ pending such that candeliver(m) ∧ m ∉ delivered`.
+    ///
+    /// A predicate over state rather than an event. Its only input is `ack`, which grows on a
+    /// delivery from below — there is no second path, the detector having gone, so unlike the
+    /// all-ack version this is called from one place.
+    fn check_deliverable(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let ready: Vec<BroadcastId> = self
+            .pending
+            .keys()
+            .copied()
+            .filter(|id| !self.delivered.contains(id))
+            .filter(|id| self.can_deliver(*id))
+            .collect();
+
+        for id in ready {
+            self.delivered.insert(id);
+            let payload = self.pending.get(&id).expect("pending by construction").clone();
+            cx.indicate(Ind::Deliver { from: id.origin, msg: payload });
+        }
+    }
+
+    /// `#(ack[m]) > N/2` — more than half the processes have relayed it.
+    fn can_deliver(&self, id: BroadcastId) -> bool {
+        match self.ack.get(&id) {
+            None => false,
+            Some(acked) => 2 * acked.len() > self.members,
+        }
+    }
+}
+
+impl<P: Clone> Protocol for MajorityAckUniformReliableBroadcast<P> {
+    type Cmd = Cmd<P>;
+    type Ind = Ind<P>;
+    type Msg = Msg<P>;
+    type Timer = Timer;
+    /// No scope conditions: this protocol's guarantees do not lapse.
+    type Scope = core::convert::Infallible;
+
+    fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
+        self.seq += 1;
+        let id = BroadcastId { origin: self.me, seq: self.seq };
+        self.pending.insert(id, msg.clone());
+        self.ack.entry(id).or_default();
+        let data = Data { id, payload: msg };
+        self.with_beb(cx, |beb, ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx));
+    }
+
+    fn on_msg(&mut self, from: NodeId, msg: Msg<P>, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
+    }
+
+    fn on_timer(&mut self, token: Timer, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_timer(token, ccx));
+    }
+}

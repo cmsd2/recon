@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 228 tests, all in-process, about two seconds
+cargo test --workspace          # 261 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -143,6 +143,7 @@ The bottom rung, fair-loss links, is not a module: it is what the simulator prov
 | Best-effort broadcast | [`best_effort_broadcast.rs`](crates/recon-protocols/src/best_effort_broadcast.rs) | Module 3.1, Alg. 3.1 | deployable | bounded by membership |
 | Reliable broadcast | [`reliable_broadcast.rs`](crates/recon-protocols/src/reliable_broadcast.rs) | Module 3.2, Alg. 3.3 | transcription | unbounded |
 | Uniform reliable broadcast | [`uniform_reliable_broadcast.rs`](crates/recon-protocols/src/uniform_reliable_broadcast.rs) | Module 3.3, Alg. 3.4 | transcription | unbounded |
+| Uniform reliable broadcast, majority-ack | [`majority_ack_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/majority_ack_uniform_reliable_broadcast.rs) | Module 3.3, Alg. 3.5 | transcription, **no failure detector** | unbounded |
 | Flooding consensus | [`flooding_consensus.rs`](crates/recon-protocols/src/flooding_consensus.rs) | Module 5.1, Alg. 5.1 | academic, fail-stop | bounded by membership and rounds |
 
 ### Over session links — what a deployment would run
@@ -157,6 +158,7 @@ algorithms over a link that can end.
 | Best-effort broadcast | [`session_best_effort_broadcast.rs`](crates/recon-protocols/src/session_best_effort_broadcast.rs) | deployable | bounded by membership |
 | Reliable broadcast | [`session_reliable_broadcast.rs`](crates/recon-protocols/src/session_reliable_broadcast.rs) | transcription | unbounded |
 | Uniform reliable broadcast | [`session_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_uniform_reliable_broadcast.rs) | transcription | unbounded |
+| Uniform reliable broadcast, majority-ack | [`session_majority_ack_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_majority_ack_uniform_reliable_broadcast.rs) | transcription, **no failure detector** | unbounded |
 
 The interesting result is that the two broadcast rungs **diverge** here. Reliable broadcast relays
 once and keeps identifiers rather than payloads, so a relay lost to a session ending is never
@@ -164,6 +166,25 @@ retried and its agreement is scoped to the sessions that carried it. Uniform rel
 keeps payloads and consults a failure detector, so between resending on re-establishment and
 accusing a peer that never returns there is no third outcome. Both halves are tested, and the
 contrast is the point of `tests/session_broadcast.rs`.
+
+### Detectors versus quorums
+
+Both ladders carry uniform reliable broadcast twice, and the pair is the point. Algorithm 3.4
+delivers once every process still *believed correct* has relayed a message; that belief comes from
+a perfect failure detector, and one wrong belief splits the delivery permanently. Algorithm 3.5
+asks a different question of the same record — has **more than half** relayed it? — and the
+detector comes out entirely, heartbeats and all.
+
+What replaces a detector that must never be wrong is a majority that must be correct: `N > 2f`, a
+standing property of the deployment rather than a moment-to-moment property of the network. When
+*that* assumption fails, the majority versions **block rather than diverge**, which is a repairable
+failure where a split delivery is not. Over session links it removes more than a dependency: the
+all-ack version needs a peer to be *accused* before it can stop waiting for it, and under a quorum
+nobody is ever waited for individually, so a peer absent for hours is not a stranger when it
+returns.
+
+This is the same trade the leader-driven consensus algorithms make, available here for one
+function.
 
 ### Consensus, and what it rests on
 
@@ -312,9 +333,10 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/perfect_failure_detector.rs` | completeness and accuracy, and where accuracy is lost | 13 |
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the ladder over perfect links | 11 / 15 / 17 |
 | `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the ladder over session links, and where the two rungs diverge | 6 / 16 |
+| `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, and what that changes | 18 / 15 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, and what a false suspicion costs it | 21 |
 
-228 in total, all in one process, no ports opened.
+261 in total, all in one process, no ports opened.
 
 ## Licence
 
