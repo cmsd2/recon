@@ -29,19 +29,19 @@
 
 ## 3. Logged perfect links
 
-- [ ] 3.1 Transcribe Module 2.4 and Algorithm 2.3 over the existing stubborn link, quoting the
+- [x] 3.1 Transcribe Module 2.4 and Algorithm 2.3 over the existing stubborn link, quoting the
       pseudocode and stating the status and space bound; verify a message from a surviving sender
       is log-delivered despite loss
-- [ ] 3.2 Verify the log is durable before the layer above is notified, by crashing between the two
+- [x] 3.2 Verify the log is durable before the layer above is notified, by crashing between the two
       and asserting the message is in the retrieved set
-- [ ] 3.3 Verify no duplication **across a restart**: log-deliver, crash, restart, let the sender's
+- [x] 3.3 Verify no duplication **across a restart**: log-deliver, crash, restart, let the sender's
       retransmission arrive again, and assert it is not log-delivered twice
-- [ ] 3.4 Verify that contrast is real by running the same schedule against the existing perfect
+- [x] 3.4 Verify that contrast is real by running the same schedule against the existing perfect
       link, whose record is volatile, and showing it does deliver twice
-- [ ] 3.5 Verify recovery re-announces the retrieved log with no message having arrived
-- [ ] 3.6 Verify no creation, and that the durable set grows with distinct messages log-delivered —
+- [x] 3.5 Verify recovery re-announces the retrieved log with no message having arrived
+- [x] 3.6 Verify no creation, and that the durable set grows with distinct messages log-delivered —
       the stated bound, asserted rather than assumed
-- [ ] 3.7 Verify the weakened reliable delivery is stated honestly: a sender crashing before the
+- [x] 3.7 Verify the weakened reliable delivery is stated honestly: a sender crashing before the
       message reaches anyone requires no delivery, and a schedule exists in which none occurs
 
 ## 4. Stubborn broadcast

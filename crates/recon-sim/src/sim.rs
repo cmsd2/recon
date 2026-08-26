@@ -17,6 +17,15 @@ use std::collections::{BTreeMap, BTreeSet};
 type CodecCheck<M> = fn(&M) -> Result<M, CodecError>;
 
 /// Something scheduled to happen at a point in virtual time.
+/// An effect emitted after a store, waiting for that write to become durable.
+///
+/// Indications wait too, not only sends: an indication is how the layer above learns something,
+/// and what it does next is usually to send. Letting one past would defeat the rule by one hop.
+enum Held<P: Protocol> {
+    Send { to: NodeId, msg: P::Msg },
+    Indicate(P::Ind),
+}
+
 enum Scheduled<P: Protocol> {
     Deliver {
         from: NodeId,
@@ -99,7 +108,7 @@ pub struct Sim<P: Protocol> {
     writing: BTreeMap<NodeId, P::Durable>,
     /// Messages a protocol asked to send after asking for a write, held until the write is
     /// durable. This is the ordering rule: a promise is written down before it is made.
-    held: BTreeMap<NodeId, Vec<(NodeId, P::Msg)>>,
+    held: BTreeMap<NodeId, Vec<Held<P>>>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
     effects: Vec<ProtoEffect<P>>,
     codec_check: Option<CodecCheck<P::Msg>>,
@@ -356,8 +365,14 @@ where
                 }
                 // Only now may what was held leave the process.
                 if let Some(pending) = self.held.remove(&node) {
-                    for (to, msg) in pending {
-                        self.transmit(node, to, msg);
+                    for h in pending {
+                        match h {
+                            Held::Send { to, msg } => self.transmit(node, to, msg),
+                            Held::Indicate(ind) => {
+                                let at = self.now;
+                                self.trace.push(TraceEvent::Indicated { at, node, ind });
+                            }
+                        }
                     }
                 }
             }
@@ -447,9 +462,12 @@ where
                     writing = true;
                 }
                 Effect::Send { to, msg } if writing => {
-                    self.held.entry(node).or_default().push((to, msg));
+                    self.held.entry(node).or_default().push(Held::Send { to, msg });
                 }
                 Effect::Send { to, msg } => self.transmit(node, to, msg),
+                Effect::Indicate(ind) if writing => {
+                    self.held.entry(node).or_default().push(Held::Indicate(ind));
+                }
                 Effect::Indicate(ind) => {
                     let at = self.now;
                     self.trace.push(TraceEvent::Indicated { at, node, ind });

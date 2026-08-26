@@ -74,16 +74,24 @@ already log-delivered, or re-sending what is still pending — rather than merel
 ### Requirement: A write completes before anything that depends on it is sent
 
 Effects emitted from one event SHALL be performed in an order that makes every store effect
-durable before any send effect emitted after it leaves the process. A protocol MAY therefore emit
-a store and a send from the same event and rely on the write having taken effect first.
+durable before **any effect emitted after it** takes visible effect — sends leaving the process,
+and indications reaching the layer above. A protocol MAY therefore emit a store and a send from
+the same event and rely on the write having taken effect first.
 
 Without this rule a protocol can be observed by its peers to have made a promise it has no record
-of, which is the failure the fail-recovery model exists to prevent.
+of, which is the failure the fail-recovery model exists to prevent. Indications are held for the
+same reason at one remove: an indication is how the layer above learns something, and what it
+usually does next is send.
 
 #### Scenario: A promise is durable before it is made
 
 - **WHEN** a protocol emits a store effect and then a send effect in response to one event
 - **THEN** the write is durable before the message leaves the process
+
+#### Scenario: The layer above is not told before the write lands
+
+- **WHEN** a protocol emits a store effect and then an indication in response to one event
+- **THEN** the write is durable before the layer above is notified
 
 #### Scenario: A crash between the two loses the message, not the record
 
