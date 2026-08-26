@@ -351,9 +351,9 @@ across address changes, stream multiplexing, and framing, which deletes `multipl
 `switchboard.rs` and the string keys outright. The layer that consumed eleven of your twelve
 working days mostly stops being a layer you write.
 
-### 6. Climb the ladder, in order, each rung with properties
+### 6. Build the abstractions in order, each with properties
 
-Use the book the archive was already following. Each rung is a small `Protocol` impl, tested in
+Use the book the archive was already following. Each abstraction is a small `Protocol` impl, tested in
 the simulator against its stated guarantees before the next is started.
 
 1. Fair-loss / stubborn link

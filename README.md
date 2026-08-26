@@ -30,8 +30,8 @@ preferences, and the numbering is referred to throughout.
    best-effort `send`, plus a session/epoch-changed event. QUIC over TCP-plus-reconnect-logic — it
    supplies connection identity, multiplexing and framing, which removes the need for a
    hand-rolled multiplexer entirely.
-6. **Climb the ladder in order.** Fair-loss link → perfect link → failure detector → best-effort
-   broadcast → reliable broadcast → uniform reliable broadcast → consensus. Each rung is tested
+6. **Build the abstractions in order.** Fair-loss link → perfect link → failure detector → best-effort
+   broadcast → reliable broadcast → uniform reliable broadcast → consensus. Each abstraction is tested
    against its stated guarantees before the next begins.
 
 ## Getting started
@@ -62,7 +62,7 @@ second cannot. It is the shortest path to seeing what the project is for.
 |---|---|
 | [`recon-core`](crates/recon-core) | The `Protocol` trait, the effect vocabulary, `Cx`, `Time`, `NodeId`, `SessionEvent`, error conventions. Everything else depends on this and nothing else. |
 | [`recon-sim`](crates/recon-sim) | The deterministic simulator. It *is* the fair-loss network, and it is the project's standard of evidence — seeded RNG, virtual clock, fault injection, and a trace that properties are asserted over. |
-| [`recon-protocols`](crates/recon-protocols) | The ladder. One module per rung, each transcribed from the book with the pseudocode quoted above the implementation. |
+| [`recon-protocols`](crates/recon-protocols) | The protocols themselves, one module each, transcribed from the book with the pseudocode quoted above the implementation. |
 
 ### recon-core
 
@@ -131,11 +131,11 @@ page, inheriting the book's omissions — which include garbage collection) or a
 bounds its space. See [`docs/bounded-space.md`](docs/bounded-space.md) for why that distinction is
 load-bearing.
 
-The bottom rung, fair-loss links, is not a module: it is what the simulator provides.
+The bottom abstraction, fair-loss links, is not a module: it is what the simulator provides.
 
-### Over fair-loss links — the book's ladder
+### Over fair-loss links — the book's own sequence
 
-| Rung | Module | Book | Status | Space |
+| Abstraction | Module | Book | Status | Space |
 |---|---|---|---|---|
 | Stubborn link | [`stubborn_link.rs`](crates/recon-protocols/src/stubborn_link.rs) | Module 2.2, Alg. 2.1 | academic | unbounded |
 | Perfect link | [`perfect_link.rs`](crates/recon-protocols/src/perfect_link.rs) | Module 2.3, Alg. 2.2 | academic as written | unbounded |
@@ -149,10 +149,10 @@ The bottom rung, fair-loss links, is not a module: it is what the simulator prov
 ### Over session links — what a deployment would run
 
 The stubborn link belongs to the classroom: in a deployment TCP and QUIC already retransmit, and
-the deployable link needs *less* state than the perfect link, not more. These rungs are the same
+the deployable link needs *less* state than the perfect link, not more. These abstractions are the same
 algorithms over a link that can end.
 
-| Rung | Module | Status | Space |
+| Abstraction | Module | Status | Space |
 |---|---|---|---|
 | Session link | [`session_link.rs`](crates/recon-protocols/src/session_link.rs) | deployable | bounded by membership |
 | Best-effort broadcast | [`session_best_effort_broadcast.rs`](crates/recon-protocols/src/session_best_effort_broadcast.rs) | deployable | bounded by membership |
@@ -160,7 +160,7 @@ algorithms over a link that can end.
 | Uniform reliable broadcast | [`session_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_uniform_reliable_broadcast.rs) | transcription | unbounded |
 | Uniform reliable broadcast, majority-ack | [`session_majority_ack_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_majority_ack_uniform_reliable_broadcast.rs) | transcription, **no failure detector** | unbounded |
 
-The interesting result is that the two broadcast rungs **diverge** here. Reliable broadcast relays
+The interesting result is that the two broadcast abstractions **diverge** here. Reliable broadcast relays
 once and keeps identifiers rather than payloads, so a relay lost to a session ending is never
 retried and its agreement is scoped to the sessions that carried it. Uniform reliable broadcast
 keeps payloads and consults a failure detector, so between resending on re-establishment and
@@ -169,7 +169,7 @@ contrast is the point of `tests/session_broadcast.rs`.
 
 ### Detectors versus quorums
 
-Both ladders carry uniform reliable broadcast twice, and the pair is the point. Algorithm 3.4
+Both stacks carry uniform reliable broadcast twice, and the pair is the point. Algorithm 3.4
 delivers once every process still *believed correct* has relayed a message; that belief comes from
 a perfect failure detector, and one wrong belief splits the delivery permanently. Algorithm 3.5
 asks a different question of the same record — has **more than half** relayed it? — and the
@@ -188,7 +188,7 @@ function.
 
 ### Consensus, and what it rests on
 
-Flooding consensus is the last rung on the fair-loss ladder, and the only one whose limitation is
+Flooding consensus is the last of the fair-loss protocols, and the only one whose limitation is
 not about space. Its state is bounded — one proposal set and one heard-from set per round, at most
 `N` rounds — but its **agreement rests entirely on the failure detector never being wrong**. The
 book's own proof of agreement invokes strong accuracy by name, and one false suspicion splits the
@@ -207,7 +207,7 @@ are built the other way round.
 
 Eventually perfect failure detection (Module 2.8, `◇P`) and eventual leader election (`Ω`), then
 the leader-driven family. Two things are missing for them: `Ω` and the detector beneath it, and
-**stable storage** — a crash now genuinely loses volatile state, so a rung that must remember an
+**stable storage** — a crash now genuinely loses volatile state, so an abstraction that must remember an
 epoch or a promise across an incarnation has nowhere to put it.
 
 ## Examples
@@ -221,7 +221,7 @@ test; until transport exists under constraint 5, everything interesting is in-pr
 
 | Document | What it says |
 |---|---|
-| [`docs/bounded-space.md`](docs/bounded-space.md) | Transcriptions versus implementations, the rule that state is bounded by membership or a window or a capacity but never by messages handled, and an audit of which rungs currently break it. |
+| [`docs/bounded-space.md`](docs/bounded-space.md) | Transcriptions versus implementations, the rule that state is bounded by membership or a window or a capacity but never by messages handled, and an audit of which abstractions currently break it. |
 | [`docs/conditional-guarantees.md`](docs/conditional-guarantees.md) | Why every guarantee is bounded by a scope, why the end of that scope is a first-class event rather than an implementation detail, and what it means that a layer which cannot bridge must propagate. |
 | [`docs/scope-annotated-modules.md`](docs/scope-annotated-modules.md) | The formal companion: the extension to the book's module notation, proved conservative, with composition rules and a lower bound on what a layer can bridge. |
 
@@ -255,8 +255,8 @@ thinking without committing to anything. Project context and per-artifact rules 
 ## Prior art
 
 - **Cachin, Guerraoui & Rodrigues**, *Introduction to Reliable and Secure Distributed
-  Programming*, 2nd ed. (Springer, 2011). The ladder, the module notation, and the pseudocode
-  every rung transcribes.
+  Programming*, 2nd ed. (Springer, 2011). The abstractions, the module notation, and the pseudocode
+  every abstraction transcribes.
 - **The KTH distributed systems course** and its Scala/Kompics DSL, which is where the idea of
   writing these algorithms as composable message-passing components comes from.
 - **`quinn-proto`, `rustls`, `raft-rs`** — the prior art for sans-IO protocol cores in Rust. Each
@@ -302,10 +302,10 @@ cargo test -p recon-sim -- the_same_seed              # by name
 cargo test --workspace -- --nocapture                 # with output
 ```
 
-### Adding a rung
+### Adding an abstraction
 
 1. Propose it — `/opsx:propose "..."` — and let the proposal say what guarantee is being added and
-   what it costs. A rung that weakens a guarantee to a scope is a change with a specification, not
+   what it costs. An abstraction that weakens a guarantee to a scope is a change with a specification, not
    a cleanup commit.
 2. Write the module with the pseudocode quoted above the implementation, and state in its
    documentation whether it is a transcription or an implementation, what bounds its space, and
@@ -331,8 +331,8 @@ cargo test --workspace -- --nocapture                 # with output
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | `tests/stubborn_link.rs`, `perfect_link.rs`, `session_link.rs` | the links | 13 / 16 / 10 |
 | `tests/perfect_failure_detector.rs` | completeness and accuracy, and where accuracy is lost | 13 |
-| `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the ladder over perfect links | 11 / 15 / 17 |
-| `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the ladder over session links, and where the two rungs diverge | 6 / 16 |
+| `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the broadcasts over perfect links | 11 / 15 / 17 |
+| `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the broadcasts over session links, and where the two diverge | 6 / 16 |
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, and what that changes | 18 / 15 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, and what a false suspicion costs it | 21 |
 

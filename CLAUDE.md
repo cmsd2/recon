@@ -14,13 +14,13 @@ Three crates, all of them sans-IO:
 - **`recon-core`** — the `Protocol` trait, the effect vocabulary, `Cx`, `Time`, error conventions.
 - **`recon-sim`** — the deterministic simulator. It *is* the fair-loss network, and it is the
   project's standard of evidence.
-- **`recon-protocols`** — the ladder so far: stubborn link, perfect link, best-effort broadcast.
+- **`recon-protocols`** — the abstractions built so far: stubborn link, perfect link, best-effort broadcast.
 
-Rungs are transcribed from Cachin, Guerraoui & Rodrigues, with the pseudocode quoted in each
+Abstractions are transcribed from Cachin, Guerraoui & Rodrigues, with the pseudocode quoted in each
 module's documentation and every departure from the page stated and justified there.
 
-`README.md` is the map — the crates, the ladder as it currently stands, the documents and what
-each says, the prior art, and how to build, test and add a rung. It is the front door for anyone
+`README.md` is the map — the crates, the protocols as they currently stand, the documents and what
+each says, the prior art, and how to build, test and add an abstraction. It is the front door for anyone
 who has not read this file, and it is **kept current as part of the work**; see below.
 
 ## Commands
@@ -89,7 +89,7 @@ transport under constraint 5. Do not weaken it; delete it, or leave it alone.
 ## Keep `README.md` current
 
 `README.md` is a map of what is actually here, and a map that lags is worse than none — it sends
-a reader to a rung that does not exist, or omits the one they wanted. No guard can check it, so
+a reader to an abstraction that does not exist, or omits the one they wanted. No guard can check it, so
 it is a standing obligation rather than a mechanical one: **update it in the same commit as the
 change that dates it**, not in a sweep afterwards.
 
@@ -97,8 +97,8 @@ What dates it, and what to do:
 
 | Change | Update |
 |---|---|
-| A new protocol module | Add a row to the right ladder table — module, book reference, status, space bound — and say in the prose what guarantee it adds. Its status and space must match what the module's own documentation claims. |
-| A rung converted from transcription to implementation | Change its status and space in the table. The distinction is the whole point of `docs/bounded-space.md`; a stale table quietly asserts the opposite of what is true. |
+| A new protocol module | Add a row to the right protocol table — module, book reference, status, space bound — and say in the prose what guarantee it adds. Its status and space must match what the module's own documentation claims. |
+| An abstraction converted from transcription to implementation | Change its status and space in the table. The distinction is the whole point of `docs/bounded-space.md`; a stale table quietly asserts the opposite of what is true. |
 | A new test suite, or a suite that changes size materially | The suite table at the end, and the total. `cargo test --workspace` prints the counts. |
 | A new document in `docs/` | A row in the documentation table saying what it *says*, not what it is called. |
 | A new capability spec, or a new top-level directory under `openspec/specs/` | The specification tree. |
@@ -138,9 +138,9 @@ each one exists because its absence killed the first attempt.
    TCP-plus-reconnect-logic — it supplies connection identity, multiplexing and framing, which
    removes the need for a hand-rolled multiplexer entirely.
 
-6. **Climb the ladder in order.** Fair-loss link → perfect link → failure detector →
+6. **Build the abstractions in order.** Fair-loss link → perfect link → failure detector →
    best-effort broadcast → reliable broadcast → uniform reliable broadcast → consensus. Each
-   rung is tested against its stated guarantees before the next begins. Reliable broadcast is
+   abstraction is tested against its stated guarantees before the next begins. Reliable broadcast is
    the milestone that proves the composition model holds.
 
 Errors get `thiserror` types per layer. The string `"json decoding error"` should never appear.
@@ -198,7 +198,7 @@ The formal companion is `docs/scope-annotated-modules.md`: the extension to the 
 notation, proved conservative, with the composition rules and the lower bound on what a layer can
 bridge.
 
-The ladder's abstractions are idealised: stubborn links retransmit forever, and "perfect link"
+The book's abstractions are idealised: stubborn links retransmit forever, and "perfect link"
 assumes a link that never ends. Neither survives contact with a real transport — TCP is a perfect
 link *within* a session and a liar across one.
 
@@ -209,13 +209,13 @@ ending only if its redundancy outlives it: memory survives a reconnect, stable s
 restart, other processes survive this one dying. **A layer that cannot bridge must propagate.**
 Silently absorbing a scope end is the bug the first attempt shipped.
 
-Two things follow for anyone writing a new rung:
+Two things follow for anyone writing a new abstraction:
 
 - Layers above the link may depend on its `Cmd` and `Ind` types and nothing else. That is the
   seam a session-aware or logged implementation gets swapped through.
 - `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile
   state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause. What is
-  *not* yet modelled is anything surviving a crash: there is no stable storage, so a rung that
+  *not* yet modelled is anything surviving a crash: there is no stable storage, so an abstraction that
   needs to remember across an incarnation — an epoch, a promise, a decision — has nowhere to put
   it. That is a gap to close before any algorithm claims to survive a restart.
 

@@ -11,10 +11,16 @@ reproduces a run including everything recovered from it.
 - **WHEN** a process writes durable state, crashes, and restarts
 - **THEN** it is given back what it wrote, and nothing it held only in memory
 
-#### Scenario: A process that never wrote recovers nothing
+#### Scenario: A process that never wrote is initialised again rather than recovered
 
 - **WHEN** a process crashes having written nothing
-- **THEN** it starts as if for the first time
+- **THEN** its initialisation entry point runs, not its recovery one
+
+#### Scenario: Every process is initialised at the start of a run
+
+- **WHEN** a run begins
+- **THEN** each process's initialisation entry point runs once, and any effects it emits are
+  interpreted like those of any other event
 
 #### Scenario: A run with storage is reproducible from its seed
 

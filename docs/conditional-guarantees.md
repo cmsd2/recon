@@ -2,11 +2,11 @@
 
 A design note, not a specification. The formal argument — what the scope annotation means, why
 every proof in Cachin, Guerraoui & Rodrigues survives it untouched, and what it does and does not
-add — is in [`scope-annotated-modules.md`](scope-annotated-modules.md). It records a reframing that should shape the rungs above
+add — is in [`scope-annotated-modules.md`](scope-annotated-modules.md). It records a reframing that should shape the abstractions above
 best-effort broadcast, and the eventual transport layer. Nothing here is implemented yet, and
 some of it deliberately should not be until it has a second consumer.
 
-## The problem with the ladder as written
+## The problem with the abstractions as written
 
 The abstractions in Cachin, Guerraoui & Rodrigues are idealised in two ways that matter as soon
 as the code leaves a simulator.
@@ -59,8 +59,8 @@ so rather than pretend.
 | stable storage | process restart | a crash — the book's *logged* variants |
 | other processes | this process dying | a sender crash — reliable broadcast's whole purpose |
 
-That gives a second reading of the ladder. Each rung is not merely "stronger"; it bridges one
-more class of failure than the rung below:
+That gives a second reading of the whole sequence. Each abstraction is not merely "stronger"; it bridges one
+more class of failure than the abstraction below:
 
 ```
 fair-loss link        bridges nothing — it is the failure
@@ -74,8 +74,8 @@ uniform reliable bc.  sender crash after some have delivered
 consensus             disagreement under a minority of crashes
 ```
 
-Read that way, best-effort broadcast is not a weak version of reliable broadcast. It is the rung
-that bridges nothing new, which is precisely why the next rung exists.
+Read that way, best-effort broadcast is not a weak version of reliable broadcast. It is the abstraction
+that bridges nothing new, which is precisely why the next abstraction exists.
 
 **A layer that cannot bridge must propagate.** Silently absorbing a scope end is the bug. If a
 perfect link cannot tell whether its peer merely reconnected or restarted with an empty
@@ -120,7 +120,7 @@ and `crash` then `restart` is amnesia. `Sim::suspend` is the pause. A restarted 
 does face what it actually faces: having forgotten what it delivered.
 
 What is still missing is the other half — **nothing survives a crash**, because there is no stable
-storage. A rung that must remember an epoch, a promise or a decision across an incarnation has
+storage. An abstraction that must remember an epoch, a promise or a decision across an incarnation has
 nowhere to put it, so the logged variants of these abstractions cannot be written at all. That is
 the gap to close before anything in the fail-recovery model.
 
@@ -132,7 +132,7 @@ Nothing here justifies restructuring the three protocols that exist.
   be generic over, and building the abstraction before its second consumer is the failure this
   project already documented. The retrofit is contained: best-effort broadcast owns one field and
   makes three four-line composition calls.
-- **Do not weaken the perfect link's guarantee yet.** The unbounded version is what the ladder's
+- **Do not weaken the perfect link's guarantee yet.** The unbounded version is what the book's
   proofs assume. The bounded, session-aware one is a *sibling* implementation of the same port,
   and it belongs with the transport work, which comes last.
 
@@ -225,7 +225,7 @@ property tagged `[always]` should have a test that survives every fault the simu
 a property tagged with a scope should have a test that it does *not* survive that scope ending,
 unless the module claims to bridge it.
 
-**It makes the ladder's structure explicit.** Reading the rungs by their tags shows where each
+**It makes the structure of the sequence explicit.** Reading the abstractions by their tags shows where each
 one strengthens a scope: reliable broadcast takes best-effort broadcast's validity from
 `[sender's incarnation]` to `[always]`, and it does so by moving the redundancy from the sender's
 memory onto other processes. That is the same table as the previous section, arrived at from the
@@ -233,9 +233,9 @@ notation rather than from the implementation.
 
 ### The cost, honestly
 
-Every module definition grows by six or eight lines, and most of the early rungs will be tagged
+Every module definition grows by six or eight lines, and most of the early abstractions will be tagged
 `[always]` or `[session]` with nothing interesting to say. The notation earns its keep from
-reliable broadcast upward, where bridging is the entire content of each rung, and it is largely
+reliable broadcast upward, where bridging is the entire content of each abstraction, and it is largely
 ceremony below that.
 
 It is also a private extension. Anyone reading this code against the book will meet a notation
@@ -295,7 +295,7 @@ re-wraps it into its own `Scope` type, the same way it re-wraps messages and tim
 notation's *Bridges / Propagates* section and the code become the same statement again.
 
 **The cost is real ceremony.** A fifth associated type on every protocol, a `type Scope =
-Infallible;` line on every textbook rung, and a fourth mapper in every composition call — all to
+Infallible;` line on every textbook abstraction, and a fourth mapper in every composition call — all to
 serve a layer that does not exist yet.
 
 **So: not now.** This is recorded as the intended mechanism, verified to compile, to be added

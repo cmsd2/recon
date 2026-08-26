@@ -62,6 +62,18 @@ pub trait Protocol {
     /// Handle a timer this protocol previously set.
     fn on_timer(&mut self, token: Self::Timer, cx: &mut ProtoCx<'_, Self>);
 
+    /// Begin, on a first start — when nothing has been written down.
+    ///
+    /// Exactly one of this and [`Protocol::on_recovery`] runs at startup, which is the branch the
+    /// book draws with `⟨ Init ⟩` and `⟨ Recovery ⟩`. It matters because some first-start work must
+    /// *not* happen on a restart: writing an initial value down is the standard case, and doing it
+    /// again on recovery would overwrite what was being recovered.
+    ///
+    /// The constructor cannot serve this purpose. It runs in both cases — it is the common prefix
+    /// of the two branches, not one of them — and it cannot emit effects, so it has nowhere to put
+    /// a write. Volatile setup belongs there; anything a first start must *do* belongs here.
+    fn on_init(&mut self, _cx: &mut ProtoCx<'_, Self>) {}
+
     /// Resume from durable state after a crash.
     ///
     /// Distinct from construction, and deliberately: the algorithms that need it *act* on
@@ -69,8 +81,8 @@ pub trait Protocol {
     /// pending — and those are effects, which a constructor cannot emit.
     ///
     /// Volatile state is whatever `new` established; `durable` is the last value stored before
-    /// the crash. A process that had written nothing is constructed and never recovered, so a
-    /// protocol can tell a first start from a restart by which of the two happened.
+    /// the crash. Exactly one of this and [`Protocol::on_init`] runs at startup: a process with
+    /// nothing in storage is initialised, one with something is recovered, never both.
     ///
     /// The default does nothing, which is unreachable for a protocol whose `Durable` is
     /// uninhabited.
@@ -114,6 +126,8 @@ pub enum Event<C, M, T, S, D> {
     Timer(T),
     /// A scope this protocol's guarantees depended on has ended.
     ScopeEnd(S),
+    /// This process is starting for the first time, with nothing written down.
+    Init,
     /// This process restarted, and here is what it had written down.
     Recovery(D),
 }
@@ -146,6 +160,7 @@ pub fn step<P: Protocol + ?Sized>(
             Event::Msg { from, msg } => p.on_msg(from, msg, &mut cx),
             Event::Timer(t) => p.on_timer(t, &mut cx),
             Event::ScopeEnd(s) => p.on_scope_end(s, &mut cx),
+            Event::Init => p.on_init(&mut cx),
             Event::Recovery(d) => p.on_recovery(d, &mut cx),
         }
     }

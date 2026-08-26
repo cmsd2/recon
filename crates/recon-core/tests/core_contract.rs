@@ -464,6 +464,12 @@ impl Protocol for Counter {
     fn on_msg(&mut self, _from: NodeId, _msg: (), _cx: &mut ProtoCx<'_, Self>) {}
     fn on_timer(&mut self, _t: (), _cx: &mut ProtoCx<'_, Self>) {}
 
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        // First-start-only: writes the starting value down so a later restart recovers rather
+        // than beginning again.
+        cx.store(Total(self.total));
+    }
+
     fn on_recovery(&mut self, Total(total): Total, cx: &mut ProtoCx<'_, Self>) {
         self.total = total;
         // Recovering produces an effect — which is why it is an event and not a constructor.
@@ -511,6 +517,25 @@ fn a_recovered_protocol_is_given_what_survived_and_may_act_on_it() {
     let fx = step(&mut p, Event::Recovery(Total(7)), Time::ZERO, &mut rng(0));
     assert_eq!(p.total, 7, "the durable state came back");
     assert_eq!(fx, vec![Effect::Indicate(Total(7))], "and recovering emitted an effect");
+}
+
+#[test]
+fn exactly_one_of_init_and_recovery_runs_and_init_can_write() {
+    // The book's branch. A first start must be able to *do* things a restart must not — writing
+    // an initial value down is the standard case, and repeating it on recovery would overwrite
+    // what was being recovered. The constructor cannot serve: it runs in both cases and emits
+    // nothing.
+    let mut fresh = Counter::default();
+    let init = step(&mut fresh, Event::Init, Time::ZERO, &mut rng(0));
+    assert_eq!(init, vec![Effect::Store(Total(0))], "the initial write has somewhere to happen");
+
+    let mut restarted = Counter::default();
+    let recovered = step(&mut restarted, Event::Recovery(Total(9)), Time::ZERO, &mut rng(0));
+    assert!(
+        !recovered.iter().any(|e| matches!(e, Effect::Store(_))),
+        "and recovering does not repeat it, which would clobber what it just retrieved"
+    );
+    assert_eq!(restarted.total, 9);
 }
 
 #[test]

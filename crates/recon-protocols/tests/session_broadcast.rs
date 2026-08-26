@@ -44,9 +44,6 @@ fn urb_sim(seed: u64) -> Sim<Urb> {
             SessionUniformReliableBroadcast::new(me, ALL, heartbeat(), detect_after())
         });
     s.deliver_session_events();
-    for n in ALL {
-        s.command(n, surb::Cmd::Start);
-    }
     s
 }
 
@@ -376,10 +373,10 @@ fn urb_attempts_nothing_on_the_ending_itself() {
     assert_eq!(between.count(), 0, "nothing sent to D while there was no session to send over");
 }
 
-// ------------------------------------- that the two rungs differ: group 5
+// ------------------------------------- that the two abstractions differ: group 5
 
 #[test]
-fn the_uniform_rung_survives_a_schedule_that_splits_the_reliable_one() {
+fn the_uniform_version_survives_a_schedule_that_splits_the_reliable_one() {
     // Reliable broadcast leaves D without the message on this schedule.
     assert_eq!(relay_lost_to_a_session_ending(1), vec![1, 1, 0]);
 

@@ -60,7 +60,7 @@
 //!
 //! Losing the detector's **accuracy** costs *safety* — two correct processes decide differently,
 //! permanently. Losing its **completeness** costs only *liveness* — everyone blocks, but nobody
-//! is wrong. The asymmetry is the reason this rung is worth writing.
+//! is wrong. The asymmetry is the reason this protocol is worth writing.
 //!
 //! # Why stabilising later does not help
 //!
@@ -73,7 +73,7 @@
 //! An eventually perfect detector would therefore *withdraw* a false suspicion, and every process
 //! would again be held correct by every other — and the split would still be there, because a
 //! decision is irrevocable and was taken while the system was unstable. This is what separates
-//! this rung from the leader-driven family: flooding consensus commits during instability and so
+//! this protocol from the leader-driven family: flooding consensus commits during instability and so
 //! has nothing left for stabilisation to rescue, whereas a quorum-based algorithm declines to
 //! commit until no conflicting decision is possible. Stated this way the limitation survives
 //! replacing `P` with `◇P`; "the detector never withdraws an accusation" would not.
@@ -142,8 +142,6 @@ pub enum Wire<P> {
 /// Requests from the layer above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {
-    /// Begin failure detection. Without it no round can complete once a process has crashed.
-    Start,
     Propose(P),
 }
 
@@ -407,9 +405,14 @@ impl<P: Clone + Ord> Protocol for FloodingConsensus<P> {
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Durable = core::convert::Infallible;
 
+    /// Failure detection begins here, as Module 2.6 has it. It used to need a `Start` command
+    /// because there was no init event to hang the detector's first timer on.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.with_detector(cx, |d, ccx| d.on_init(ccx));
+    }
+
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
-            Cmd::Start => self.with_detector(cx, |d, ccx| d.on_cmd(pfd::Cmd::Start, ccx)),
             // One proposal per process, one decision per instance; a second is not a second
             // consensus and is ignored.
             Cmd::Propose(_) if self.proposed => {}

@@ -4,10 +4,8 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Time, step};
-use recon_protocols::perfect_failure_detector::{
-    Cmd, Heartbeat, Ind, PerfectFailureDetector, Tick,
-};
+use recon_core::{Effect, Event, NodeId, Protocol, Time, step};
+use recon_protocols::perfect_failure_detector::{Heartbeat, Ind, PerfectFailureDetector, Tick};
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -45,12 +43,6 @@ fn sync_sim(seed: u64) -> Sim<PerfectFailureDetector> {
     s
 }
 
-fn start_all(s: &mut Sim<PerfectFailureDetector>) {
-    for n in ALL {
-        s.command(n, Cmd::Start);
-    }
-}
-
 /// Which processes `node` has accused, in order.
 fn accused(s: &Sim<PerfectFailureDetector>, node: NodeId) -> Vec<NodeId> {
     s.trace().indications_at(node).map(|Ind::Crash { node }| *node).collect()
@@ -64,9 +56,9 @@ fn the_heartbeat_survives_encoding() {
 }
 
 #[test]
-fn starting_beats_to_every_peer_and_arms_the_timer() {
+fn initialising_beats_to_every_peer_and_arms_the_timer() {
     let mut p = detector(A);
-    let fx = step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut rng());
+    let fx = step(&mut p, Event::Init, Time::ZERO, &mut rng());
     assert_eq!(
         fx,
         vec![
@@ -80,12 +72,13 @@ fn starting_beats_to_every_peer_and_arms_the_timer() {
 }
 
 #[test]
-fn starting_twice_does_not_arm_a_second_timer() {
-    // Two timers would halve the effective timeout and accuse the living.
+fn initialising_twice_does_not_arm_a_second_timer() {
+    // Two timers would halve the effective timeout and accuse the living. The simulator
+    // initialises each process exactly once, so this guards the protocol rather than the driver.
     let mut p = detector(A);
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
-    let again = step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    step(&mut p, Event::Init, Time::ZERO, &mut r);
+    let again = step(&mut p, Event::Init, Time::ZERO, &mut r);
     assert_eq!(again, vec![]);
 }
 
@@ -93,7 +86,7 @@ fn starting_twice_does_not_arm_a_second_timer() {
 fn a_heartbeat_before_the_tick_prevents_accusation() {
     let mut p = detector(A);
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    step(&mut p, Event::Init, Time::ZERO, &mut r);
     for peer in [B, C, D] {
         step(&mut p, Event::Msg { from: peer, msg: Heartbeat }, Time::from_millis(5), &mut r);
     }
@@ -108,7 +101,7 @@ fn a_heartbeat_before_the_tick_prevents_accusation() {
 fn silence_beyond_the_timeout_accuses_exactly_once() {
     let mut p = detector(A);
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    step(&mut p, Event::Init, Time::ZERO, &mut r);
 
     let past = Time::from_offset(timeout() * 2);
     step(&mut p, Event::Msg { from: B, msg: Heartbeat }, past, &mut r);
@@ -137,7 +130,6 @@ fn silence_beyond_the_timeout_accuses_exactly_once() {
 fn every_crashed_process_is_detected_by_every_survivor() {
     for seed in 0..10u64 {
         let mut s = sync_sim(seed);
-        start_all(&mut s);
         s.run_for(Duration::from_millis(100));
         s.crash(D);
         s.run_for(timeout() * 4);
@@ -151,7 +143,6 @@ fn every_crashed_process_is_detected_by_every_survivor() {
 #[test]
 fn several_crashes_are_all_detected() {
     let mut s = sync_sim(11);
-    start_all(&mut s);
     s.run_for(Duration::from_millis(100));
     s.crash(C);
     s.crash(D);
@@ -165,9 +156,20 @@ fn several_crashes_are_all_detected() {
 }
 
 #[test]
+fn the_detector_has_no_commands_at_all() {
+    // Detection begins at initialisation, as Module 2.6 has it, so there is nothing to ask for.
+    // An uninhabited command type says so in a way the compiler checks.
+    fn _absurd(c: <PerfectFailureDetector as Protocol>::Cmd) -> ! {
+        match c {}
+    }
+    let mut p = detector(A);
+    let fx = step(&mut p, Event::Init, Time::ZERO, &mut rng());
+    assert!(!fx.is_empty(), "and initialising is what starts it");
+}
+
+#[test]
 fn detection_is_permanent_and_reported_once() {
     let mut s = sync_sim(12);
-    start_all(&mut s);
     s.run_for(Duration::from_millis(100));
     s.crash(D);
     s.run_for(timeout() * 12);
@@ -183,7 +185,6 @@ fn detection_is_permanent_and_reported_once() {
 fn a_brief_suspension_is_not_an_accusation() {
     // The boundary the timeout actually tests: silence shorter than the timeout is tolerated.
     let mut s = sync_sim(13);
-    start_all(&mut s);
     s.run_for(Duration::from_millis(100));
     s.suspend(D);
     s.run_for(timeout() - period() - BOUND * 2);
@@ -199,7 +200,6 @@ fn a_brief_suspension_is_not_an_accusation() {
 fn a_long_suspension_is_an_accusation() {
     // ...and silence longer than the timeout is not, which is what makes the test above meaningful.
     let mut s = sync_sim(14);
-    start_all(&mut s);
     s.run_for(Duration::from_millis(100));
     s.suspend(D);
     s.run_for(timeout() * 3);
@@ -215,7 +215,6 @@ fn a_long_suspension_is_an_accusation() {
 fn no_correct_process_is_ever_accused() {
     for seed in 0..20u64 {
         let mut s = sync_sim(seed);
-        start_all(&mut s);
         s.run_for(timeout() * 20);
         for n in ALL {
             assert!(
@@ -230,7 +229,6 @@ fn no_correct_process_is_ever_accused() {
 #[test]
 fn accuracy_holds_over_a_long_run() {
     let mut s = sync_sim(21);
-    start_all(&mut s);
     s.run_until(Time::from_secs(10));
     for n in ALL {
         assert!(accused(&s, n).is_empty());
@@ -254,9 +252,6 @@ fn accuracy_is_lost_when_the_timing_assumption_is_withdrawn() {
             &ALL,
             detector,
         );
-        for n in ALL {
-            s.command(n, Cmd::Start);
-        }
         s.run_for(timeout() * 6);
         ALL.iter().any(|n| !accused(&s, *n).is_empty())
     });

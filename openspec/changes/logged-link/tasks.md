@@ -49,7 +49,7 @@
 - [x] 4.1 Implement best-effort broadcast over stubborn links that does not deduplicate; verify
       delivery repeats without bound over a long run
 - [x] 4.2 Verify a process crashed at the moment of a broadcast delivers it after restarting — the
-      reason this rung exists
+      reason this protocol exists
 - [x] 4.3 Verify no creation, and that this layer's own state does not grow with messages received
 
 ## 5. Logged uniform reliable broadcast
@@ -70,14 +70,34 @@
       resumes when enough processes recover
 - [x] 5.8 Verify every absence-of-violation assertion is paired with a minimum log-delivery count
 
+## 5b. Startup is a branch (added during implementation)
+
+Found while implementing, and raised as a question about the book: the constructor always runs, so
+first-start-only logic — the book's `store(∅)` — had nowhere to happen. Recovery alone is not the
+branch; initialisation is its other side.
+
+- [x] 5b.1 Add an initialisation entry point that can emit effects, alongside recovery, with
+      exactly one running at startup; verify from the core suite that init writes and recovery does
+      not repeat the write
+- [x] 5b.2 Drive it from the simulator: every process at the start of a run, and a restart with
+      nothing in storage; verify a restart with something in storage recovers instead
+- [x] 5b.3 Move the perfect failure detector's `Start` command into initialisation, where Module
+      2.6 puts it, leaving that protocol with no commands at all; verify its command type is
+      uninhabited and that initialising is what arms the first timer
+- [x] 5b.4 Remove the `Start` command from the three protocols that only forwarded it, and forward
+      initialisation to the detector instead; verify their suites pass without ever starting
+      anything
+- [x] 5b.5 Restore the book's initial `store` in both logged abstractions, now that there is an `Init` to
+      put it in; verify the whole suite still passes
+
 ## 6. Recording it
 
 - [ ] 6.1 Update `docs/conditional-guarantees.md`: stable storage is no longer an unimplemented
       entry in its table, and its reading that an incarnation boundary needs no event applies to
       the ending and not the beginning
-- [ ] 6.2 Update `docs/bounded-space.md`: the audit gains rungs whose unbounded state is on disk,
+- [ ] 6.2 Update `docs/bounded-space.md`: the audit gains abstractions whose unbounded state is on disk,
       and the bounded delivered-cursor is named as the mechanism that would fix them
-- [ ] 6.3 Add the three rungs to the README with their status and space bounds, note what the
+- [ ] 6.3 Add the three abstractions to the README with their status and space bounds, note what the
       fail-recovery model changes about indications, and refresh the test counts; verify the links
       resolve
 - [ ] 6.4 Record as notes in the change: whether the effect-plus-ordering-rule design survived

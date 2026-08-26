@@ -57,13 +57,13 @@ Fifty-one transmissions per message, none of them needed, and the rate grows wit
 ever sent. In a simulator this is a slow test. In a running system it is a link that degrades
 until it stops working.
 
-## Which rungs would actually be deployed
+## Which abstractions would actually be deployed
 
-The rule above matters most for code that ships, so it is worth being explicit about which rungs
-would. Some of the ladder exists to show how a guarantee is *constructed* from nothing; in a real
+The rule above matters most for code that ships, so it is worth being explicit about which abstractions
+would. Some of these abstractions exist to show how a guarantee is *constructed* from nothing; in a real
 deployment the transport has already constructed it.
 
-| Rung | In a deployment |
+| Abstraction | In a deployment |
 |---|---|
 | fair-loss link | the network itself, or the simulator standing in for it |
 | **stubborn link** | **academic.** TCP and QUIC retransmit already |

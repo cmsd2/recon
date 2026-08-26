@@ -42,7 +42,7 @@ fn a_broadcast_is_delivered_infinitely_often() {
 
 #[test]
 fn a_process_that_was_down_receives_it_after_recovering() {
-    // The reason this rung exists. C is crashed when the broadcast happens and has no record of
+    // The reason this protocol exists. C is crashed when the broadcast happens and has no record of
     // it and no way to ask; only a sender that never stopped trying reaches it.
     let mut s = sim(2);
     s.crash(C);

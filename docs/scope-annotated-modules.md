@@ -173,7 +173,7 @@ first.
 > be weakened without proof. For a liveness property it is not, and the gap is precisely the work
 > an implementation must do to bridge a scope boundary.
 
-This asymmetry explains the shape of the ladder. Every rung that "strengthens a guarantee" is
+This asymmetry explains the shape of the whole sequence. Every abstraction that "strengthens a guarantee" is
 strengthening the *scope of a liveness property*, and pays for it in retained state.
 
 ---
@@ -235,7 +235,7 @@ scope* — is a theorem, by the standard indistinguishability argument.
 > after t in both. By hypothesis P[S_M] demands behaviour depending on K, hence different
 > behaviour in σ₁ and σ₂. Contradiction. ∎
 
-> **Corollary 7.1 (The ladder, derived).** Take K to be the set of messages promised and not yet
+> **Corollary 7.1 (The sequence, derived).** Take K to be the set of messages promised and not yet
 > delivered.
 >
 > - If K is held in volatile memory, A can bridge `session` but not `incarnation`. *(A perfect

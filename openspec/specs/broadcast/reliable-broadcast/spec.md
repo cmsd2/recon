@@ -3,7 +3,7 @@
 ## Purpose
 
 Broadcast in which the correct processes agree on what was delivered, even when the sender crashed
-partway through sending. This is the first rung whose guarantee survives the failure of another
+partway through sending. This is the first abstraction whose guarantee survives the failure of another
 process rather than of the network.
 
 ## Requirements

@@ -1,10 +1,10 @@
 //! Distributed algorithms, written as sans-IO protocols.
 //!
-//! Each module is a rung of the ladder in Cachin, Guerraoui & Rodrigues, *Introduction to
+//! Each module is one abstraction from Cachin, Guerraoui & Rodrigues, *Introduction to
 //! Reliable and Secure Distributed Programming* — transcribed so that the code can be read
 //! against the page. The pseudocode each one implements is quoted in its module documentation.
 //!
-//! The bottom rung, fair-loss links, is not here: it is what the simulator provides.
+//! The bottom abstraction, fair-loss links, is not here: it is what the simulator provides.
 
 pub mod best_effort_broadcast;
 pub mod flooding_consensus;

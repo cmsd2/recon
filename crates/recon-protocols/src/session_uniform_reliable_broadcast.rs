@@ -6,7 +6,7 @@
 //! Cachin, Guerraoui & Rodrigues, Module 3.3 and Algorithm 3.4 ("All-Ack"), with **one** clause
 //! added and nothing else changed.
 //!
-//! # Why this rung stays live where the reliable one does not
+//! # Why this protocol stays live where the reliable one does not
 //!
 //! Over a session link a message can be lost with the session that carried it. Algorithm 3.4 then
 //! waits for an acknowledgement that will never come, and nobody delivers — a validity failure.
@@ -75,8 +75,6 @@ pub enum Wire<P> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {
-    /// Begin failure detection. Required before any delivery can complete.
-    Start,
     Broadcast(P),
 }
 
@@ -317,9 +315,14 @@ impl<P: Clone> Protocol for SessionUniformReliableBroadcast<P> {
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Durable = core::convert::Infallible;
 
+    /// Failure detection begins here, as Module 2.6 has it. It used to need a `Start` command
+    /// because there was no init event to hang the detector's first timer on.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.with_detector(cx, |d, ccx| d.on_init(ccx));
+    }
+
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
-            Cmd::Start => self.with_detector(cx, |d, ccx| d.on_cmd(pfd::Cmd::Start, ccx)),
             Cmd::Broadcast(msg) => {
                 self.seq += 1;
                 let id = BroadcastId { origin: self.me, seq: self.seq };

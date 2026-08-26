@@ -74,7 +74,7 @@ exists to pass.
 All three protocols here have children that store nothing: Algorithm 2.3 is over the stubborn
 link, and Algorithm 3.8 over stubborn broadcast, neither of which writes anything. So the
 restriction costs nothing now, and the real design — whatever it is: a slot per participant, a
-parent that drives its child's writes explicitly, a path-indexed store — is left to the first rung
+parent that drives its child's writes explicitly, a path-indexed store — is left to the first abstraction
 that actually needs it. That is constraint 4 applied to storage: two or three by hand first.
 
 **Recovery is an event, following the book.** Algorithm 2.3 has `⟨ Recovery ⟩` distinct from
@@ -96,7 +96,7 @@ is the *uncertainty*, because every one of these algorithms has a window where i
 whether its last write landed.
 
 **Logged uniform reliable broadcast uses stubborn broadcast, not the logged link.** This is worth
-stating because it is surprising. The book's logged rungs do not stack: Algorithm 2.3 is over
+stating because it is surprising. The book's logged abstractions do not stack: Algorithm 2.3 is over
 stubborn links, Algorithm 3.7 is over stubborn links, Algorithm 3.8 is over stubborn *broadcast*.
 Each keeps its own log.
 

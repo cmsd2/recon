@@ -1,4 +1,4 @@
-//! Flooding consensus against Module 5.1 — and, because the point of this rung is the
+//! Flooding consensus against Module 5.1 — and, because the point of this protocol is the
 //! assumption underneath it, that a false suspicion genuinely splits the decision.
 
 use core::convert::Infallible;
@@ -37,11 +37,8 @@ fn fc(me: NodeId) -> Fc {
 
 /// A synchronous run — the assumption the detector, and therefore this layer, depends on.
 fn sim(seed: u64) -> Sim<Fc> {
-    let mut s: Sim<Fc> = Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, fc);
+    let s: Sim<Fc> = Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, fc);
     assert_eq!(s.delivery_bound(), Some(BOUND));
-    for n in ALL {
-        s.command(n, Cmd::Start);
-    }
     s
 }
 
@@ -139,7 +136,7 @@ fn a_round_completes_on_a_crash_indication_alone() {
     let mut r = ChaCha8Rng::seed_from_u64(0);
     let at = Time::from_millis(1);
     let mut a = fc(A);
-    step(&mut a, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    step(&mut a, Event::Init, Time::ZERO, &mut r);
 
     // A proposes, and hears its own round-1 message plus B's and C's — but never D's.
     let own = step(&mut a, Event::Cmd(Cmd::Propose(4)), Time::ZERO, &mut r);
@@ -382,7 +379,7 @@ fn a_false_suspicion_splits_the_decision() {
     });
     assert!(
         found.is_some(),
-        "no schedule split the decision — if a false suspicion cannot split it, this rung is \
+        "no schedule split the decision — if a false suspicion cannot split it, this protocol is \
          not the algorithm its specification describes"
     );
 }

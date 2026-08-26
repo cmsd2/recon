@@ -47,7 +47,7 @@ process's own relay reached them, and that relay is what they are waiting for. S
 already recorded as having the message deadlocks: this process delivers, having seen everyone relay,
 and therefore never resends the relay another process is still waiting for. Deciding when to stop
 would require an acknowledgement message, which is a new communication step and is out of scope for
-this rung.
+this protocol.
 
 This uses only the broadcast layer's directed send and the payloads the algorithm already keeps: no
 new message type and no state beyond what is required to decide delivery. Its cost is that pending

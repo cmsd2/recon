@@ -3,7 +3,7 @@
 ## Purpose
 
 Turns a lossy network into one where a message sent between correct processes eventually arrives,
-by retransmitting it indefinitely. This is the first rung of the ladder and the foundation the
+by retransmitting it indefinitely. This is the first abstraction in the sequence and the foundation the
 perfect link is built on.
 
 ## Requirements

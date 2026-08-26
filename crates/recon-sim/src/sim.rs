@@ -160,6 +160,12 @@ where
             // as one is possible rather than when something above happens to transmit.
             sim.schedule(Time::ZERO, Scheduled::Reconnect);
         }
+        // A first start, for every process: nothing has been written down, so this is the branch
+        // the book takes with ⟨ Init ⟩ rather than ⟨ Recovery ⟩.
+        let ids: Vec<NodeId> = sim.nodes.keys().copied().collect();
+        for node in ids {
+            sim.run_handler(node, |p, cx| p.on_init(cx));
+        }
         sim
     }
 
@@ -261,10 +267,13 @@ where
         // What survived, handed back as an event rather than through the constructor: the
         // algorithms that need it re-announce their log and re-send what was pending, and those
         // are effects, which a constructor cannot emit.
+        // Exactly one branch, as the book has it: something in storage means recovery, nothing
+        // means this incarnation is starting afresh and takes the first-start path instead.
         let recovered = self.storage.get(&node).cloned();
         self.trace.push(TraceEvent::Recovered { at, node, had_state: recovered.is_some() });
-        if let Some(durable) = recovered {
-            self.run_handler(node, |p, cx| p.on_recovery(durable, cx));
+        match recovered {
+            Some(durable) => self.run_handler(node, |p, cx| p.on_recovery(durable, cx)),
+            None => self.run_handler(node, |p, cx| p.on_init(cx)),
         }
 
         let due: Vec<P::Timer> = {

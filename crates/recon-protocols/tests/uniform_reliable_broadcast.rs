@@ -1,5 +1,5 @@
 //! Uniform reliable broadcast against Module 3.3 — and, because the guarantee is only meaningful
-//! by contrast, that reliable broadcast genuinely fails the case this rung is for.
+//! by contrast, that reliable broadcast genuinely fails the case this protocol is for.
 
 use core::time::Duration;
 use recon_core::{Effect, Event, NodeId, Time, step};
@@ -35,12 +35,9 @@ fn urb(me: NodeId) -> UniformReliableBroadcast<u32> {
 
 /// A synchronous run — the assumption the detector, and therefore this layer, depends on.
 fn sim(seed: u64) -> Sim<UniformReliableBroadcast<u32>> {
-    let mut s: Sim<UniformReliableBroadcast<u32>> =
+    let s: Sim<UniformReliableBroadcast<u32>> =
         Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, urb);
     assert_eq!(s.delivery_bound(), Some(BOUND));
-    for n in ALL {
-        s.command(n, Cmd::Start);
-    }
     s
 }
 
@@ -60,7 +57,7 @@ fn the_wire_multiplexes_broadcasts_and_heartbeats() {
     let mut p = urb(A);
     let mut r = rng();
 
-    let started = step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    let started = step(&mut p, Event::Init, Time::ZERO, &mut r);
     assert!(
         started.iter().any(|e| matches!(e, Effect::Send { msg: Wire::Detector(_), .. })),
         "starting must put heartbeats on the wire"
@@ -92,7 +89,7 @@ fn both_wire_variants_survive_encoding() {
 fn a_repeat_receipt_records_the_acknowledgement_but_does_not_relay() {
     let mut p = urb(B);
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    step(&mut p, Event::Init, Time::ZERO, &mut r);
 
     // Build a message from A as it would arrive.
     let mut a = urb(A);
@@ -114,7 +111,7 @@ fn a_repeat_receipt_records_the_acknowledgement_but_does_not_relay() {
     // C's relay of the same message is a *different* wire message — it carries C's own perfect
     // link identifier — so it is not suppressed as a duplicate below.
     let mut c = urb(C);
-    step(&mut c, Event::Cmd(Cmd::Start), Time::ZERO, &mut r);
+    step(&mut c, Event::Init, Time::ZERO, &mut r);
     let c_relayed = step(&mut c, Event::Msg { from: A, msg: to_b }, Time::from_millis(1), &mut r);
     let c_to_b = c_relayed
         .iter()
@@ -273,9 +270,9 @@ fn uniform_agreement_holds_through_partition_and_healing() {
     }
 }
 
-// ------------------------- that the tests distinguish this rung: tasks 3.1 to 3.3
+// ------------------------- that the tests distinguish this protocol: tasks 3.1 to 3.3
 
-/// The book's Figure 3.3, which is exactly what separates these two rungs: the processes that
+/// The book's Figure 3.3, which is exactly what separates these two abstractions: the processes that
 /// deliver crash before their relays can escape, leaving the survivors never delivering.
 ///
 /// Engineered with a partition so relays cannot cross, then crashing both deliverers before it
@@ -314,7 +311,7 @@ fn reliable_broadcast_does_violate_uniform_agreement_under_the_same_test() {
     });
     assert!(
         split.is_some(),
-        "the test does not distinguish the rungs: reliable broadcast never split"
+        "the test does not distinguish the abstractions: reliable broadcast never split"
     );
 }
 
@@ -324,9 +321,6 @@ fn uniform_reliable_broadcast_does_not_split_under_the_same_test() {
     // some processes deliver what the others will never see.
     for seed in 0..20u64 {
         let c = figure_3_3(seed, urb, |s| {
-            for n in ALL {
-                s.command(n, Cmd::Start);
-            }
             s.command(A, Cmd::Broadcast(1));
         });
         let any = c.iter().any(|x| *x > 0);
@@ -356,9 +350,6 @@ fn uniform_agreement_breaks_when_the_timing_assumption_is_withdrawn() {
     let broke = (0..30u64).any(|seed| {
         let mut s: Sim<UniformReliableBroadcast<u32>> =
             Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, urb);
-        for n in ALL {
-            s.command(n, Cmd::Start);
-        }
         s.partition(&[&[A, B], &[C, D]]);
         s.command(A, Cmd::Broadcast(1));
         // Long enough for A and B to accuse C and D of crashing, which they have not.
@@ -385,9 +376,6 @@ fn the_detector_does_accuse_the_unreachable_side_of_a_partition() {
     // delivery.
     let mut s: Sim<UniformReliableBroadcast<u32>> =
         Sim::new(Config::default().seed(1).synchronous(BOUND), &ALL, urb);
-    for n in ALL {
-        s.command(n, Cmd::Start);
-    }
     s.partition(&[&[A, B], &[C, D]]);
     s.run_for(detect_after() * 4);
 

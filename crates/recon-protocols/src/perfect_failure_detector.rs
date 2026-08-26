@@ -13,7 +13,7 @@
 //! ```
 //!
 //! **This protocol's guarantees are conditional on a timing assumption, and it is the first in
-//! this repository that has one.** Every rung below is correct in an asynchronous model: it
+//! this repository that has one.** Every abstraction below is correct in an asynchronous model: it
 //! assumes nothing about how long a message takes. Perfect detection is impossible there — a live
 //! process whose messages are merely slow is indistinguishable from a dead one, so any detector
 //! either accuses the living or never accuses the dead.
@@ -45,7 +45,7 @@
 //!   its own send is accused, though it is alive and the network kept its promise. Beating every
 //!   `period` and accusing only after `timeout` of silence tolerates a stall shorter than
 //!   `timeout − period − Δ`. Accuracy still requires `timeout > period + Δ`.
-//! - `⟨P, Init⟩` is not a separate event; `new` establishes the same state, and the first timer is
+//! - `⟨P, Init⟩` *is* the init event, and this protocol has no commands at all. The first timer is
 //!   armed on the first tick request from the layer above.
 
 use core::time::Duration;
@@ -57,12 +57,11 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat;
 
-/// Requests from the layer above.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Cmd {
-    /// Begin detecting. Idempotent — a second start does not arm a second timer.
-    Start,
-}
+/// Requests from the layer above: none.
+///
+/// Detection begins at initialisation, as Module 2.6 has it, so there is nothing to ask for. An
+/// uninhabited type says so in a way the compiler checks.
+pub type Cmd = core::convert::Infallible;
 
 /// Indications to the layer above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -172,7 +171,11 @@ impl Protocol for PerfectFailureDetector {
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Durable = core::convert::Infallible;
 
-    fn on_cmd(&mut self, Cmd::Start: Cmd, cx: &mut ProtoCx<'_, Self>) {
+    /// `⟨ P, Init ⟩ do alive := Π; detected := ∅; starttimer(Δ)`.
+    ///
+    /// The book's own trigger, now that there is one. It used to be a `Start` command because
+    /// there was no init event to hang the first timer on; there is, so there is no command.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
         if self.armed {
             return;
         }
@@ -180,6 +183,10 @@ impl Protocol for PerfectFailureDetector {
         self.assume_alive(cx.now());
         self.beat(cx);
         cx.set_timer(self.period, Tick);
+    }
+
+    fn on_cmd(&mut self, cmd: Cmd, _cx: &mut ProtoCx<'_, Self>) {
+        match cmd {}
     }
 
     fn on_msg(&mut self, from: NodeId, Heartbeat: Heartbeat, cx: &mut ProtoCx<'_, Self>) {

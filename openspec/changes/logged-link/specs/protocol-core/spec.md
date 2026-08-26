@@ -49,21 +49,37 @@ makes a store effect impossible to construct for it.
 - **THEN** the answer is the declared durable type, not a convention about which fields are
   written
 
-### Requirement: Recovery is an event, distinct from initialisation
+### Requirement: Startup is a branch, and exactly one side runs
 
-A process that restarts SHALL be given its retrieved durable state through a recovery entry point
-distinct from construction, so that a protocol can act on recovering — re-indicating what it
-already log-delivered, or re-sending what is still pending — rather than merely existing again.
+A protocol SHALL have two startup entry points — initialisation and recovery — of which **exactly
+one** runs. A process with nothing in storage is initialised; a process with something is given it
+and recovered. Both SHALL be able to emit effects.
+
+The constructor cannot serve as either. It runs in both cases, so it is the common prefix of the
+branch rather than one side of it, and it cannot emit effects, so first-start work that must be
+*done* rather than merely set up has nowhere to happen. Writing an initial value down is the
+standard case: repeating it on recovery would overwrite exactly what was being recovered.
 
 #### Scenario: A restarted protocol is told what survived
 
 - **WHEN** a process crashes and restarts, having written durable state before the crash
 - **THEN** the protocol is given that state on recovery, and its volatile state is empty
 
-#### Scenario: A first start is distinguishable from a recovery
+#### Scenario: A first start is initialised, not recovered
 
-- **WHEN** a process starts for the first time, with nothing in storage
-- **THEN** it is initialised rather than recovered, and can tell the difference
+- **WHEN** a process starts with nothing in storage
+- **THEN** its initialisation entry point runs and its recovery entry point does not
+
+#### Scenario: A restart is recovered, not initialised
+
+- **WHEN** a process restarts with something in storage
+- **THEN** its recovery entry point runs and its initialisation entry point does not
+
+#### Scenario: A first start can write something down
+
+- **WHEN** a protocol's first act must be durable, so that a later restart recovers rather than
+  beginning again
+- **THEN** it emits that store during initialisation, and does not repeat it on recovery
 
 #### Scenario: Recovering can produce effects
 

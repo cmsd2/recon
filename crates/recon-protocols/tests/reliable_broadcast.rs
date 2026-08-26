@@ -1,5 +1,5 @@
 //! Reliable broadcast against Module 3.2: validity, no duplication, no creation, and the
-//! property that distinguishes this rung — agreement when the sender crashes.
+//! property that distinguishes this protocol — agreement when the sender crashes.
 
 use core::time::Duration;
 use rand::SeedableRng;
@@ -221,7 +221,7 @@ fn agreement_is_not_vacuous_some_seed_actually_delivers() {
     );
 }
 
-// --------------------------- the test must distinguish the two rungs: task 2.4
+// --------------------------- the test must distinguish the two abstractions: task 2.4
 
 /// The same scenario against best-effort broadcast, which makes no agreement promise.
 fn beb_sender_crash_outcome(seed: u64, settle: Duration) -> Vec<usize> {
@@ -249,7 +249,7 @@ fn best_effort_broadcast_does_violate_agreement_under_the_same_test() {
     });
     assert!(
         split.is_some(),
-        "the test does not distinguish the rungs: best-effort broadcast never disagreed"
+        "the test does not distinguish the abstractions: best-effort broadcast never disagreed"
     );
 }
 

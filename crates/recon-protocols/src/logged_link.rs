@@ -11,7 +11,7 @@
 //! # The indication carries the log, not the message
 //!
 //! This is the whole of what the fail-recovery model changes about an interface, and the reason
-//! this rung sits at the bottom of the stack where it can be seen.
+//! this protocol sits at the bottom of the stack where it can be seen.
 //!
 //! A crash-stop protocol notifies the layer above by triggering `⟨ Deliver | m ⟩` once. A
 //! crash-recovery protocol cannot. It may crash immediately afterwards, and then neither it nor
@@ -58,18 +58,11 @@
 //!
 //! # Departures from the page
 //!
-//! - **`⟨ Init ⟩` is omitted, and with it the initial `store(∅)`.** The book has both handlers and
-//!   exactly one fires at startup: a first start runs `Init`, a restart runs `Recovery`. The
-//!   initial store is what makes that work — it puts an empty set in storage so that `retrieve` on
-//!   any later restart finds *something* rather than being undefined.
-//!
-//!   Here a process with nothing in storage is *constructed*, and `on_recovery` is called only
-//!   when something survived, so the distinction is drawn by which of the two happened rather than
-//!   by a write that says nothing. The two are not observably identical: after a crash that
-//!   preceded any real write, the book triggers `⟨ Deliver | ∅ ⟩` and this does not announce
-//!   anything at all. That is benign — an empty log tells the layer above nothing it does not
-//!   already have, and a layer above that has just been constructed is empty too — but it is a
-//!   difference, not merely a simplification.
+//! - None worth the name for initialisation: `⟨ Init ⟩` and `⟨ Recovery ⟩` are both here, exactly
+//!   one fires, and `Init` performs the book's initial `store(∅)`. That write is what makes the
+//!   branch real rather than emergent — after it, storage holds something, so every later restart
+//!   recovers. The constructor does volatile setup only, because it runs in both cases and cannot
+//!   emit effects.
 //! - `delivered` is keyed by sender and a per-sender sequence number rather than by message
 //!   content, for the reason [`crate::perfect_link`] gives: identical content sent twice is two
 //!   messages and must be delivered twice.
@@ -226,6 +219,15 @@ impl<P: Clone + Ord> Protocol for LoggedLink<P> {
     type Scope = core::convert::Infallible;
     /// The log, in full. It is the only thing this layer would miss after a crash.
     type Durable = Log<P>;
+
+    /// `⟨ lpl, Init ⟩ do delivered := ∅; store(delivered)`.
+    ///
+    /// The initial write is what makes the book's branch real: after it, storage holds something,
+    /// so every later restart takes the recovery path rather than starting afresh. A protocol
+    /// whose first act must be written down — an epoch, say — depends on exactly this.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        cx.store(self.delivered.clone());
+    }
 
     fn on_cmd(&mut self, Cmd::Send { to, msg }: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

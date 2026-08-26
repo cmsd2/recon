@@ -117,8 +117,6 @@ pub enum Wire<P> {
 /// Requests from the layer above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {
-    /// Begin failure detection. Required before any delivery can complete.
-    Start,
     Broadcast(P),
 }
 
@@ -335,9 +333,14 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Durable = core::convert::Infallible;
 
+    /// Failure detection begins here, as Module 2.6 has it. It used to need a `Start` command
+    /// because there was no init event to hang the detector's first timer on.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.with_detector(cx, |d, ccx| d.on_init(ccx));
+    }
+
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
-            Cmd::Start => self.with_detector(cx, |d, ccx| d.on_cmd(pfd::Cmd::Start, ccx)),
             Cmd::Broadcast(msg) => {
                 self.seq += 1;
                 let id = BroadcastId { origin: self.me, seq: self.seq };

@@ -115,7 +115,7 @@ fn the_log_is_durable_before_the_announcement_even_across_a_crash() {
 
 #[test]
 fn no_duplication_holds_across_a_restart() {
-    // The property this rung exists for. B log-delivers, crashes, restarts, and the sender is
+    // The property this protocol exists for. B log-delivers, crashes, restarts, and the sender is
     // still retransmitting — as a stubborn link always is. The durable record suppresses it.
     let mut s = sim(3);
     s.command(A, Cmd::Send { to: B, msg: 4 });

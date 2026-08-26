@@ -1,5 +1,5 @@
 //! Majority-ack uniform reliable broadcast against Module 3.3 — and, because the point of this
-//! rung is what it stopped assuming, that the schedule which breaks the all-ack version leaves
+//! abstraction is what it stopped assuming, that the schedule which breaks the all-ack version leaves
 //! this one intact.
 //!
 //! Five processes throughout, not four. With four, the schedule that breaks all-ack's uniform
@@ -95,9 +95,6 @@ fn no_failure_detection_traffic_is_sent() {
         Sim::new(Config::default().seed(2).synchronous(BOUND), &ALL, |me| {
             UniformReliableBroadcast::new(me, ALL, retransmit(), heartbeat(), detect_after())
         });
-    for n in ALL {
-        chatty.command(n, allack::Cmd::Start);
-    }
     chatty.run_for(detect_after() * 4);
     assert!(
         chatty.trace().send_count() > 0,
@@ -301,9 +298,6 @@ fn all_ack_split(seed: u64) -> Vec<usize> {
     let mut s: Sim<Aurb> = Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, |me| {
         UniformReliableBroadcast::new(me, ALL, retransmit(), heartbeat(), detect_after())
     });
-    for n in ALL {
-        s.command(n, allack::Cmd::Start);
-    }
     s.partition(&[&[A, B, C], &[D, E]]);
     s.command(A, allack::Cmd::Broadcast(1));
     s.run_for(detect_after() * 4);

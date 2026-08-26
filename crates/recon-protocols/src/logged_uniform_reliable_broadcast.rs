@@ -53,7 +53,7 @@
 //!
 //! # Why the child is stubborn broadcast and not the logged link
 //!
-//! The book's logged rungs do not stack: Algorithm 2.3 is over stubborn links, and this one is
+//! The book's logged abstractions do not stack: Algorithm 2.3 is over stubborn links, and this one is
 //! over stubborn *broadcast*. Each keeps its own log. A perfect link's deduplication is volatile,
 //! so after a restart it would re-deliver anyway — the deduplication buys nothing a logged layer
 //! above does not already do for itself, and it is the **retransmission** a recovered process
@@ -61,8 +61,7 @@
 //!
 //! # Departures from the page
 //!
-//! - `⟨ Init ⟩` writing two empty sets is omitted, for the reason [`crate::logged_link`] gives:
-//!   a process that has written nothing is constructed rather than recovered.
+//! - `⟨ Init ⟩` is here and performs the book's initial store, as [`crate::logged_link`] does.
 //! - `pending` and `delivered` are written together as one value, because the durable state is
 //!   one value in full — see [`recon_core::Protocol::Durable`]. The book stores them separately;
 //!   nothing here depends on the difference.
@@ -256,6 +255,11 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
     type Scope = core::convert::Infallible;
     /// `pending` and `delivered`, in one value. `ack` is not here, by design.
     type Durable = Logged<P>;
+
+    /// `⟨ lurb, Init ⟩ do delivered := ∅; pending := ∅; ...; store(pending, delivered)`.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        cx.store(self.log.clone());
+    }
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

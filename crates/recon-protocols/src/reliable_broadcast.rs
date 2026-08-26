@@ -26,7 +26,7 @@
 //!
 //! The relay is unconditional on first delivery — the book's *eager* scheme. Algorithm 3.2, the
 //! lazy variant, relays only when a perfect failure detector reports the sender crashed; that
-//! rung of the ladder does not exist here, and eager needs no failure detector at all. It pays
+//! abstraction below does not exist here, and eager needs no failure detector at all. It pays
 //! for that in messages.
 //!
 //! Scope tags, in the notation of `docs/scope-annotated-modules.md`:

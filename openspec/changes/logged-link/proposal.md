@@ -19,7 +19,7 @@ indication happened. The book's answer, which this change adopts, is that the in
 > variable *delivered* in stable storage (which log-delivers messages according to the text).
 
 That is a different shape of promise, and it belongs at the bottom of the stack where it can be
-seen rather than three rungs up where it would be discovered.
+seen rather than three abstractions up where it would be discovered.
 
 ## What Changes
 
@@ -68,12 +68,12 @@ attempted here: bounding changes the guarantee to a scope, and that is a change 
 - `recon-sim`: per-process storage in the deterministic state, a write-latency knob, and a
   crash-during-write fault.
 - Three new modules in `recon-protocols`, three new test suites.
-- **A scope consequence worth stating plainly.** The book's logged rungs do **not** stack on one
+- **A scope consequence worth stating plainly.** The book's logged abstractions do **not** stack on one
   another: Algorithm 2.3 builds on stubborn links, Algorithm 3.7 builds on stubborn links, and
   Algorithm 3.8 builds on stubborn *broadcast*. Each keeps its own log. So the second consumer does
   not prove that the new indication shape composes upward — it proves that one storage primitive
   serves two independent consumers, which is a different and lesser claim. Adding stubborn
   broadcast is a consequence of choosing that second consumer, not an expansion beyond it.
 - `README.md`: three rows, and a note on what the fail-recovery model changes.
-- The bounded-space position gets worse before it gets better: these are the first rungs whose
+- The bounded-space position gets worse before it gets better: these are the first abstractions whose
   unbounded state is on disk.
