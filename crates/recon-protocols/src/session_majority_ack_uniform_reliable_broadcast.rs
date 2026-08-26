@@ -311,7 +311,7 @@ impl<P: Clone> Protocol for SessionMajorityAckUniformReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_timer(token, ccx));
     }
 
-    fn on_scope_end(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
-        self.with_beb(cx, |beb, ccx| beb.on_scope_end(event, ccx));
+    fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_scope_event(event, ccx));
     }
 }

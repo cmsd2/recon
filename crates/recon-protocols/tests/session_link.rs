@@ -78,13 +78,13 @@ fn state_does_not_grow_with_messages() {
 
     step(
         &mut p,
-        Event::ScopeEnd(SessionEvent::Established { peer: A, epoch: 2 }),
+        Event::ScopeEvent(SessionEvent::Established { peer: A, epoch: 2 }),
         Time::ZERO,
         &mut r,
     );
     step(
         &mut p,
-        Event::ScopeEnd(SessionEvent::Established { peer: B, epoch: 2 }),
+        Event::ScopeEvent(SessionEvent::Established { peer: B, epoch: 2 }),
         Time::ZERO,
         &mut r,
     );

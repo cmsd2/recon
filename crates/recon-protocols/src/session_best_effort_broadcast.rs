@@ -172,7 +172,7 @@ impl<P: Clone> Protocol for SessionBestEffortBroadcast<P> {
         self.with_link(cx, |link, ccx| link.on_timer(t, ccx));
     }
 
-    fn on_scope_end(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
-        self.with_link(cx, |link, ccx| link.on_scope_end(event, ccx));
+    fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+        self.with_link(cx, |link, ccx| link.on_scope_event(event, ccx));
     }
 }

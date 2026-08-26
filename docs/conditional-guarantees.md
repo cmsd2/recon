@@ -88,6 +88,14 @@ The link port gains exactly one event:
 - **`SessionChanged { peer, epoch }`** — the transport session ended and a new one began.
   Anything in flight may have been lost. Bridgeable by resending what was unacknowledged.
 
+  *As built, this is two events rather than one:* `SessionEvent::Ended { peer, epoch }` names the
+  epoch that ended, and `SessionEvent::Established { peer, epoch }` the one now in force. One
+  event conflates them, and the conflation costs the layer above the only thing it can act on.
+  At the moment a session ends the next epoch is not a fact and may never become one — the peer
+  may be gone for ever — so an ending cannot carry it. And the ending is not when to resend:
+  anything sent then goes nowhere. Every resend clause in this repository fires on
+  `Established`, and nothing fires on `Ended`.
+
 **And no more than that.** It is tempting to add a second event distinguishing "the peer
 reconnected" from "the peer restarted and forgot everything", because the two have very different
 consequences: after a restart the peer's deduplication set is gone, so resending may produce
@@ -114,9 +122,10 @@ book has it — and both are observable by the process itself and can produce ef
 the work goes: retrieving what survived, re-announcing it, writing down what a first start must
 remember. A constructor cannot serve, because it runs in both cases and emits nothing.
 
-`SessionChanged` should be **additive**: the textbook implementation over the simulator never
-emits it, so every existing proof and test stays valid, while every layer written from now on is
-forced to decide what it does about it.
+The session events are **additive**, and stayed so: the textbook implementation over the
+simulator never emits them — its `Scope` is uninhabited, so it cannot — and every existing proof
+and test stays valid, while every layer written since is forced to decide what it does about
+them.
 
 ## What the simulator can and cannot express
 
@@ -191,6 +200,9 @@ Events:
     Request:    ⟨ pl, Send | q, m ⟩
     Indication: ⟨ pl, Deliver | p, m ⟩
     Indication: ⟨ pl, SessionChanged | q, e ⟩     ends session(q)
+                                                 (as built: Ended | q, e — which ends it —
+                                                  and Established | q, e′, which begins the
+                                                  successor and is where a bridge acts)
 
 Properties:
     PL1 [session(q)]   Reliable delivery: if a correct p sends m to a correct q,
@@ -249,12 +261,13 @@ re-explained per module.
 
 ## Keeping the book versions and the real versions side by side
 
-The obvious worry about adding `SessionChanged` is that it infects everything. It would, if it
+The obvious worry about adding a session event is that it infects everything. It would, if it
 were a variant of the link's `Ind`: every layer above would have to match a case the textbook
 stack can never produce, and the algorithms would fill with dead branches — the opposite of code
 that reads like the page.
 
-It does not infect them if scope ends are their **own associated type** rather than an indication.
+It does not infect them if scope events are their **own associated type** rather than an
+indication.
 
 ```rust
 trait Protocol {
@@ -264,7 +277,8 @@ trait Protocol {
     type Timer;
     type Scope;                                   // the notation's `Scopes:` section
 
-    fn on_scope_end(&mut self, _s: Self::Scope, _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_scope_event(&mut self, _s: Self::Scope, _cx: &mut ProtoCx<'_, Self>) {}
+    // ...and the driver's `Event::ScopeEvent(s)` is what dispatches to it.
 }
 ```
 
@@ -273,7 +287,7 @@ The book version declares that it has no scope conditions, and writes no handler
 ```rust
 impl Protocol for PerfectLink<P> {
     type Scope = core::convert::Infallible;       // every property [always]
-    // no on_scope_end — nothing to write, and no branch to read past
+    // no on_scope_event — nothing to write, and no branch to read past
 }
 ```
 
@@ -281,29 +295,52 @@ The session-aware version declares what it is bounded by, and handles it:
 
 ```rust
 impl Protocol for SessionLink<P> {
-    type Scope = SessionScope;                    // SessionChanged, and nothing more
-    fn on_scope_end(&mut self, s: SessionScope, cx: &mut ProtoCx<'_, Self>) { … }
+    type Scope = SessionEvent;                    // Ended and Established, and nothing more
+    fn on_scope_event(&mut self, s: SessionEvent, cx: &mut ProtoCx<'_, Self>) { … }
 }
 ```
 
 Two properties make this work, and both were checked rather than assumed:
 
-- **A scope end cannot be constructed for the book version.** `Infallible` is uninhabited, so
+- **A scope event cannot be constructed for the book version.** `Infallible` is uninhabited, so
   there is no value to pass. A driver generic over `P` cannot inject one; the impossibility is a
   type error, not a convention.
 - **An exhaustive match on an uninhabited type needs zero arms.** Where a handler is written
   generically, `match s {}` is complete, so nothing is ever unreachable-by-comment.
 
-`Scope` then behaves exactly like `Msg`, `Ind` and `Timer` under composition: a parent that
-**bridges** handles the child's scope end and emits nothing upward; a parent that **propagates**
-re-wraps it into its own `Scope` type, the same way it re-wraps messages and timers. The
-notation's *Bridges / Propagates* section and the code become the same statement again.
+**This is built, and one thing about it did not turn out as sketched above.** `Scope` does *not*
+behave like `Msg`, `Ind` and `Timer` under composition, and `with_child` takes no fourth mapper.
 
-**The cost is real ceremony.** A fifth associated type on every protocol, a `type Scope =
-Infallible;` line on every textbook abstraction, and a fourth mapper in every composition call — all to
-serve a layer that does not exist yet.
+Messages, indications and timers are re-wrapped at each boundary because each layer has its own
+vocabulary for them. A scope has no such vocabulary: it is a fact about the transport underneath
+the whole stack, and every layer that cares about it cares about the *same* fact. So the concrete
+`SessionEvent` — the bottom layer's type — is what the driver hands to the top, and each parent
+routes it down unchanged to the child that owns the link:
 
-**So: not now.** This is recorded as the intended mechanism, verified to compile, to be added
-when the session-aware link is actually written. Adding it earlier would be building the
-abstraction before its second consumer, which is the failure this project already documented.
-The retrofit is contained: one associated type, and `Infallible` on each existing protocol.
+```rust
+fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+    // Routed down so the link can record it and report it back up. This layer takes no other
+    // action: it has nothing to resend.
+    self.with_beb(cx, |beb, ccx| beb.on_scope_event(event, ccx));
+}
+```
+
+A mapper would have bought a renaming of something nobody renames. What the *Bridges /
+Propagates* distinction turns into is therefore not two ways of re-wrapping but two ways of
+answering: a layer that **bridges** handles the event, resends what it must, and emits nothing
+upward; a layer that **propagates** raises an indication of its own — `Ind::SessionEnded`,
+`Ind::SessionEstablished` — so the layer above it can act. Every session-aware module here does
+both: it routes the event down, and it reports upward, because a layer that cannot bridge must
+propagate and the ones that *can* bridge still owe the report.
+
+**The handler is `on_scope_event`, not `on_scope_end`, and the name was corrected once the code
+existed.** A scope *beginning* travels the same path: `SessionEvent::Established` is what a
+resend clause fires on, and it is the only event on which a resend can succeed. Definition 2 is
+written in terms of endings because an ending is what threatens a guarantee, but the port has to
+carry both — naming a loss with no event on which to repair it would be naming a problem and
+withholding the answer. See `session_uniform_reliable_broadcast`, whose added clause is triggered
+by an establishment and by nothing else.
+
+**The cost was the ceremony predicted.** A fifth associated type on every protocol and a
+`type Scope = Infallible;` line on every textbook abstraction — but no fourth mapper, and no dead
+branch anywhere: the transcriptions are uninhabited and write no handler at all.

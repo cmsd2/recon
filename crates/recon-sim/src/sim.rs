@@ -34,7 +34,7 @@ enum Scheduled<P: Protocol> {
         node: NodeId,
         cmd: P::Cmd,
     },
-    ScopeEnd {
+    ScopeEvent {
         node: NodeId,
         scope: P::Scope,
     },
@@ -357,11 +357,11 @@ where
                 let at = self.now + self.config.reconnect_interval;
                 self.schedule(at, Scheduled::Reconnect);
             }
-            Scheduled::ScopeEnd { node, scope } => {
+            Scheduled::ScopeEvent { node, scope } => {
                 if self.crashed(node) {
                     return;
                 }
-                self.run_handler(node, |p, cx| p.on_scope_end(scope, cx));
+                self.run_handler(node, |p, cx| p.on_scope_event(scope, cx));
             }
             Scheduled::Timer { node, token } => {
                 if self.suspended(node) {
@@ -649,7 +649,7 @@ where
             for (node, peer) in [(key.0, key.1), (key.1, key.0)] {
                 if !self.crashed(node) {
                     let scope = f(SessionEvent::Ended { peer, epoch });
-                    self.schedule(at, Scheduled::ScopeEnd { node, scope });
+                    self.schedule(at, Scheduled::ScopeEvent { node, scope });
                 }
             }
         }
@@ -707,7 +707,7 @@ where
             for (node, peer) in [(key.0, key.1), (key.1, key.0)] {
                 if !self.crashed(node) {
                     let scope = f(SessionEvent::Established { peer, epoch });
-                    self.schedule(at, Scheduled::ScopeEnd { node, scope });
+                    self.schedule(at, Scheduled::ScopeEvent { node, scope });
                 }
             }
         }

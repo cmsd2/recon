@@ -59,6 +59,16 @@ The requirement that boundaries be *marked by interface events* is not decoratio
 ending cannot be observed cannot be reacted to, cannot be tested, and cannot appear in a proof
 obligation discharged by an implementation. Section 8 returns to this.
 
+The intervals of a partition abut, so `end(S)` for one interval and the beginning of the next name
+the same boundary, and one event could in principle mark both. **An implementation may not assume
+so.** Where an interval ends because something failed, the successor may begin much later or
+never, so the two are separate events on the interface — and only the second one is actionable.
+`recon-core`'s `SessionEvent` is `Ended { peer, epoch }` and `Established { peer, epoch }` for
+exactly this reason, and `end(S)` below should be read as naming the boundary rather than
+asserting that a single event marks it. BRIDGE's stitching obligation (§6) is discharged at the
+beginning of the successor interval, never at the end of the one that failed: at that moment
+there is nothing to send over.
+
 It also constrains *which* module may use a given scope.
 
 > **Definition 2a (Well-formedness).** A module may tag a property with scope S only if the ends
@@ -345,8 +355,10 @@ Properties:
     PL3 [always]       No creation
 
 Bridges:    session(q), by retaining unacknowledged messages in memory (Theorem 7,
-            first case) and resending after SessionChanged — discharging BRIDGE's
-            stitching obligation for PL1.
+            first case) and resending on the *beginning* of the successor session —
+            discharging BRIDGE's stitching obligation for PL1. Not on the ending:
+            see the note after Definition 2, and `session_link` as built, whose
+            interface carries the boundary as two events.
 Propagates: nothing. The incarnation boundary is this process's own ⟨Init⟩; there is
             nobody to notify, because the process that would have raised the event
             is the one that ceased to exist.

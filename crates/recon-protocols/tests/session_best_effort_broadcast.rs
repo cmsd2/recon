@@ -65,13 +65,13 @@ fn both_session_reports_reach_the_layer_above() {
 
     let ended = step(
         &mut p,
-        Event::ScopeEnd(SessionEvent::Ended { peer: B, epoch: 1 }),
+        Event::ScopeEvent(SessionEvent::Ended { peer: B, epoch: 1 }),
         Time::ZERO,
         &mut r,
     );
     let established = step(
         &mut p,
-        Event::ScopeEnd(SessionEvent::Established { peer: B, epoch: 2 }),
+        Event::ScopeEvent(SessionEvent::Established { peer: B, epoch: 2 }),
         Time::ZERO,
         &mut r,
     );

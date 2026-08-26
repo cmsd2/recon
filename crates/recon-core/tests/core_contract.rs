@@ -422,7 +422,7 @@ impl Protocol for Scoped {
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
 
-    fn on_scope_end(&mut self, WindowClosed(n): WindowClosed, cx: &mut ProtoCx<'_, Self>) {
+    fn on_scope_event(&mut self, WindowClosed(n): WindowClosed, cx: &mut ProtoCx<'_, Self>) {
         self.lapses += 1;
         cx.indicate(Lapsed(n));
     }
@@ -431,7 +431,7 @@ impl Protocol for Scoped {
 #[test]
 fn a_protocol_with_a_scope_handles_its_ending() {
     let mut p = Scoped::default();
-    let fx = step(&mut p, Event::ScopeEnd(WindowClosed(7)), Time::ZERO, &mut rng(0));
+    let fx = step(&mut p, Event::ScopeEvent(WindowClosed(7)), Time::ZERO, &mut rng(0));
     assert_eq!(fx, vec![Effect::Indicate(Lapsed(7))]);
     assert_eq!(p.lapses, 1);
 }
@@ -570,7 +570,7 @@ fn a_first_start_is_distinguishable_from_a_recovery() {
 #[test]
 fn a_protocol_with_no_scopes_cannot_be_given_an_ending() {
     // `Echo` declares `type Scope = Infallible`, and an uninhabited type has no values — so
-    // `Event::ScopeEnd(..)` cannot be constructed for it. The absence is checked by the compiler
+    // `Event::ScopeEvent(..)` cannot be constructed for it. The absence is checked by the compiler
     // rather than trusted, which is what a `#[allow]` or a runtime panic would not give.
     //
     // The nearest expressible statement is that any such value would be absurd:
@@ -611,7 +611,7 @@ impl Protocol for Bridger {
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
 
-    fn on_scope_end(&mut self, BridgerScope::Child(w): BridgerScope, cx: &mut ProtoCx<'_, Self>) {
+    fn on_scope_event(&mut self, BridgerScope::Child(w): BridgerScope, cx: &mut ProtoCx<'_, Self>) {
         // Route down. The child's indications are consumed, not forwarded — this parent repairs
         // the lapse itself and says nothing upward.
         let child = &mut self.child;
@@ -620,7 +620,7 @@ impl Protocol for Bridger {
             |_: ()| (),
             |_: ()| (),
             &mut inbox,
-            |ccx| child.on_scope_end(w, ccx),
+            |ccx| child.on_scope_event(w, ccx),
         );
         self.repaired += inbox.len() as u32;
     }
@@ -653,7 +653,7 @@ impl Protocol for Propagator {
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
 
-    fn on_scope_end(
+    fn on_scope_event(
         &mut self,
         PropagatorScope::Child(w): PropagatorScope,
         cx: &mut ProtoCx<'_, Self>,
@@ -664,7 +664,7 @@ impl Protocol for Propagator {
             |_: ()| (),
             |_: ()| (),
             &mut inbox,
-            |ccx| child.on_scope_end(w, ccx),
+            |ccx| child.on_scope_event(w, ccx),
         );
         // Re-stated in this layer's own terms rather than forwarded verbatim.
         for Lapsed(n) in inbox {
@@ -678,7 +678,7 @@ fn a_parent_that_bridges_absorbs_the_ending() {
     let mut p = Bridger { child: Scoped::default(), repaired: 0 };
     let fx = step(
         &mut p,
-        Event::ScopeEnd(BridgerScope::Child(WindowClosed(3))),
+        Event::ScopeEvent(BridgerScope::Child(WindowClosed(3))),
         Time::ZERO,
         &mut rng(0),
     );
@@ -692,7 +692,7 @@ fn a_parent_that_cannot_bridge_propagates_in_its_own_terms() {
     let mut p = Propagator { child: Scoped::default() };
     let fx = step(
         &mut p,
-        Event::ScopeEnd(PropagatorScope::Child(WindowClosed(3))),
+        Event::ScopeEvent(PropagatorScope::Child(WindowClosed(3))),
         Time::ZERO,
         &mut rng(0),
     );
@@ -711,7 +711,7 @@ fn scope_endings_route_downward_like_messages() {
     for i in 0..3 {
         step(
             &mut p,
-            Event::ScopeEnd(PropagatorScope::Child(WindowClosed(i))),
+            Event::ScopeEvent(PropagatorScope::Child(WindowClosed(i))),
             Time::ZERO,
             &mut rng(0),
         );

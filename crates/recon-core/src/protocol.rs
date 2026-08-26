@@ -33,15 +33,20 @@ pub trait Protocol {
     /// The durable entries this protocol appends: what accumulates.
     type Entry;
 
-    /// Scopes whose ending this protocol's guarantees depend on, and whose ends it can observe.
+    /// Scopes whose boundaries this protocol's guarantees depend on, and which it can observe.
     ///
     /// A guarantee is rarely absolute. It holds while some condition does — a transport session,
     /// a retention window — and the end of that condition is an event the protocol must be told
     /// about, not an implementation detail beneath it. See `docs/scope-annotated-modules.md`.
     ///
+    /// **Both** boundaries travel here, not only the ending. A scope beginning is what makes a
+    /// bridge possible at all: an ending says a suffix may be gone, and only the beginning of the
+    /// successor says where to send it again. A port carrying just the ending would name a
+    /// problem with no event on which to act.
+    ///
     /// A protocol with no such condition declares [`core::convert::Infallible`]. That is not a
-    /// convention: an uninhabited type has no values, so a scope ending cannot be constructed for
-    /// it and [`Protocol::on_scope_end`] can never be called. The absence is checked rather than
+    /// convention: an uninhabited type has no values, so a scope event cannot be constructed for
+    /// it and [`Protocol::on_scope_event`] can never be called. The absence is checked rather than
     /// trusted, and such a protocol writes no handler at all.
     ///
     /// A scope may only be named by a protocol that can observe its end. Naming one it cannot
@@ -82,14 +87,16 @@ pub trait Protocol {
     /// makes it safe to hold state not yet loaded.
     fn on_recovery(&mut self, _cx: &mut ProtoCx<'_, Self>) {}
 
-    /// Handle the ending of a scope this protocol's guarantees depended on.
+    /// Handle a boundary of a scope this protocol's guarantees depend on — its end, or the
+    /// beginning of the one that succeeds it.
     ///
-    /// Scope endings travel *downward*, like messages: they originate outside the stack and are
-    /// routed by each layer to whichever child cares. What travels back up is an indication —
-    /// a layer that cannot restore its guarantee says so in its own terms.
+    /// Scope events travel *downward*, like messages: they originate outside the stack and are
+    /// routed by each layer to whichever child cares, in the concrete type the bottom layer
+    /// declares. What travels back up is an indication — a layer that cannot restore its
+    /// guarantee says so in its own terms.
     ///
     /// The default does nothing, which is unreachable for a protocol whose `Scope` is uninhabited.
-    fn on_scope_end(&mut self, _scope: Self::Scope, _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_scope_event(&mut self, _scope: Self::Scope, _cx: &mut ProtoCx<'_, Self>) {}
 }
 
 /// The context type for a given protocol.
@@ -116,7 +123,7 @@ pub enum Event<C, M, T, S> {
     },
     Timer(T),
     /// A scope this protocol's guarantees depended on has ended.
-    ScopeEnd(S),
+    ScopeEvent(S),
     /// This process is starting for the first time, with nothing written down.
     Init,
     /// This process restarted, and something it wrote down survived.
@@ -165,7 +172,7 @@ pub fn step_in<P: Protocol + ?Sized>(
             Event::Cmd(c) => p.on_cmd(c, &mut cx),
             Event::Msg { from, msg } => p.on_msg(from, msg, &mut cx),
             Event::Timer(t) => p.on_timer(t, &mut cx),
-            Event::ScopeEnd(s) => p.on_scope_end(s, &mut cx),
+            Event::ScopeEvent(s) => p.on_scope_event(s, &mut cx),
             Event::Init => p.on_init(&mut cx),
             Event::Recovery => p.on_recovery(&mut cx),
         }

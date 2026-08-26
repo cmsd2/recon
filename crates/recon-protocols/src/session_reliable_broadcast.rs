@@ -201,9 +201,9 @@ impl<P: Clone> Protocol for SessionReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_timer(t, ccx));
     }
 
-    fn on_scope_end(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+    fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
         // Routed down so the link can record it and report it back up. This layer takes no other
         // action: it has nothing to resend.
-        self.with_beb(cx, |beb, ccx| beb.on_scope_end(event, ccx));
+        self.with_beb(cx, |beb, ccx| beb.on_scope_event(event, ccx));
     }
 }

@@ -106,7 +106,7 @@ impl<P: Clone> Protocol for SessionLink<P> {
 
     fn on_timer(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
 
-    fn on_scope_end(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+    fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
         // The one thing this link exists to do that a perfect link cannot: say so. Both events
         // are reported — the ending because a suffix may be gone, the establishment because it is
         // the only moment on which anything can be resent.

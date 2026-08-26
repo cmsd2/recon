@@ -345,8 +345,8 @@ impl<P: Clone> Protocol for SessionUniformReliableBroadcast<P> {
         }
     }
 
-    fn on_scope_end(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
+    fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
         // Routed to the broadcast child, which owns the link. The detector has no scopes.
-        self.with_beb(cx, |beb, ccx| beb.on_scope_end(event, ccx));
+        self.with_beb(cx, |beb, ccx| beb.on_scope_event(event, ccx));
     }
 }
