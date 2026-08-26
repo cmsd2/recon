@@ -55,6 +55,30 @@
 //! minority catches up through the same resend clause. Compare the all-ack version, where each
 //! side accuses the other and both proceed — which is a split, and permanent.
 //!
+//! # What each property is scoped by
+//!
+//! ```text
+//! URB1 [always]       Validity — conditional on the reachability below
+//! URB2 [incarnation]  No duplication — `delivered` is volatile, so a restart forgets it
+//! URB3 [always]       No creation
+//! URB4 [always]       Uniform agreement — conditional on the reachability below
+//! ```
+//!
+//! `URB2` is `[incarnation]` by `docs/scope-annotated-modules.md` Corollary 7.2: the redundancy
+//! that would have to survive is the `delivered` set, it is held in memory, and the boundary it
+//! cannot cross is this process's own `⟨Init⟩`.
+//!
+//! `URB1` and `URB4` are `[always]` **only while a majority remains mutually reachable**, which
+//! is the assumption stated at the top and not a property of this code. A partition leaving no
+//! side with more than `N/2` blocks both sides rather than splitting them, and both properties
+//! survive the block — nothing is delivered that should not be. What does not survive a
+//! *permanent* split is liveness: the layer waits for ever, which is the honest outcome and the
+//! one the all-ack version cannot offer, because its detector's accusations let both sides
+//! proceed. See `without_a_majority_the_layer_blocks_rather_than_diverges`.
+//!
+//! Unlike [`crate::session_uniform_reliable_broadcast`], no timing assumption is among them:
+//! removing the detector removed the synchrony it needed, not just a dependency.
+//!
 //! # Departures from the page
 //!
 //! - Algorithm 3.5 has no session events; the establishment clause above is this layer's, and is

@@ -23,24 +23,44 @@
 //!
 //! ```text
 //! upon event ⟨ SessionEstablished | q ⟩ do
-//!     forall (s, m) ∈ pending such that q ∉ ack[m] do
-//!         trigger ⟨ beb, Broadcast | [DATA, s, m] ⟩;
+//!     forall (s, m) ∈ pending do
+//!         trigger ⟨ beb, SendTo | q, [DATA, s, m] ⟩;
 //! ```
 //!
-//! It adds **no state** — `pending` already holds the payloads and `ack` already records who has
-//! been seen to acknowledge what, both from Algorithm 3.4 — and **no message type**: the
-//! broadcast is the one the algorithm already performs. It is a new trigger for an existing
-//! action, not a new communication step.
+//! It adds **no state** — `pending` already holds the payloads, from Algorithm 3.4 — and **no
+//! message type**: the relay is the one the algorithm already performs. It is a new trigger for
+//! an existing action, not a new communication step.
+//!
+//! Two things about that clause are deliberate and neither is what one would write first. It is
+//! **unconditional**, not filtered by `q ∉ ack[m]`: the filtered version deadlocks, for the
+//! reason set out at `resend_to` below, which is where a test found it. And it is **directed**
+//! at the peer whose session returned rather than broadcast to everyone, because the session
+//! ending was per peer and so is the repair.
 //!
 //! Nothing is attempted on a session *ending*. The peer is unreachable at that moment and anything
 //! sent would be discarded; the ending is informative, not actionable.
 //!
 //! ```text
-//! URB1 [always]  Validity
-//! URB2 [incarnation]  No duplication
-//! URB3 [always]  No creation
-//! URB4 [always]  Uniform agreement
+//! URB1 [always]       Validity — conditional on the two mechanisms below
+//! URB2 [incarnation]  No duplication — `delivered` is volatile, so a restart forgets it
+//! URB3 [always]       No creation
+//! URB4 [always]       Uniform agreement — conditional on the two mechanisms below
 //! ```
+//!
+//! `URB2` is `[incarnation]` by `docs/scope-annotated-modules.md` Corollary 7.2: the set that
+//! would have to survive is `delivered`, it is held in memory, and the boundary it cannot cross
+//! is this process's own `⟨Init⟩`.
+//!
+//! `URB1` and `URB4` are `[always]` only because *between* the two mechanisms above no third
+//! outcome is left — and each carries a condition that is an assumption rather than a property of
+//! this code. The reconnection path needs the peer to be reachable again; the accusation path
+//! needs the detector's synchrony assumption to hold, and `perfect_failure_detector` is explicit
+//! that outside a synchronous system it accuses correct processes. **Both failing at once is a
+//! permanent split**: each side of a partition accuses the other, each side has `correct ⊆
+//! ack[m]` satisfied among itself, and both deliver — which is not uniform agreement failing on a
+//! technicality but two disjoint sets of processes proceeding as though the other did not exist.
+//! The sibling [`crate::session_majority_ack_uniform_reliable_broadcast`] cannot suffer that,
+//! and blocks instead; that difference is what the quorum buys and the detector costs.
 //!
 //! Read against `session_reliable_broadcast`, which has neither mechanism and whose agreement is
 //! therefore scoped, this is the clearest statement of what a failure detector buys.

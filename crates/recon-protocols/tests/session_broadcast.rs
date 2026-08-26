@@ -144,6 +144,39 @@ fn relay_lost_to_a_session_ending(seed: u64) -> Vec<usize> {
 }
 
 #[test]
+fn rb_no_duplication_is_scoped_to_an_incarnation() {
+    // `RB2 [incarnation]`, and the reason it cannot be `[always]`: `delivered` is a set of
+    // identifiers held in memory. A recipient that crashes forgets what it delivered, and a relay
+    // that arrives afterwards — every peer relays to every peer, and a session ending keeps a
+    // random prefix of what was in flight — is a first receipt as far as it can tell.
+    //
+    // The corresponding perfect-link fact is
+    // `no_duplication_does_not_survive_the_recipient_restarting`; this is the same argument one
+    // layer up, and `docs/scope-annotated-modules.md` Corollary 7.2 is why neither can do better
+    // without stable storage.
+    let found = (0..80u64).find_map(|seed| {
+        let mut s = rb_sim(seed);
+        s.run_for(Duration::from_millis(50));
+        s.command(A, srb::Cmd::Broadcast(5));
+        s.run_for(Duration::from_millis(4)); // mid-fanout: relays to B are in flight
+        s.crash(B);
+        s.restart(B);
+        s.run_for(Duration::from_millis(500));
+        (rb_delivered(&s, B).len() > 1).then_some((seed, s))
+    });
+
+    let (seed, s) = found.expect("no seed delivered a relay to B after it had forgotten");
+    assert_eq!(
+        rb_delivered(&s, B),
+        vec![(A, 5), (A, 5)],
+        "seed {seed}: twice, because the set that would have stopped it did not survive"
+    );
+    for n in [A, C, D] {
+        assert_eq!(rb_delivered(&s, n), vec![(A, 5)], "seed {seed}: {n} still delivers once");
+    }
+}
+
+#[test]
 fn rb_agreement_is_scoped_a_lost_relay_is_never_retried() {
     // The stated limit, demonstrated rather than asserted. B and C deliver; D is correct, is
     // reachable again long before the run ends, and never hears of the message, because reliable

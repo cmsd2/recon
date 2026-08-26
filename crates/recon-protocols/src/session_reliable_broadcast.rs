@@ -21,11 +21,19 @@
 //! So when a relay is lost to a session ending, nothing retries and nothing gives up:
 //!
 //! ```text
-//! RB1 [session]  Validity
-//! RB2 [always]   No duplication
-//! RB3 [always]   No creation
-//! RB4 [session]  Agreement — within the sessions carrying the relay, and not across one
+//! RB1 [session]       Validity
+//! RB2 [incarnation]   No duplication — `delivered` is volatile, so a restart forgets it
+//! RB3 [always]        No creation
+//! RB4 [session]       Agreement — within the sessions carrying the relay, and not across one
 //! ```
+//!
+//! `RB2` is `[incarnation]` for the reason `docs/scope-annotated-modules.md` gives as Corollary
+//! 7.2, and by the same argument: the redundancy that would have to survive is `delivered`, that
+//! set is held in memory, and the boundary it cannot cross is this process's own `⟨Init⟩`. A
+//! recipient that restarts and is then relayed a message it had already delivered — which the
+//! eager relay of a peer that did *not* restart will happily do — delivers it a second time. The
+//! sibling `session_uniform_reliable_broadcast` carries the same tag for the same mechanism.
+//! `[always]` would be the claim that a volatile set survives a crash.
 //!
 //! This is not a defect to be fixed here. It is the honest reading of Algorithm 3.3 on a link that
 //! can lose a suffix, and it is exactly what the uniform version beside it does not share — that
