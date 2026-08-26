@@ -18,6 +18,7 @@ pub mod session_link;
 pub mod session_majority_ack_uniform_reliable_broadcast;
 pub mod session_reliable_broadcast;
 pub mod session_uniform_reliable_broadcast;
+pub mod stubborn_broadcast;
 pub mod stubborn_link;
 pub mod uniform_reliable_broadcast;
 
@@ -33,5 +34,6 @@ pub use session_link::SessionLink;
 pub use session_majority_ack_uniform_reliable_broadcast::SessionMajorityAckUniformReliableBroadcast;
 pub use session_reliable_broadcast::SessionReliableBroadcast;
 pub use session_uniform_reliable_broadcast::SessionUniformReliableBroadcast;
+pub use stubborn_broadcast::StubbornBroadcast;
 pub use stubborn_link::StubbornLink;
 pub use uniform_reliable_broadcast::UniformReliableBroadcast;

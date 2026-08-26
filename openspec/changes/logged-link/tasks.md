@@ -46,11 +46,11 @@
 
 ## 4. Stubborn broadcast
 
-- [ ] 4.1 Implement best-effort broadcast over stubborn links that does not deduplicate; verify
+- [x] 4.1 Implement best-effort broadcast over stubborn links that does not deduplicate; verify
       delivery repeats without bound over a long run
-- [ ] 4.2 Verify a process crashed at the moment of a broadcast delivers it after restarting — the
+- [x] 4.2 Verify a process crashed at the moment of a broadcast delivers it after restarting — the
       reason this rung exists
-- [ ] 4.3 Verify no creation, and that this layer's own state does not grow with messages received
+- [x] 4.3 Verify no creation, and that this layer's own state does not grow with messages received
 
 ## 5. Logged uniform reliable broadcast
 
