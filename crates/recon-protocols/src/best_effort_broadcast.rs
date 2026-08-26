@@ -27,7 +27,7 @@
 //! stack to contribute no header of its own.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, absurd};
 use std::collections::BTreeSet;
 
 use crate::perfect_link::{self as pl, PerfectLink};
@@ -91,11 +91,13 @@ impl<P: Clone> Protocol for BestEffortBroadcast<P> {
     type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
         let peers = &self.peers;
-        cx.with_child(core::convert::identity, forward, Timer::Link, |ccx| {
+        cx.with_child(core::convert::identity, forward, Timer::Link, absurd, |ccx| {
             for &q in peers {
                 link.on_cmd(pl::Cmd::Send { to: q, msg: msg.clone() }, ccx);
             }
@@ -104,14 +106,14 @@ impl<P: Clone> Protocol for BestEffortBroadcast<P> {
 
     fn on_msg(&mut self, from: NodeId, msg: pl::Wire<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
-        cx.with_child(core::convert::identity, forward, Timer::Link, |ccx| {
+        cx.with_child(core::convert::identity, forward, Timer::Link, absurd, |ccx| {
             link.on_msg(from, msg, ccx)
         });
     }
 
     fn on_timer(&mut self, Timer::Link(token): Timer, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
-        cx.with_child(core::convert::identity, forward, Timer::Link, |ccx| {
+        cx.with_child(core::convert::identity, forward, Timer::Link, absurd, |ccx| {
             link.on_timer(token, ccx)
         });
     }

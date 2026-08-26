@@ -169,6 +169,8 @@ impl Protocol for PerfectFailureDetector {
     type Timer = Tick;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Start: Cmd, cx: &mut ProtoCx<'_, Self>) {
         if self.armed {

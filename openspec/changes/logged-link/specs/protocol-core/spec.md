@@ -37,6 +37,12 @@ makes a store effect impossible to construct for it.
 - **THEN** no store effect can be constructed for it, and this is enforced when the code is built
   rather than when it runs
 
+#### Scenario: A storing child cannot be composed
+
+- **WHEN** a protocol attempts to compose a child that declares durable state of its own
+- **THEN** it fails to build, because no mapping from the child's durable state into the parent's
+  can be written — a parent's durable state contains its own fields as well as its child's
+
 #### Scenario: What is durable is visible in the interface
 
 - **WHEN** a reader asks what a protocol would still know after a crash

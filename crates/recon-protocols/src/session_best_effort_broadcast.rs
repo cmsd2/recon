@@ -33,7 +33,7 @@
 //! BEB3 [always]   No creation
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, absurd};
 use std::collections::BTreeSet;
 
 use crate::session_link::{self as sl, SessionLink};
@@ -119,9 +119,13 @@ impl<P: Clone> SessionBestEffortBroadcast<P> {
         inbox.clear();
         {
             let link = &mut self.link;
-            cx.with_child_consuming(core::convert::identity, Timer::Link, &mut inbox, |ccx| {
-                f(link, ccx)
-            });
+            cx.with_child_consuming(
+                core::convert::identity,
+                Timer::Link,
+                absurd,
+                &mut inbox,
+                |ccx| f(link, ccx),
+            );
         }
         for ind in inbox.drain(..) {
             match ind {
@@ -145,6 +149,8 @@ impl<P: Clone> Protocol for SessionBestEffortBroadcast<P> {
     type Timer = Timer;
     /// Passed straight through: this layer has no scope of its own, and inherits the link's.
     type Scope = SessionEvent;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         let msg = match cmd {

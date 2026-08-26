@@ -22,6 +22,22 @@ pub trait Protocol {
     /// Tokens identifying this protocol's own timers.
     type Timer;
 
+    /// What this protocol writes down so that it survives a crash.
+    ///
+    /// The value carried by [`Effect::Store`] is this type *in full*, not a delta: recovery hands
+    /// back the last one written and nothing else. Declaring it is how a reader learns what a
+    /// process would still know after restarting, without having to work out which fields happen
+    /// to get written.
+    ///
+    /// A protocol that keeps nothing durably declares [`core::convert::Infallible`], and then no
+    /// store effect can be constructed for it and [`Protocol::on_recovery`] can never be called —
+    /// the same check-rather-than-trust that [`Protocol::Scope`] uses.
+    ///
+    /// A parent may compose only a child whose durable type is uninhabited. There is no mapping
+    /// from a child's durable state into a parent's, because a parent's contains its own fields
+    /// as well; see [`crate::effect::absurd`].
+    type Durable;
+
     /// Scopes whose ending this protocol's guarantees depend on, and whose ends it can observe.
     ///
     /// A guarantee is rarely absolute. It holds while some condition does — a transport session,
@@ -46,6 +62,20 @@ pub trait Protocol {
     /// Handle a timer this protocol previously set.
     fn on_timer(&mut self, token: Self::Timer, cx: &mut ProtoCx<'_, Self>);
 
+    /// Resume from durable state after a crash.
+    ///
+    /// Distinct from construction, and deliberately: the algorithms that need it *act* on
+    /// recovering — re-announcing the log they had already delivered, re-sending what was still
+    /// pending — and those are effects, which a constructor cannot emit.
+    ///
+    /// Volatile state is whatever `new` established; `durable` is the last value stored before
+    /// the crash. A process that had written nothing is constructed and never recovered, so a
+    /// protocol can tell a first start from a restart by which of the two happened.
+    ///
+    /// The default does nothing, which is unreachable for a protocol whose `Durable` is
+    /// uninhabited.
+    fn on_recovery(&mut self, _durable: Self::Durable, _cx: &mut ProtoCx<'_, Self>) {}
+
     /// Handle the ending of a scope this protocol's guarantees depended on.
     ///
     /// Scope endings travel *downward*, like messages: they originate outside the stack and are
@@ -57,16 +87,25 @@ pub trait Protocol {
 }
 
 /// The context type for a given protocol.
-pub type ProtoCx<'a, P> =
-    Cx<'a, <P as Protocol>::Msg, <P as Protocol>::Ind, <P as Protocol>::Timer>;
+pub type ProtoCx<'a, P> = Cx<
+    'a,
+    <P as Protocol>::Msg,
+    <P as Protocol>::Ind,
+    <P as Protocol>::Timer,
+    <P as Protocol>::Durable,
+>;
 
 /// The effect type for a given protocol.
-pub type ProtoEffect<P> =
-    Effect<<P as Protocol>::Msg, <P as Protocol>::Ind, <P as Protocol>::Timer>;
+pub type ProtoEffect<P> = Effect<
+    <P as Protocol>::Msg,
+    <P as Protocol>::Ind,
+    <P as Protocol>::Timer,
+    <P as Protocol>::Durable,
+>;
 
 /// An event a protocol can be given. Used by drivers and by the test helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event<C, M, T, S> {
+pub enum Event<C, M, T, S, D> {
     Cmd(C),
     Msg {
         from: NodeId,
@@ -75,6 +114,8 @@ pub enum Event<C, M, T, S> {
     Timer(T),
     /// A scope this protocol's guarantees depended on has ended.
     ScopeEnd(S),
+    /// This process restarted, and here is what it had written down.
+    Recovery(D),
 }
 
 /// The event type for a given protocol.
@@ -83,6 +124,7 @@ pub type ProtoEvent<P> = Event<
     <P as Protocol>::Msg,
     <P as Protocol>::Timer,
     <P as Protocol>::Scope,
+    <P as Protocol>::Durable,
 >;
 
 /// Deliver one event to `p` and return the effects it emitted.
@@ -104,6 +146,7 @@ pub fn step<P: Protocol + ?Sized>(
             Event::Msg { from, msg } => p.on_msg(from, msg, &mut cx),
             Event::Timer(t) => p.on_timer(t, &mut cx),
             Event::ScopeEnd(s) => p.on_scope_end(s, &mut cx),
+            Event::Recovery(d) => p.on_recovery(d, &mut cx),
         }
     }
     effects

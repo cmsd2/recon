@@ -50,6 +50,15 @@ pub enum TraceEvent<M, I, T> {
     Suspended { at: Time, node: NodeId },
     /// A process restarted.
     Restarted { at: Time, node: NodeId },
+    /// A protocol asked for its durable state to be written. Not yet durable.
+    Storing { at: Time, node: NodeId },
+    /// A write became durable. Anything held behind it leaves the process now.
+    Stored { at: Time, node: NodeId },
+    /// A write was outstanding when the process crashed, and was lost with it.
+    WriteLost { at: Time, node: NodeId },
+    /// A restarted process was given back what it had written. `had_state` is false when it had
+    /// written nothing and started as if for the first time.
+    Recovered { at: Time, node: NodeId, had_state: bool },
 }
 
 impl<M, I, T> TraceEvent<M, I, T> {
@@ -67,7 +76,11 @@ impl<M, I, T> TraceEvent<M, I, T> {
             | TraceEvent::SuffixLost { at, .. }
             | TraceEvent::Crashed { at, .. }
             | TraceEvent::Suspended { at, .. }
-            | TraceEvent::Restarted { at, .. } => *at,
+            | TraceEvent::Restarted { at, .. }
+            | TraceEvent::Storing { at, .. }
+            | TraceEvent::Stored { at, .. }
+            | TraceEvent::WriteLost { at, .. }
+            | TraceEvent::Recovered { at, .. } => *at,
         }
     }
 }
@@ -167,6 +180,24 @@ impl<M, I, T> Trace<M, I, T> {
             TraceEvent::SessionOpened { a, b, epoch, .. } => Some((*a, *b, *epoch)),
             _ => None,
         })
+    }
+
+    /// How many writes became durable.
+    pub fn writes_completed(&self) -> usize {
+        self.events.iter().filter(|e| matches!(e, TraceEvent::Stored { .. })).count()
+    }
+
+    /// How many writes were outstanding when their process crashed, and lost with it.
+    pub fn writes_lost(&self) -> usize {
+        self.events.iter().filter(|e| matches!(e, TraceEvent::WriteLost { .. })).count()
+    }
+
+    /// How many restarts recovered durable state, as opposed to starting afresh.
+    pub fn recoveries_with_state(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Recovered { had_state: true, .. }))
+            .count()
     }
 
     pub fn timer_fires(&self) -> usize {

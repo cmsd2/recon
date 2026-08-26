@@ -1,9 +1,10 @@
 //! Verifies the protocol-core contract with the smallest protocols that exercise it.
 
+use core::convert::Infallible;
 use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Cx, Effect, EffectSink, Event, NodeId, ProtoCx, Protocol, Time, step};
+use recon_core::{Cx, Effect, EffectSink, Event, NodeId, ProtoCx, Protocol, Time, absurd, step};
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
@@ -33,6 +34,8 @@ impl Protocol for Echo {
     type Msg = Ping;
     type Timer = Tick;
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, Ping(n): Ping, cx: &mut ProtoCx<'_, Self>) {
         cx.send(B, Ping(n));
@@ -98,6 +101,8 @@ impl Protocol for Chooser {
     type Msg = ();
     type Timer = ();
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, Choose: Choose, cx: &mut ProtoCx<'_, Self>) {
         let pick: u32 = cx.rng().random_range(0..1_000_000);
@@ -187,24 +192,26 @@ impl Protocol for Wrapper {
     type Msg = WrapMsg;
     type Timer = WrapTimer;
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, absurd, |ccx| {
             child.on_cmd(cmd, ccx)
         });
     }
 
     fn on_msg(&mut self, from: NodeId, WrapMsg::Inner(inner): WrapMsg, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, absurd, |ccx| {
             child.on_msg(from, inner, ccx)
         });
     }
 
     fn on_timer(&mut self, WrapTimer::Inner(inner): WrapTimer, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, absurd, |ccx| {
             child.on_timer(inner, ccx)
         });
     }
@@ -256,20 +263,26 @@ impl Protocol for Outer {
     type Msg = OuterMsg;
     type Timer = OuterTimer;
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_cmd(cmd, ccx));
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, absurd, |ccx| {
+            inner.on_cmd(cmd, ccx)
+        });
     }
     fn on_msg(&mut self, from: NodeId, OuterMsg::Down(m): OuterMsg, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| {
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, absurd, |ccx| {
             inner.on_msg(from, m, ccx)
         });
     }
     fn on_timer(&mut self, OuterTimer::Down(t): OuterTimer, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_timer(t, ccx));
+        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, absurd, |ccx| {
+            inner.on_timer(t, ccx)
+        });
     }
 }
 
@@ -297,14 +310,16 @@ struct CountingSink {
     sends: usize,
     indications: usize,
     timers: usize,
+    stores: usize,
 }
 
-impl<M, I, T> EffectSink<M, I, T> for CountingSink {
-    fn emit(&mut self, effect: Effect<M, I, T>) {
+impl<M, I, T, D> EffectSink<M, I, T, D> for CountingSink {
+    fn emit(&mut self, effect: Effect<M, I, T, D>) {
         match effect {
             Effect::Send { .. } => self.sends += 1,
             Effect::Indicate(_) => self.indications += 1,
             Effect::SetTimer { .. } => self.timers += 1,
+            Effect::Store(_) => self.stores += 1,
         }
     }
 }
@@ -339,7 +354,7 @@ fn composition_works_against_a_non_allocating_sink() {
 #[test]
 fn a_reused_buffer_settles_its_capacity() {
     // The ordinary driver case: one Vec, reused, so allocation is amortised to nothing.
-    let mut buf: Vec<Effect<WrapMsg, WrapInd, WrapTimer>> = Vec::new();
+    let mut buf: Vec<Effect<WrapMsg, WrapInd, WrapTimer, Infallible>> = Vec::new();
     let mut r = rng(0);
     let mut w = Wrapper { child: Echo::default() };
 
@@ -361,15 +376,18 @@ fn a_reused_buffer_settles_its_capacity() {
 
 #[test]
 fn mapping_preserves_effect_shape() {
-    let e: Effect<u8, u8, u8> = Effect::Send { to: A, msg: 1 };
-    assert_eq!(e.map(|m| m + 1, |i| i, |t| t), Effect::Send { to: A, msg: 2 });
-
-    let e: Effect<u8, u8, u8> = Effect::Indicate(1);
-    assert_eq!(e.map(|m| m, |i| i + 1, |t| t), Effect::Indicate(2));
-
-    let e: Effect<u8, u8, u8> = Effect::SetTimer { after: Duration::ZERO, token: 1 };
+    let e: Effect<u8, u8, u8, Infallible> = Effect::Send { to: A, msg: 1 };
     assert_eq!(
-        e.map(|m| m, |i| i, |t| t + 1),
+        e.map(|m| m + 1, |i| i, |t| t, absurd::<Infallible>),
+        Effect::Send { to: A, msg: 2 }
+    );
+
+    let e: Effect<u8, u8, u8, Infallible> = Effect::Indicate(1);
+    assert_eq!(e.map(|m| m, |i| i + 1, |t| t, absurd::<Infallible>), Effect::Indicate(2));
+
+    let e: Effect<u8, u8, u8, Infallible> = Effect::SetTimer { after: Duration::ZERO, token: 1 };
+    assert_eq!(
+        e.map(|m| m, |i| i, |t| t + 1, absurd::<Infallible>),
         Effect::SetTimer { after: Duration::ZERO, token: 2 }
     );
 }
@@ -394,6 +412,8 @@ impl Protocol for Scoped {
     type Msg = ();
     type Timer = ();
     type Scope = WindowClosed;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
@@ -411,6 +431,100 @@ fn a_protocol_with_a_scope_handles_its_ending() {
     let fx = step(&mut p, Event::ScopeEnd(WindowClosed(7)), Time::ZERO, &mut rng(0));
     assert_eq!(fx, vec![Effect::Indicate(Lapsed(7))]);
     assert_eq!(p.lapses, 1);
+}
+
+/// A protocol that keeps something durably: a counter that survives a crash.
+///
+/// Deliberately tiny. What it exercises is the shape — store the whole durable value, get it back
+/// on recovery, and be able to emit effects while recovering.
+#[derive(Debug, Default)]
+struct Counter {
+    total: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Total(u32);
+
+impl Protocol for Counter {
+    type Cmd = u32;
+    type Ind = Total;
+    type Msg = ();
+    type Timer = ();
+    type Scope = Infallible;
+    /// The whole of what survives a crash, in one value.
+    type Durable = Total;
+
+    fn on_cmd(&mut self, add: u32, cx: &mut ProtoCx<'_, Self>) {
+        self.total += add;
+        // Written down, and only then announced. Order matters and is visible here.
+        cx.store(Total(self.total));
+        cx.indicate(Total(self.total));
+    }
+
+    fn on_msg(&mut self, _from: NodeId, _msg: (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _t: (), _cx: &mut ProtoCx<'_, Self>) {}
+
+    fn on_recovery(&mut self, Total(total): Total, cx: &mut ProtoCx<'_, Self>) {
+        self.total = total;
+        // Recovering produces an effect — which is why it is an event and not a constructor.
+        cx.indicate(Total(total));
+    }
+}
+
+#[test]
+fn a_protocol_with_no_durable_state_cannot_emit_a_store() {
+    // `Echo` declares `type Durable = Infallible`, so `Effect::Store(..)` has no value it could
+    // carry and `on_recovery` can never be called. Checked by the compiler, not trusted.
+    fn _absurd(d: <Echo as Protocol>::Durable) -> ! {
+        match d {}
+    }
+
+    // Its effects therefore never contain a store, and the default recovery handler is
+    // unreachable rather than merely unused.
+    let mut p = Echo::default();
+    let fx = step(&mut p, Event::Msg { from: A, msg: Ping(1) }, Time::ZERO, &mut rng(0));
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Store(_))));
+}
+
+#[test]
+fn what_is_durable_is_declared_and_emitted_in_full() {
+    let mut p = Counter::default();
+    let fx = step(&mut p, Event::Cmd(3), Time::ZERO, &mut rng(0));
+
+    // The store carries the whole durable value, not a delta, and precedes the announcement.
+    assert_eq!(fx, vec![Effect::Store(Total(3)), Effect::Indicate(Total(3))]);
+
+    let fx = step(&mut p, Event::Cmd(4), Time::ZERO, &mut rng(0));
+    assert_eq!(
+        fx,
+        vec![Effect::Store(Total(7)), Effect::Indicate(Total(7))],
+        "in full, not a delta"
+    );
+}
+
+#[test]
+fn a_recovered_protocol_is_given_what_survived_and_may_act_on_it() {
+    // A fresh instance, as a crash would produce: volatile state empty.
+    let mut p = Counter::default();
+    assert_eq!(p.total, 0);
+
+    let fx = step(&mut p, Event::Recovery(Total(7)), Time::ZERO, &mut rng(0));
+    assert_eq!(p.total, 7, "the durable state came back");
+    assert_eq!(fx, vec![Effect::Indicate(Total(7))], "and recovering emitted an effect");
+}
+
+#[test]
+fn a_first_start_is_distinguishable_from_a_recovery() {
+    // Nothing was stored, so nothing is recovered: the protocol is only ever constructed. The
+    // distinction is which of the two happened, and it is visible in the effects.
+    let mut fresh = Counter::default();
+    let first = step(&mut fresh, Event::Cmd(1), Time::ZERO, &mut rng(0));
+    assert_eq!(first, vec![Effect::Store(Total(1)), Effect::Indicate(Total(1))]);
+
+    let mut restarted = Counter::default();
+    let recovered = step(&mut restarted, Event::Recovery(Total(9)), Time::ZERO, &mut rng(0));
+    assert_eq!(recovered, vec![Effect::Indicate(Total(9))], "no store: nothing new was decided");
+    assert_ne!(first, recovered);
 }
 
 #[test]
@@ -449,6 +563,8 @@ impl Protocol for Bridger {
     type Msg = ();
     type Timer = ();
     type Scope = BridgerScope;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
@@ -462,6 +578,7 @@ impl Protocol for Bridger {
         cx.with_child_consuming(
             |_: ()| (),
             |_: ()| (),
+            absurd,
             &mut inbox,
             |ccx| child.on_scope_end(w, ccx),
         );
@@ -488,6 +605,8 @@ impl Protocol for Propagator {
     type Msg = ();
     type Timer = ();
     type Scope = PropagatorScope;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
@@ -503,6 +622,7 @@ impl Protocol for Propagator {
         cx.with_child_consuming(
             |_: ()| (),
             |_: ()| (),
+            absurd,
             &mut inbox,
             |ccx| child.on_scope_end(w, ccx),
         );

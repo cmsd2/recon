@@ -95,7 +95,7 @@
 //!   failure detection, without which no round can ever complete after a crash.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, absurd};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -261,7 +261,7 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut inbox, |ccx| {
+            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, absurd, &mut inbox, |ccx| {
                 f(beb, ccx)
             });
         }
@@ -283,7 +283,7 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         inbox.clear();
         {
             let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, Timer::Detector, &mut inbox, |ccx| {
+            cx.with_child_consuming(Wire::Detector, Timer::Detector, absurd, &mut inbox, |ccx| {
                 f(detector, ccx)
             });
         }
@@ -381,9 +381,13 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         send_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut send_inbox, |ccx| {
-                beb.on_cmd(beb::Cmd::Broadcast(msg), ccx)
-            });
+            cx.with_child_consuming(
+                Wire::Broadcast,
+                Timer::Broadcast,
+                absurd,
+                &mut send_inbox,
+                |ccx| beb.on_cmd(beb::Cmd::Broadcast(msg), ccx),
+            );
         }
         debug_assert!(
             send_inbox.is_empty(),
@@ -400,6 +404,8 @@ impl<P: Clone + Ord> Protocol for FloodingConsensus<P> {
     type Timer = Timer;
     /// No session beneath, so no scope end can be constructed — as for both children.
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {

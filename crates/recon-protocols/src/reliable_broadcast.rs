@@ -46,7 +46,7 @@
 //! - `⟨rb, Init⟩` is not a separate event; `new` establishes the same state.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, absurd};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -147,9 +147,13 @@ impl<P: Clone> ReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, Timer::Broadcast, &mut inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(
+                core::convert::identity,
+                Timer::Broadcast,
+                absurd,
+                &mut inbox,
+                |ccx| f(beb, ccx),
+            );
         }
         for ind in inbox.drain(..) {
             let beb::Ind::Deliver { msg: Data { id, payload }, .. } = ind;
@@ -182,6 +186,7 @@ impl<P: Clone> ReliableBroadcast<P> {
             cx.with_child_consuming(
                 core::convert::identity,
                 Timer::Broadcast,
+                absurd,
                 &mut relay_inbox,
                 |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
             );
@@ -201,6 +206,8 @@ impl<P: Clone> Protocol for ReliableBroadcast<P> {
     type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;

@@ -1,6 +1,7 @@
 //! Flooding consensus against Module 5.1 — and, because the point of this rung is the
 //! assumption underneath it, that a false suspicion genuinely splits the decision.
 
+use core::convert::Infallible;
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -169,7 +170,10 @@ fn a_round_completes_on_a_crash_indication_alone() {
 }
 
 /// The message this broadcast addressed to `to`, if any.
-fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], to: NodeId) -> Option<Wire<u32>> {
+fn addressed_to(
+    fx: &[Effect<Wire<u32>, Ind<u32>, Timer, Infallible>],
+    to: NodeId,
+) -> Option<Wire<u32>> {
     fx.iter().find_map(|e| match e {
         Effect::Send { to: t, msg } if *t == to => Some(msg.clone()),
         _ => None,
@@ -177,7 +181,10 @@ fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], to: NodeId) -> Option
 }
 
 /// A proposal broadcast for `round`, if these effects contain one.
-fn round_broadcast(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], round: u64) -> Option<()> {
+fn round_broadcast(
+    fx: &[Effect<Wire<u32>, Ind<u32>, Timer, Infallible>],
+    round: u64,
+) -> Option<()> {
     fx.iter().find_map(|e| match e {
         Effect::Send { msg: Wire::Broadcast(w), .. } => match &w.payload {
             Flood::Proposal { round: r, .. } if *r == round => Some(()),

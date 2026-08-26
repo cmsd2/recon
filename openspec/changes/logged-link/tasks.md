@@ -1,14 +1,14 @@
 ## 1. The primitive in the core
 
-- [ ] 1.1 Add a `Durable` associated type to `Protocol` and a store effect carrying it; verify a
+- [x] 1.1 Add a `Durable` associated type to `Protocol` and a store effect carrying it; verify a
       protocol declaring no durable state cannot construct a store effect, as a compile-fail test
       alongside the existing scope one
-- [ ] 1.2 Add a recovery entry point that receives retrieved durable state and can emit effects;
+- [x] 1.2 Add a recovery entry point that receives retrieved durable state and can emit effects;
       verify from the core suite that a recovered protocol re-indicates without any message having
       arrived, and that a first start is distinguishable from a recovery
-- [ ] 1.3 Update every exhaustive match over the effect enum in `recon-core` and its tests; verify
+- [x] 1.3 Update every exhaustive match over the effect enum in `recon-core` and its tests; verify
       the workspace builds and `core_contract` passes
-- [ ] 1.4 Verify the existing protocols are unaffected: each declares no durable state, and the
+- [x] 1.4 Verify the existing protocols are unaffected: each declares no durable state, and the
       whole suite passes unchanged
 
 ## 2. The primitive in the simulator

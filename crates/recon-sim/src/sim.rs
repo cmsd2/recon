@@ -10,7 +10,7 @@ use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
-use recon_core::{Cx, Effect, NodeId, Protocol, SessionEvent, Time};
+use recon_core::{Cx, Effect, NodeId, ProtoCx, ProtoEffect, Protocol, SessionEvent, Time};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Round-trips one message through the wire codec, when codec checking is enabled.
@@ -38,6 +38,11 @@ enum Scheduled<P: Protocol> {
     /// Retry establishing every session that is not up. A deployed link keeps trying on its own
     /// rather than waiting for the layers above to transmit, so the model does too.
     Reconnect,
+    /// A write to stable storage has become durable. Anything the protocol asked to send after
+    /// asking for the write leaves the process now, and not before.
+    WriteComplete {
+        node: NodeId,
+    },
 }
 
 /// Whether a process is handling events, and if not, why.
@@ -86,8 +91,17 @@ pub struct Sim<P: Protocol> {
     /// Turns a session ending into whatever the protocol calls a scope. Absent unless the
     /// protocol opted in, exactly as the codec check does.
     session_scope: Option<fn(SessionEvent) -> P::Scope>,
+    /// What each process has written down and had confirmed durable. Survives a crash; a
+    /// restart hands it back through `Protocol::on_recovery`.
+    storage: BTreeMap<NodeId, P::Durable>,
+    /// A write asked for but not yet durable. A crash while one is outstanding may or may not
+    /// keep it, decided by the seeded source — which is the fault this models.
+    writing: BTreeMap<NodeId, P::Durable>,
+    /// Messages a protocol asked to send after asking for a write, held until the write is
+    /// durable. This is the ordering rule: a promise is written down before it is made.
+    held: BTreeMap<NodeId, Vec<(NodeId, P::Msg)>>,
     trace: Trace<P::Msg, P::Ind, P::Timer>,
-    effects: Vec<Effect<P::Msg, P::Ind, P::Timer>>,
+    effects: Vec<ProtoEffect<P>>,
     codec_check: Option<CodecCheck<P::Msg>>,
 }
 
@@ -97,6 +111,7 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
+    P::Durable: Clone,
 {
     /// Build a run over `nodes`, constructing each process with `make`.
     pub fn new(
@@ -124,6 +139,9 @@ where
             next_epoch: BTreeMap::new(),
             last_delivery: BTreeMap::new(),
             session_scope: None,
+            storage: BTreeMap::new(),
+            writing: BTreeMap::new(),
+            held: BTreeMap::new(),
             trace: Trace::default(),
             effects: Vec::new(),
             codec_check: None,
@@ -191,6 +209,19 @@ where
         if self.config.is_session_based() {
             self.end_sessions_of(node);
         }
+        // A write that had not completed may or may not have taken effect, and the recovering
+        // process has no way to tell which. All or nothing: never a mixture.
+        if let Some(durable) = self.writing.remove(&node) {
+            let at = self.now;
+            if self.rng.random::<bool>() {
+                self.storage.insert(node, durable);
+                self.trace.push(TraceEvent::Stored { at, node });
+            } else {
+                self.trace.push(TraceEvent::WriteLost { at, node });
+            }
+        }
+        // Anything held behind that write never left the process.
+        self.held.remove(&node);
         let at = self.now;
         self.trace.push(TraceEvent::Crashed { at, node });
     }
@@ -217,6 +248,15 @@ where
         self.nodes.get_mut(&node).expect("just checked").liveness = Liveness::Running;
         let at = self.now;
         self.trace.push(TraceEvent::Restarted { at, node });
+
+        // What survived, handed back as an event rather than through the constructor: the
+        // algorithms that need it re-announce their log and re-send what was pending, and those
+        // are effects, which a constructor cannot emit.
+        let recovered = self.storage.get(&node).cloned();
+        self.trace.push(TraceEvent::Recovered { at, node, had_state: recovered.is_some() });
+        if let Some(durable) = recovered {
+            self.run_handler(node, |p, cx| p.on_recovery(durable, cx));
+        }
 
         let due: Vec<P::Timer> = {
             let mut keep = Vec::new();
@@ -308,6 +348,19 @@ where
                 }
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
             }
+            Scheduled::WriteComplete { node } => {
+                if let Some(durable) = self.writing.remove(&node) {
+                    self.storage.insert(node, durable);
+                    let at = self.now;
+                    self.trace.push(TraceEvent::Stored { at, node });
+                }
+                // Only now may what was held leave the process.
+                if let Some(pending) = self.held.remove(&node) {
+                    for (to, msg) in pending {
+                        self.transmit(node, to, msg);
+                    }
+                }
+            }
             Scheduled::Reconnect => {
                 self.reconnect_sweep();
                 let at = self.now + self.config.reconnect_interval;
@@ -364,11 +417,7 @@ where
     }
 
     /// Run one handler and interpret everything it emits.
-    fn run_handler(
-        &mut self,
-        node: NodeId,
-        f: impl FnOnce(&mut P, &mut Cx<'_, P::Msg, P::Ind, P::Timer>),
-    ) {
+    fn run_handler(&mut self, node: NodeId, f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>)) {
         let mut effects = core::mem::take(&mut self.effects);
         effects.clear();
 
@@ -381,8 +430,25 @@ where
             f(&mut n.protocol, &mut cx);
         }
 
+        // The ordering rule. Once a write has been asked for, everything this handler sends
+        // afterwards waits until that write is durable — so a process cannot be seen by its peers
+        // to have made a promise it has no record of.
+        let mut writing = false;
         for effect in effects.drain(..) {
             match effect {
+                Effect::Store(durable) => {
+                    let at = self.now;
+                    self.writing.insert(node, durable);
+                    self.trace.push(TraceEvent::Storing { at, node });
+                    self.schedule(
+                        at + self.config.write_latency,
+                        Scheduled::WriteComplete { node },
+                    );
+                    writing = true;
+                }
+                Effect::Send { to, msg } if writing => {
+                    self.held.entry(node).or_default().push((to, msg));
+                }
                 Effect::Send { to, msg } => self.transmit(node, to, msg),
                 Effect::Indicate(ind) => {
                     let at = self.now;
@@ -499,6 +565,7 @@ where
     P::Msg: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
     P::Ind: Clone,
     P::Timer: Clone,
+    P::Durable: Clone,
 {
     /// Round-trip every delivered message through the wire codec.
     ///
@@ -520,6 +587,7 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
+    P::Durable: Clone,
 {
     /// The current epoch of the session between `a` and `b`, if one is established.
     pub fn session_epoch(&self, a: NodeId, b: NodeId) -> Option<u64> {
@@ -674,6 +742,7 @@ where
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Timer: Clone,
+    P::Durable: Clone,
     P::Scope: From<SessionEvent>,
 {
     /// Deliver session events to the protocol as scope events.

@@ -37,6 +37,8 @@ impl Protocol for Parrot {
     type Msg = Wire;
     type Timer = Tock;
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
@@ -393,6 +395,8 @@ impl Protocol for Counter {
     type Msg = ();
     type Timer = ();
     type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: CountCmd, cx: &mut ProtoCx<'_, Self>) {
         match cmd {

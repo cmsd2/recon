@@ -60,6 +60,23 @@ about which fields get written.
 layer boundaries is that they are typed, and "which keys does this protocol own" is exactly the
 string-keyed composition the post-mortem records as a failure.
 
+**A parent may compose only a child that stores nothing, and this is enforced.** Found while
+implementing, not while designing. The other effects re-wrap with a variant constructor —
+`fn(CM) -> PM` — because a child's message *becomes* one of the parent's messages. Durable state
+does not work that way: a parent's durable state contains its own fields **and** its child's, and
+a `fn(CD) -> PD` has no access to the parent's, so there is nothing correct for it to return.
+
+`with_child` therefore takes a durable mapper alongside the other three, and for a child that
+stores nothing the only function that can be written is `absurd` — the total function out of
+`Infallible`. A storing child is then not silently broken; it fails to compile, because no mapper
+exists to pass.
+
+All three protocols here have children that store nothing: Algorithm 2.3 is over the stubborn
+link, and Algorithm 3.8 over stubborn broadcast, neither of which writes anything. So the
+restriction costs nothing now, and the real design — whatever it is: a slot per participant, a
+parent that drives its child's writes explicitly, a path-indexed store — is left to the first rung
+that actually needs it. That is constraint 4 applied to storage: two or three by hand first.
+
 **Recovery is an event, following the book.** Algorithm 2.3 has `⟨ Recovery ⟩` distinct from
 `⟨ Init ⟩`, and both Algorithms 2.3 and 3.8 *do things* on recovering — re-indicating the retrieved
 log, re-broadcasting what is pending. Those are effects, so recovery must be an event that can emit

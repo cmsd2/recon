@@ -23,6 +23,12 @@ pub struct Config {
     pub latency_max: Duration,
     /// Extra delay applied to a message selected for reordering.
     pub reorder_delay: Duration,
+    /// How long a write to stable storage takes to become durable.
+    ///
+    /// Not zero, and deliberately: a crash that lands while a write is outstanding is the fault
+    /// that finds bugs in anything written for the fail-recovery model, and it cannot happen at
+    /// all if writes complete instantaneously.
+    pub write_latency: Duration,
     /// When set, the run is synchronous: delivery between connected, uncrashed processes is
     /// guaranteed within this bound, and nothing is lost, duplicated or given a reordering spike.
     ///
@@ -63,6 +69,7 @@ impl Default for Config {
             latency_min: Duration::from_millis(1),
             latency_max: Duration::from_millis(1),
             reorder_delay: Duration::from_millis(50),
+            write_latency: Duration::from_millis(1),
             synchronous: None,
             sessions: false,
             reconnect_interval: Duration::from_millis(5),
@@ -72,6 +79,12 @@ impl Default for Config {
 }
 
 impl Config {
+    /// How long a write to stable storage takes to become durable.
+    pub fn write_latency(mut self, d: Duration) -> Self {
+        self.write_latency = d;
+        self
+    }
+
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self

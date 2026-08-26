@@ -18,7 +18,7 @@ pub mod session;
 pub mod time;
 
 pub use cx::{Cx, EffectSink};
-pub use effect::Effect;
+pub use effect::{Effect, absurd};
 pub use node::NodeId;
 pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step};
 pub use session::SessionEvent;

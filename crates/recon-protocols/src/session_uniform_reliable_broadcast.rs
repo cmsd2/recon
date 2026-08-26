@@ -46,7 +46,7 @@
 //! therefore scoped, this is the clearest statement of what a failure detector buys.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, absurd};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -163,7 +163,7 @@ impl<P: Clone> SessionUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut inbox, |ccx| {
+            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, absurd, &mut inbox, |ccx| {
                 f(beb, ccx)
             });
         }
@@ -195,7 +195,7 @@ impl<P: Clone> SessionUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, Timer::Detector, &mut inbox, |ccx| {
+            cx.with_child_consuming(Wire::Detector, Timer::Detector, absurd, &mut inbox, |ccx| {
                 f(detector, ccx)
             });
         }
@@ -270,9 +270,13 @@ impl<P: Clone> SessionUniformReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut relay_inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(
+                Wire::Broadcast,
+                Timer::Broadcast,
+                absurd,
+                &mut relay_inbox,
+                |ccx| f(beb, ccx),
+            );
         }
         debug_assert!(
             relay_inbox.is_empty(),
@@ -310,6 +314,8 @@ impl<P: Clone> Protocol for SessionUniformReliableBroadcast<P> {
     type Msg = Wire<P>;
     type Timer = Timer;
     type Scope = SessionEvent;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Durable = core::convert::Infallible;
 
     fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
