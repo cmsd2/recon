@@ -13,19 +13,19 @@
 
 ## 2. The primitive in the simulator
 
-- [ ] 2.1 Give each process storage that survives `crash` and `restart` and is part of the seeded
+- [x] 2.1 Give each process storage that survives `crash` and `restart` and is part of the seeded
       state; verify what was written is retrieved and what was held in memory is not
-- [ ] 2.2 Make a write take time; verify a write outstanding at the moment of a crash is
+- [x] 2.2 Make a write take time; verify a write outstanding at the moment of a crash is
       distinguishable in the trace from one that had completed
-- [ ] 2.3 Implement the interrupted write as all-or-nothing chosen by the seed; verify across a
+- [x] 2.3 Implement the interrupted write as all-or-nothing chosen by the seed; verify across a
       seed range that both outcomes occur, that a completed write always survives, and that no
       partially written value is ever retrieved
-- [ ] 2.4 Honour the ordering rule — every store durable before any later send leaves the process;
+- [x] 2.4 Honour the ordering rule — every store durable before any later send leaves the process;
       verify by crashing between the two and asserting the write survived and the message was never
       sent
-- [ ] 2.5 Record storage activity in the trace; verify a durability property can be asserted from
+- [x] 2.5 Record storage activity in the trace; verify a durability property can be asserted from
       the trace alone, without reading protocol state
-- [ ] 2.6 Verify a run involving writes, crashes and recoveries reproduces exactly from its seed
+- [x] 2.6 Verify a run involving writes, crashes and recoveries reproduces exactly from its seed
 
 ## 3. Logged perfect links
 

@@ -929,3 +929,279 @@ fn sessions_open_without_anything_being_sent() {
         assert!(s.has_session(x, y), "{x}-{y} should be up without any traffic");
     }
 }
+
+// ================================================================ stable storage
+//
+// A process that writes something down, and can be asked to write and send in the same breath —
+// which is the ordering rule, and the only thing here that a protocol could get wrong silently.
+
+/// What survives a crash: a total, and every peer this process promised it to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ledger {
+    total: u32,
+    told: Vec<NodeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LedgerCmd {
+    /// Add to the total and write it down. Nothing is sent.
+    Record(u32),
+    /// Add to the total, write it down, **and** tell `peer` — in that order, from one event.
+    RecordAndTell(u32, NodeId),
+    /// Send without writing anything, so the unheld path stays exercised.
+    TellOnly(NodeId),
+}
+
+#[derive(Debug, Default)]
+struct Keeper {
+    total: u32,
+    told: Vec<NodeId>,
+    /// Volatile on purpose: it must be gone after a crash, whatever storage kept.
+    events_handled: u32,
+}
+
+impl Protocol for Keeper {
+    type Cmd = LedgerCmd;
+    type Ind = Ledger;
+    type Msg = u32;
+    type Timer = ();
+    type Scope = core::convert::Infallible;
+    type Durable = Ledger;
+
+    fn on_cmd(&mut self, cmd: LedgerCmd, cx: &mut ProtoCx<'_, Self>) {
+        self.events_handled += 1;
+        match cmd {
+            LedgerCmd::Record(n) => {
+                self.total += n;
+                cx.store(Ledger { total: self.total, told: self.told.clone() });
+            }
+            LedgerCmd::RecordAndTell(n, peer) => {
+                self.total += n;
+                self.told.push(peer);
+                // Written down first, then promised. The simulator must honour that order.
+                cx.store(Ledger { total: self.total, told: self.told.clone() });
+                cx.send(peer, self.total);
+            }
+            LedgerCmd::TellOnly(peer) => cx.send(peer, self.total),
+        }
+    }
+
+    fn on_msg(&mut self, _: NodeId, msg: u32, cx: &mut ProtoCx<'_, Self>) {
+        self.events_handled += 1;
+        cx.indicate(Ledger { total: msg, told: Vec::new() });
+    }
+
+    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+
+    fn on_recovery(&mut self, d: Ledger, cx: &mut ProtoCx<'_, Self>) {
+        self.total = d.total;
+        self.told = d.told.clone();
+        cx.indicate(d);
+    }
+}
+
+fn keepers(seed: u64) -> Sim<Keeper> {
+    Sim::new(Config::default().seed(seed), &[A, B], |_| Keeper::default())
+}
+
+fn write_events(s: &Sim<Keeper>) -> (usize, usize, usize) {
+    let mut storing = 0;
+    let mut stored = 0;
+    let mut lost = 0;
+    for e in s.trace().events() {
+        match e {
+            TraceEvent::Storing { .. } => storing += 1,
+            TraceEvent::Stored { .. } => stored += 1,
+            TraceEvent::WriteLost { .. } => lost += 1,
+            _ => {}
+        }
+    }
+    (storing, stored, lost)
+}
+
+#[test]
+fn what_was_written_is_retrieved_and_what_was_in_memory_is_not() {
+    let mut s = keepers(1);
+    s.command(A, LedgerCmd::Record(5));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.protocol(A).unwrap().total, 5);
+    assert_eq!(s.protocol(A).unwrap().events_handled, 1);
+
+    s.crash(A);
+    s.restart(A);
+
+    let p = s.protocol(A).unwrap();
+    assert_eq!(p.total, 5, "the durable total came back");
+    assert_eq!(p.events_handled, 0, "the volatile counter did not");
+}
+
+#[test]
+fn a_process_that_never_wrote_recovers_nothing() {
+    let mut s = keepers(2);
+    s.command(A, LedgerCmd::TellOnly(B));
+    s.run_for(Duration::from_millis(50));
+
+    s.crash(A);
+    s.restart(A);
+
+    assert_eq!(s.trace().recoveries_with_state(), 0, "there was nothing to recover");
+    assert_eq!(s.protocol(A).unwrap().total, 0, "it started as if for the first time");
+}
+
+#[test]
+fn a_write_takes_time_and_is_distinguishable_from_a_completed_one() {
+    // Asked for, and not yet durable.
+    let mut mid = keepers(3);
+    mid.command(A, LedgerCmd::Record(1));
+    mid.run_for(Duration::from_micros(1));
+    let (storing, stored, _) = write_events(&mid);
+    assert_eq!((storing, stored), (1, 0), "the write was asked for but has not completed");
+
+    // Given time, it completes.
+    mid.run_for(Duration::from_millis(50));
+    let (storing, stored, _) = write_events(&mid);
+    assert_eq!((storing, stored), (1, 1), "and now it has");
+}
+
+#[test]
+fn a_completed_write_always_survives_a_later_crash() {
+    for seed in 0..20u64 {
+        let mut s = keepers(seed);
+        s.command(A, LedgerCmd::Record(7));
+        s.run_for(Duration::from_millis(50)); // well past the write latency
+        s.crash(A);
+        s.restart(A);
+        assert_eq!(s.protocol(A).unwrap().total, 7, "seed {seed}: a completed write is durable");
+        assert_eq!(write_events(&s).2, 0, "seed {seed}: nothing was lost");
+    }
+}
+
+#[test]
+fn an_outstanding_write_may_or_may_not_survive() {
+    // The fault that finds bugs. Crash while the write is in flight; across seeds both outcomes
+    // must occur, and the recovering process has no way to tell which case it is in.
+    let outcomes: Vec<bool> = (0..40u64)
+        .map(|seed| {
+            let mut s = keepers(seed);
+            s.command(A, LedgerCmd::Record(7));
+            s.run_for(Duration::from_micros(1)); // the write is outstanding
+            s.crash(A);
+            s.restart(A);
+            s.protocol(A).unwrap().total == 7
+        })
+        .collect();
+
+    assert!(outcomes.iter().any(|kept| *kept), "some runs must keep the write");
+    assert!(outcomes.iter().any(|kept| !*kept), "and some must lose it");
+}
+
+#[test]
+fn a_partially_written_value_is_never_retrieved() {
+    // All or nothing: the total and the list of who was told move together, or neither does.
+    for seed in 0..40u64 {
+        let mut s = keepers(seed);
+        s.command(A, LedgerCmd::RecordAndTell(9, B));
+        s.run_for(Duration::from_micros(1));
+        s.crash(A);
+        s.restart(A);
+
+        let p = s.protocol(A).unwrap();
+        let whole = (p.total, p.told.as_slice()) == (9, &[B][..]);
+        let nothing = (p.total, p.told.as_slice()) == (0, &[][..]);
+        assert!(whole || nothing, "seed {seed}: retrieved a mixture: {p:?}");
+    }
+}
+
+#[test]
+fn a_write_is_durable_before_anything_sent_after_it_leaves_the_process() {
+    // The ordering rule, in its observable form: crash between the store and the send. The write
+    // is durable — or lost with the crash, which is the other fault — and the message never left.
+    let mut kept = 0;
+    for seed in 0..40u64 {
+        let mut s = keepers(seed);
+        s.command(A, LedgerCmd::RecordAndTell(4, B));
+        // Long enough for the write to complete, short enough that nothing could have been
+        // delivered had it been sent before the write.
+        s.run_for(Duration::from_micros(1));
+        s.crash(A);
+        s.restart(A);
+        s.run_for(Duration::from_millis(100));
+
+        let delivered = s.trace().deliveries().filter(|(_, to, _)| *to == B).count();
+        assert_eq!(delivered, 0, "seed {seed}: the message must not have left before the write");
+        if s.protocol(A).unwrap().total == 4 {
+            kept += 1;
+        }
+    }
+    assert!(kept > 0, "and in some runs the write was durable while the message was still held");
+}
+
+#[test]
+fn a_send_with_no_write_before_it_is_not_held() {
+    // The rule holds sends behind a write; it must not hold sends that had none.
+    let mut s = keepers(5);
+    s.command(A, LedgerCmd::TellOnly(B));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.trace().deliveries().filter(|(_, to, _)| *to == B).count(), 1);
+    assert_eq!(write_events(&s), (0, 0, 0), "and no write was involved");
+}
+
+#[test]
+fn a_held_send_is_delivered_once_the_write_completes() {
+    let mut s = keepers(6);
+    s.command(A, LedgerCmd::RecordAndTell(3, B));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(write_events(&s).1, 1, "the write completed");
+    assert_eq!(
+        s.trace().deliveries().filter(|(_, to, _)| *to == B).count(),
+        1,
+        "and what was held behind it went out afterwards"
+    );
+}
+
+#[test]
+fn durability_is_assertable_from_the_trace_alone() {
+    // Without reading any protocol state: the write completed before the message was delivered.
+    let mut s = keepers(7);
+    s.command(A, LedgerCmd::RecordAndTell(2, B));
+    s.run_for(Duration::from_millis(50));
+
+    let stored_at = s
+        .trace()
+        .events()
+        .iter()
+        .find_map(|e| match e {
+            TraceEvent::Stored { at, .. } => Some(*at),
+            _ => None,
+        })
+        .expect("the write is in the trace");
+    let delivered_at = s
+        .trace()
+        .events()
+        .iter()
+        .find_map(|e| match e {
+            TraceEvent::Delivered { at, to, .. } if *to == B => Some(*at),
+            _ => None,
+        })
+        .expect("the delivery is in the trace");
+
+    assert!(stored_at <= delivered_at, "durable at {stored_at:?}, delivered at {delivered_at:?}");
+    assert_eq!(s.trace().writes_completed(), 1);
+}
+
+#[test]
+fn a_run_with_writes_crashes_and_recoveries_reproduces_from_its_seed() {
+    let run = |seed: u64| {
+        let mut s = keepers(seed);
+        s.command(A, LedgerCmd::RecordAndTell(1, B));
+        s.run_for(Duration::from_micros(1));
+        s.crash(A);
+        s.restart(A);
+        s.command(A, LedgerCmd::Record(2));
+        s.run_for(Duration::from_millis(80));
+        (s.trace().len(), s.protocol(A).unwrap().total, s.trace().writes_lost())
+    };
+    for seed in 0..12u64 {
+        assert_eq!(run(seed), run(seed), "seed {seed} must reproduce exactly");
+    }
+}
