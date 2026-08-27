@@ -51,6 +51,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
+use crate::link::Link;
+use crate::perfect_link::PerfectLink;
 
 /// Names one broadcast uniquely: who originated it, and their sequence number for it.
 ///
@@ -83,18 +85,27 @@ pub enum Cmd<P> {
 pub enum Ind<P> {
     /// `from` is the process that *originated* the message, never the one that relayed it.
     Deliver { from: NodeId, msg: P },
+    /// The scope with `peer` ended at `epoch`.
+    ///
+    /// RB4's agreement is scoped to the sessions that carried the relay: this layer relays once,
+    /// on first receipt, and never again, so a relay lost to an ending is lost for good. It holds
+    /// no redundancy that outlives the scope, so it cannot bridge and must propagate.
+    /// Raised only over a link that reports boundaries.
+    SessionEnded { peer: NodeId, epoch: u64 },
+    /// A scope with `peer` is in force at `epoch`.
+    SessionEstablished { peer: NodeId, epoch: u64 },
 }
 
 /// The wire type: this layer's data, carried by best-effort broadcast.
-pub type Wire<P> = <BestEffortBroadcast<Data<P>> as Protocol>::Msg;
+pub type Wire<P, L = PerfectLink<Data<P>>> = <BestEffortBroadcast<Data<P>, L> as Protocol>::Msg;
 
 /// Broadcast with agreement, over best-effort broadcast.
 #[derive(Debug)]
-pub struct ReliableBroadcast<P> {
+pub struct ReliableBroadcast<P, L = PerfectLink<Data<P>>> {
     me: NodeId,
     seq: u64,
     delivered: BTreeSet<BroadcastId>,
-    beb: BestEffortBroadcast<Data<P>>,
+    beb: BestEffortBroadcast<Data<P>, L>,
     /// Indications the child raised, awaiting this layer's attention. Reused across events.
     inbox: Vec<beb::Ind<Data<P>>>,
     /// A second buffer for the relay, which by construction produces no indications. Kept
@@ -102,15 +113,22 @@ pub struct ReliableBroadcast<P> {
     relay_inbox: Vec<beb::Ind<Data<P>>>,
 }
 
-impl<P> ReliableBroadcast<P> {
+impl<P> ReliableBroadcast<P, PerfectLink<Data<P>>> {
     /// Reliable broadcast for process `me` among `peers`, over links retransmitting every
     /// `interval`.
     pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, interval: Duration) -> Self {
+        Self::with_link(me, peers, PerfectLink::new(me, interval))
+    }
+}
+
+impl<P, L> ReliableBroadcast<P, L> {
+    /// Reliable broadcast for process `me` among `peers`, over the link supplied.
+    pub fn with_link(me: NodeId, peers: impl IntoIterator<Item = NodeId>, link: L) -> Self {
         ReliableBroadcast {
             me,
             seq: 0,
             delivered: BTreeSet::new(),
-            beb: BestEffortBroadcast::new(me, peers, interval),
+            beb: BestEffortBroadcast::with_link(me, peers, link),
             inbox: Vec::new(),
             relay_inbox: Vec::new(),
         }
@@ -127,14 +145,17 @@ impl<P> ReliableBroadcast<P> {
     }
 }
 
-impl<P: Clone> ReliableBroadcast<P> {
+impl<P: Clone, L> ReliableBroadcast<P, L>
+where
+    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+{
     /// Run the child, then act on whatever it reported.
     fn with_beb(
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(
-            &mut BestEffortBroadcast<Data<P>>,
-            &mut ProtoCx<'_, BestEffortBroadcast<Data<P>>>,
+            &mut BestEffortBroadcast<Data<P>, L>,
+            &mut ProtoCx<'_, BestEffortBroadcast<Data<P>, L>>,
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
@@ -143,15 +164,21 @@ impl<P: Clone> ReliableBroadcast<P> {
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
-            // The broadcast beneath reports scope boundaries only over a link that raises them.
-            // This layer is not yet parameterised over its link, so its child is the perfect link
-            // and a boundary cannot arrive. Named rather than dropped: silently absorbing a scope
-            // end is the failure `docs/conditional-guarantees.md` calls cardinal, and when this
-            // layer gains its link parameter the arm becomes real handling.
-            let beb::Ind::Deliver { msg: Data { id, payload }, .. } = ind else {
-                unreachable!("a perfect link raises no scope boundary")
-            };
-            self.on_beb_deliver(id, payload, cx);
+            match ind {
+                beb::Ind::Deliver { msg: Data { id, payload }, .. } => {
+                    self.on_beb_deliver(id, payload, cx)
+                }
+                // This layer relays once, on first receipt, and never again, so it holds no
+                // redundancy outliving the scope and cannot repair what an ending lost. It
+                // propagates instead — which is the whole of what
+                // `docs/conditional-guarantees.md` requires of a layer that cannot bridge.
+                beb::Ind::SessionEnded { peer, epoch } => {
+                    cx.indicate(Ind::SessionEnded { peer, epoch })
+                }
+                beb::Ind::SessionEstablished { peer, epoch } => {
+                    cx.indicate(Ind::SessionEstablished { peer, epoch })
+                }
+            }
         }
         self.inbox = inbox;
     }
@@ -188,12 +215,16 @@ impl<P: Clone> ReliableBroadcast<P> {
     }
 }
 
-impl<P: Clone> Protocol for ReliableBroadcast<P> {
+impl<P: Clone, L> Protocol for ReliableBroadcast<P, L>
+where
+    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+{
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
-    type Msg = Wire<P>;
-    /// No scope conditions: this protocol's guarantees do not lapse.
-    type Scope = core::convert::Infallible;
+    type Msg = Wire<P, L>;
+    /// Whatever the link's guarantees are conditional on. RB4 is scoped to the sessions that
+    /// carried the relay, and this layer cannot bridge one ending.
+    type Scope = L::Scope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -204,11 +235,16 @@ impl<P: Clone> Protocol for ReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx));
     }
 
-    fn on_msg(&mut self, from: NodeId, msg: Wire<P>, cx: &mut ProtoCx<'_, Self>) {
+    fn on_msg(&mut self, from: NodeId, msg: Wire<P, L>, cx: &mut ProtoCx<'_, Self>) {
         self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
     }
 
     fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
+    }
+
+    /// Hand the scope ending down. This layer cannot bridge one, and the default would drop it.
+    fn on_scope_event(&mut self, scope: L::Scope, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_scope_event(scope, ccx));
     }
 }

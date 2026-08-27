@@ -28,7 +28,7 @@
 
 ## 3. The layers above
 
-- [ ] 3.1 Parameterise `ReliableBroadcast` over the broadcast beneath, with a default, and verify
+- [x] 3.1 Parameterise `ReliableBroadcast` over the broadcast beneath, with a default, and verify
       its existing suite passes unchanged
 - [ ] 3.2 Parameterise `UniformReliableBroadcast`, bounding the resend path on `ScopedLink`, and
       verify the establishment prompts a directed resend and the ending prompts nothing
