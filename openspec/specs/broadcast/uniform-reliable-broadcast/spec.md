@@ -10,6 +10,7 @@ broadcast permits, where a process may act on a delivery that the survivors neve
 
 ### Requirement: Validity
 
+
 If a correct process broadcasts a message, that process SHALL eventually deliver it.
 
 #### Scenario: A correct sender delivers its own broadcast
@@ -18,6 +19,7 @@ If a correct process broadcasts a message, that process SHALL eventually deliver
 - **THEN** that process eventually delivers it to the layer above
 
 ### Requirement: Uniform agreement
+
 
 If a message is delivered by any process, whether that process is correct or subsequently crashes,
 it SHALL eventually be delivered by every correct process.
@@ -45,6 +47,7 @@ it SHALL eventually be delivered by every correct process.
 
 ### Requirement: Delivery waits for acknowledgement by every correct process
 
+
 A process SHALL NOT deliver a message until every process it believes correct has acknowledged
 having seen it. A process that is detected as crashed SHALL cease to be waited for.
 
@@ -60,6 +63,7 @@ having seen it. A process that is detected as crashed SHALL cease to be waited f
 
 ### Requirement: No duplication
 
+
 Each process SHALL deliver each broadcast message at most once, however many copies it receives.
 
 #### Scenario: Relayed and duplicated copies are suppressed
@@ -73,6 +77,7 @@ Each process SHALL deliver each broadcast message at most once, however many cop
 - **THEN** every correct process delivers two messages
 
 ### Requirement: No creation
+
 
 A process SHALL deliver a message only if it was previously broadcast by the process named as its
 sender.
@@ -89,6 +94,7 @@ sender.
 
 ### Requirement: The guarantees depend on accurate failure detection
 
+
 The specification SHALL state that these properties hold only while the failure detection this
 abstraction relies on is accurate, which in turn requires the network to deliver within a known
 bound. Where that assumption does not hold, uniform agreement SHALL NOT be claimed.
@@ -103,3 +109,37 @@ from correct detection.
   assumption it depends on was violated
 - **THEN** a message may be delivered by some processes and not others, and this is a violation of
   the assumption rather than of the implementation
+
+### Requirement: The broadcast beneath is a parameter
+
+
+This protocol SHALL be written against the port of the broadcast beneath it and SHALL NOT name an
+implementation.
+
+Its liveness depends on what the layer beneath can tell it. Where the layer beneath reports that a
+scope was re-established, this protocol SHALL resend what that peer has not been seen to
+acknowledge, and that resend SHALL be directed at the peer whose scope returned rather than
+broadcast to every member. Where no such report is possible, liveness rests on the failure detector
+alone, as it does today.
+
+#### Scenario: The ordinary stack is unchanged
+
+- **WHEN** this protocol is used without naming the layer beneath
+- **THEN** it composes as it did before this change, and its guarantees are unchanged
+
+#### Scenario: An established scope prompts a directed resend
+
+- **WHEN** the layer beneath reports that a scope with one peer was established, and messages are
+  pending that the peer has not been seen to acknowledge
+- **THEN** those messages are sent to that peer, and to no other
+
+#### Scenario: Nothing is attempted on an ending
+
+- **WHEN** the layer beneath reports that a scope ended
+- **THEN** nothing is sent to that peer, because nothing sent then could arrive
+
+#### Scenario: Progress does not require the peer to return
+
+- **WHEN** a peer never returns and the detector accuses it
+- **THEN** delivery proceeds among the remaining correct processes
+

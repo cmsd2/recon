@@ -289,7 +289,7 @@ its design notes and task list.
 openspec/specs/
 ├── protocol-core/                     the trait, the effects, composition
 ├── simulation/                        determinism, faults, sessions, the trace
-├── links/                             stubborn, perfect, session
+├── links/                             the port, stubborn, perfect, session
 ├── failure-detection/                 perfect failure detector
 ├── broadcast/                         best-effort, reliable, uniform reliable,
 │                                      majority-ack, and the logged ones

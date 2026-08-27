@@ -11,6 +11,7 @@ runtime.
 
 ### Requirement: Protocols are deterministic functions of state and event
 
+
 A protocol SHALL produce identical effects and identical resulting state whenever it is given
 identical prior state and an identical event, including the values supplied for time and
 randomness. A protocol MUST NOT read wall-clock time, draw randomness from ambient sources, or
@@ -29,6 +30,7 @@ perform input/output.
   other party, and the resulting state reflects either all or none of that event's transition
 
 ### Requirement: Effects are the only means of affecting the world
+
 
 A protocol SHALL express every outward action as an effect. The available effects SHALL be:
 sending a message to a named peer, raising an indication to the layer above, and requesting a
@@ -66,6 +68,7 @@ which protocol registered it or where that protocol sits in a composition.
 
 ### Requirement: Time and randomness are supplied to the protocol
 
+
 Current time and any random values a protocol requires SHALL be supplied through the same
 parameter that receives its effects. Time SHALL be monotonic and expressed in a project-defined
 type that can be assigned an arbitrary value.
@@ -83,6 +86,7 @@ type that can be assigned an arbitrary value.
 
 ### Requirement: A parent composes a child by owning it and re-wrapping its effects
 
+
 A protocol that is built on another SHALL own that child directly, and SHALL translate each effect
 the child emits **that carries the child's own vocabulary** — its messages and its indications —
 into its own terms before that effect leaves the parent. Composition MUST NOT depend on names,
@@ -92,6 +96,11 @@ A timer is not among them. It is named by an opaque handle the driver issued, wh
 about which layer registered it, so there is nothing for a parent to translate and no mapping for
 it to supply. Requiring a parent to re-wrap *every* effect is what made a timer's type encode its
 position in the composition.
+
+A parent SHALL state what it requires of its child as a declared port — the child's request and
+indication types — rather than by naming a particular implementation. The child is a parameter of
+the parent, so a parent is written once and composed over every implementation satisfying the port.
+A parent MUST NOT depend on anything about its child beyond that port.
 
 #### Scenario: A child's outgoing message is re-wrapped
 
@@ -115,7 +124,20 @@ position in the composition.
 - **WHEN** a parent is written to pass a message of the wrong type to a child
 - **THEN** the error is detected when the project is built, not by observing an undelivered message
 
+#### Scenario: The requirement on a child is visible in the parent's interface
+
+- **WHEN** a reader asks what a parent needs of the layer beneath it
+- **THEN** the answer is the port named in the parent's own declaration, and nothing else is
+  required to know it
+
+#### Scenario: Substituting an implementation does not change the parent
+
+- **WHEN** a parent is composed over a different implementation of the same port
+- **THEN** the parent's source is unchanged, and its guarantees continue to hold as far as the
+  substituted implementation's own guarantees allow
+
 ### Requirement: Message payloads are carried as typed values and encoded once
+
 
 A protocol stack SHALL pass message payloads between layers as typed values. Encoding to bytes
 SHALL happen exactly once, at the boundary where messages leave the process, and no intermediate
@@ -128,6 +150,7 @@ encoded or type-erased representation SHALL be constructed at any layer boundary
 
 ### Requirement: Failures are reported as distinct typed causes
 
+
 Each layer SHALL report its failures as its own error type, preserving the originating cause.
 Errors MUST NOT be flattened into a general-purpose input/output error or reduced to a message
 string.
@@ -138,6 +161,7 @@ string.
 - **THEN** the reported error identifies decoding as the cause and retains the underlying detail
 
 ### Requirement: A protocol may declare scopes its guarantees depend on
+
 
 A protocol SHALL declare whether its guarantees are bounded by any scope whose ending it can
 observe, and SHALL handle such an ending when one occurs. A protocol with no such scope SHALL be
@@ -165,6 +189,7 @@ write a handler for one.
 - **THEN** the parent reports an ending of its own to the layer above, in its own terms
 
 ### Requirement: A protocol declares what it keeps durably
+
 
 A protocol SHALL declare the type of the metadata it keeps and the type of the entries it appends,
 and both SHALL be distinct from the protocol's own state. A protocol that keeps nothing durably
@@ -195,6 +220,7 @@ SHALL be able to say so in a way that makes a write impossible to construct for 
   fields are written
 
 ### Requirement: Startup is a branch, and exactly one side runs
+
 
 A protocol SHALL have two startup entry points — initialisation and recovery — of which **exactly
 one** runs. A process with nothing in storage is initialised; a process with something in storage
@@ -235,6 +261,7 @@ standard case: repeating it on recovery would overwrite exactly what was being r
 
 ### Requirement: A write completes before anything that depends on it is sent
 
+
 A write SHALL become durable before **any effect emitted after it** takes visible effect — sends
 leaving the process, and indications reaching the layer above. A protocol MAY therefore write and
 send in response to the same event and rely on the write having taken effect first.
@@ -269,6 +296,7 @@ handler could not have reached it otherwise. A driver has nothing to hold and no
 - **THEN** no peer receives that message, whether or not the write itself landed
 
 ### Requirement: Storage is a synchronous interface, and reading is possible
+
 
 A protocol SHALL be supplied with a storage handle through the same parameter that supplies time,
 randomness and the effect sink. The handle SHALL offer, synchronously: reading and replacing a
@@ -315,6 +343,7 @@ performed by the protocol.
 
 ### Requirement: Recovery reads rather than being handed a value
 
+
 On recovering, a protocol SHALL be told that it is recovering and SHALL read what survived through
 the storage handle, rather than being given a value as a parameter.
 
@@ -339,6 +368,7 @@ reading must be synchronous.
 - **THEN** it may read a suffix rather than the whole of it
 
 ### Requirement: A timer is named by an opaque handle, not by a type
+
 
 A timer SHALL be identified by a handle whose type is the same for every protocol. A protocol MUST
 NOT declare a type of its own for timers, and a parent MUST NOT translate a child's timer into
@@ -375,6 +405,7 @@ each being handed the same identity is the failure this requirement exists to pr
 
 ### Requirement: A protocol acts only on an expiry it registered
 
+
 An expiry SHALL be delivered to the protocol at the top of a composition, and a protocol that
 composes children SHALL pass it to each of them. A protocol that registered one or more timers
 SHALL act on an expiry only if it registered that expiry, and SHALL ignore any other. A protocol
@@ -402,6 +433,7 @@ at a moment chosen by an unrelated layer.
 - **THEN** that layer acts on it, having been passed it by each layer above
 
 ### Requirement: A protocol driven directly is given an identity source
+
 
 A helper that delivers one event to a protocol SHALL allow the caller to supply the source of timer
 identities, so that identities continue across successive calls as they do under a driver.

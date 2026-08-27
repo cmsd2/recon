@@ -10,6 +10,7 @@ not pretend that reconnection is invisible.
 
 ### Requirement: Reliable ordered delivery within a session
 
+
 While a session with a peer holds, the link SHALL deliver every message sent to that peer, in the
 order sent, exactly once.
 
@@ -24,6 +25,7 @@ order sent, exactly once.
 - **THEN** no message is delivered to the layer above more than once
 
 ### Requirement: A session ending is reported, not concealed
+
 
 When a session with a peer ends, the link SHALL report it to the layer above, identifying the peer
 and **the epoch that ended**. It SHALL NOT present the resulting gap as ordinary delivery, and
@@ -49,6 +51,7 @@ the next epoch is not yet a fact, and may never become one.
 
 ### Requirement: A session establishment is reported
 
+
 When a session with a peer is established, the link SHALL report it to the layer above, naming the
 peer and the epoch now in force.
 
@@ -73,6 +76,7 @@ anything can only do so on the second.
 
 ### Requirement: The guarantee is scoped to the session
 
+
 The link's reliable-ordered-delivery guarantee SHALL be stated as holding within a session, not
 across one. Across a session boundary the link SHALL make no claim about messages that had not yet
 been delivered.
@@ -84,6 +88,7 @@ been delivered.
 
 ### Requirement: No creation
 
+
 The link SHALL deliver a message only if that message was previously sent to it by the process
 named as its sender.
 
@@ -94,6 +99,7 @@ named as its sender.
 
 ### Requirement: State is bounded by membership
 
+
 The link SHALL hold state proportional to the number of peers, not to the number of messages
 handled. It SHALL NOT retain a record of every message sent or delivered.
 
@@ -101,3 +107,28 @@ handled. It SHALL NOT retain a record of every message sent or delivered.
 
 - **WHEN** a growing number of messages is sent over the link
 - **THEN** the link's state does not grow with them
+
+### Requirement: The session link satisfies the link port in its scope-reporting form
+
+
+The session link SHALL satisfy the same link port as the perfect link, and SHALL additionally
+report the boundaries of the sessions carrying its messages, so that a layer above can repair what
+a session ending lost.
+
+Satisfying the same port is what allows one implementation of a broadcast to run over either link.
+The extra reporting SHALL be visible in the type, so that a layer requiring it cannot be composed
+over a link that cannot provide it.
+
+#### Scenario: One broadcast implementation runs over either link
+
+- **WHEN** a broadcast written against the port is composed over the session link, and separately
+  over the perfect link
+- **THEN** both build, and the broadcast is implemented once
+
+#### Scenario: The extra reporting is part of the type
+
+- **WHEN** a layer that repairs a session ending is composed over the session link
+- **THEN** the project builds
+- **AND** composing the same layer over a link that reports no boundary is rejected when the
+  project is built
+

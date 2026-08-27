@@ -10,6 +10,7 @@ process rather than of the network.
 
 ### Requirement: Validity
 
+
 If a correct process broadcasts a message, that process SHALL eventually deliver it.
 
 This is deliberately weaker than best-effort broadcast's validity, which promises delivery to
@@ -21,6 +22,7 @@ every correct process. Delivery to the others follows from agreement, not from t
 - **THEN** that process eventually delivers it to the layer above
 
 ### Requirement: Agreement
+
 
 If a message is delivered by any correct process, it SHALL eventually be delivered by every
 correct process — including when the process that originally broadcast it has crashed.
@@ -49,6 +51,7 @@ correct process — including when the process that originally broadcast it has 
 
 ### Requirement: No duplication
 
+
 Each process SHALL deliver each broadcast message at most once, however many times it receives it
 from the layer below or from a relaying process.
 
@@ -64,6 +67,7 @@ from the layer below or from a relaying process.
 
 ### Requirement: No creation
 
+
 A process SHALL deliver a message only if that message was previously broadcast by the process
 named as its sender.
 
@@ -77,3 +81,26 @@ named as its sender.
 - **WHEN** a process delivers a message that reached it via a relaying process rather than from
   the original sender
 - **THEN** the delivery names the original sender, not the relayer
+
+### Requirement: The broadcast beneath is a parameter
+
+
+This protocol SHALL be written against the port of the broadcast beneath it and SHALL NOT name an
+implementation. It composes over any broadcast satisfying that port.
+
+Its agreement is bounded by whatever the layer beneath can carry: over a link that never loses a
+relay between correct processes it holds outright, and over one whose guarantees lapse at a scope
+boundary it holds within a scope. That difference is a property of what is supplied, not of two
+different reliable broadcasts.
+
+#### Scenario: The ordinary stack is unchanged
+
+- **WHEN** this protocol is used without naming the layer beneath
+- **THEN** it composes as it did before this change
+
+#### Scenario: The same implementation runs over a session-carrying stack
+
+- **WHEN** it is composed over a broadcast whose link reports scope boundaries
+- **THEN** agreement holds within the scopes carrying the relay, and there is one implementation
+  rather than two
+

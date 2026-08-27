@@ -11,6 +11,7 @@ any assumption about network timing.
 
 ### Requirement: Validity
 
+
 If a correct process broadcasts a message, it SHALL eventually deliver it, provided a majority of
 processes are correct.
 
@@ -26,6 +27,7 @@ processes are correct.
   process
 
 ### Requirement: Uniform agreement
+
 
 If a message is delivered by any process, whether correct or subsequently crashed, it SHALL
 eventually be delivered by every correct process, provided a majority of processes are correct.
@@ -43,6 +45,7 @@ eventually be delivered by every correct process, provided a majority of process
 
 ### Requirement: No duplication and no creation
 
+
 Each process SHALL deliver each broadcast at most once, and only if it was previously broadcast by
 the process named as its sender, which SHALL be the originator and not a relayer.
 
@@ -53,6 +56,7 @@ the process named as its sender, which SHALL be the originator and not a relayer
   process delivered the same broadcast twice
 
 ### Requirement: Delivery waits for a majority, and for nothing else
+
 
 A message SHALL be delivered once more than half of the processes have been seen to relay it. This
 layer SHALL NOT consult a failure detector, SHALL NOT maintain a set of processes believed
@@ -76,6 +80,7 @@ correct, and SHALL NOT exclude any process from consideration for any reason.
 
 ### Requirement: No failure-detection traffic
 
+
 This layer SHALL send no message other than the broadcast payloads it exists to carry, and SHALL
 require no command to begin operating.
 
@@ -91,6 +96,7 @@ require no command to begin operating.
 
 ### Requirement: The assumption is a correct majority, and its failure blocks rather than diverges
 
+
 This layer's guarantees SHALL hold whenever more than half the processes are correct. When that
 assumption fails, the layer SHALL cease to deliver rather than deliver inconsistently.
 
@@ -104,3 +110,35 @@ assumption fails, the layer SHALL cease to deliver rather than deliver inconsist
 
 - **WHEN** a majority is unreachable for a time and then becomes reachable again
 - **THEN** the messages that were waiting are delivered
+
+### Requirement: The broadcast beneath is a parameter
+
+
+This protocol SHALL be written against the port of the broadcast beneath it and SHALL NOT name an
+implementation.
+
+Where the layer beneath reports that a scope was re-established, this protocol SHALL resend what is
+pending to the peer whose scope returned. That resend SHALL be unconditional rather than filtered by
+which peers have been seen to acknowledge, and directed rather than broadcast: acknowledgements
+record who relayed to this process, not whether this process's own relay arrived, so filtering by
+them deadlocks.
+
+Where no such report is possible, the quorum alone carries liveness, and nothing is resent.
+
+#### Scenario: The ordinary stack is unchanged
+
+- **WHEN** this protocol is used without naming the layer beneath
+- **THEN** it composes as it did before this change
+
+#### Scenario: A re-established scope prompts an unconditional directed resend
+
+- **WHEN** the layer beneath reports a scope established with one peer while messages are pending
+- **THEN** every pending message is sent to that peer, whether or not that peer has been seen to
+  acknowledge it, and to no other peer
+
+#### Scenario: No peer is ever accused
+
+- **WHEN** a peer never returns
+- **THEN** delivery proceeds on the quorum alone, and no judgement about that peer is made or
+  required
+

@@ -11,6 +11,7 @@ algorithm anyone would deploy.
 
 ### Requirement: Termination
 
+
 Every correct process SHALL eventually decide some value, provided every correct process proposes
 one.
 
@@ -31,6 +32,7 @@ one.
 
 ### Requirement: Validity
 
+
 If a process decides a value, that value SHALL have been proposed by some process.
 
 #### Scenario: Nothing is invented
@@ -45,6 +47,7 @@ If a process decides a value, that value SHALL have been proposed by some proces
 
 ### Requirement: Integrity
 
+
 No process SHALL decide twice.
 
 #### Scenario: One decision per process
@@ -58,6 +61,7 @@ No process SHALL decide twice.
 - **THEN** it does not decide again
 
 ### Requirement: Agreement while the failure detector is perfect
+
 
 No two correct processes SHALL decide differently, **for as long as the failure detector makes no
 mistake**. This layer depends on the detector's strong accuracy and nothing weaker: it has no
@@ -106,6 +110,7 @@ not require any process to be lost.
 
 ### Requirement: The decision rule is deterministic and agreed in advance
 
+
 Every process SHALL apply the same deterministic function to its accumulated proposal set, so that
 two processes holding the same set decide the same value without further communication.
 
@@ -115,6 +120,7 @@ two processes holding the same set decide the same value without further communi
 - **THEN** they decide the same value
 
 ### Requirement: A round completes only when every process not detected as crashed has been heard from
+
 
 A process SHALL NOT leave a round until it has received that round's message from every process it
 has not been told has crashed. It SHALL decide at the end of a round in which the set of processes
@@ -137,6 +143,7 @@ heard from is unchanged from the previous round, and otherwise proceed to anothe
 
 ### Requirement: State is bounded by membership and rounds
 
+
 This layer SHALL hold state proportional to the number of processes and the number of rounds, and
 SHALL NOT grow with the number of messages handled. Rounds are themselves bounded by the number of
 processes, because a round without a decision requires a newly detected crash.
@@ -148,6 +155,7 @@ processes, because a round without a decision requires a newly detected crash.
 
 ### Requirement: One consensus instance decides once
 
+
 This capability SHALL specify a single consensus instance: one proposal per process, one decision.
 Deciding a sequence of values is a separate abstraction built on top and is not provided here.
 
@@ -155,3 +163,27 @@ Deciding a sequence of values is a separate abstraction built on top and is not 
 
 - **WHEN** a process proposes after a decision has been reached
 - **THEN** no second decision is reported by this instance
+
+### Requirement: The broadcast beneath is a parameter
+
+
+Consensus SHALL be written against the port of the broadcast beneath it and SHALL NOT name an
+implementation. It composes over any broadcast satisfying that port, including one carried by a link
+this project did not write.
+
+Its guarantees continue to rest on the failure detector's timing assumption and on what the layer
+beneath can carry; parameterising the layer beneath changes neither.
+
+#### Scenario: The ordinary stack is unchanged
+
+- **WHEN** consensus is used without naming the layer beneath
+- **THEN** it composes as it did before this change, and agreement and termination are unchanged
+
+#### Scenario: Consensus decides over a link the project never wrote
+
+- **WHEN** consensus is composed over a broadcast carried by a link supplied by an application, and
+  every correct process proposes
+- **THEN** every correct process decides, no two decide differently, and what is decided was
+  proposed
+- **AND** neither the link nor the consensus implementation was modified to achieve it
+
