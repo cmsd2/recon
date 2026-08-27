@@ -63,7 +63,14 @@ fn rough(seed: u64) -> Sim<Urb> {
 }
 
 fn delivered(s: &Sim<Urb>, node: NodeId) -> Vec<(NodeId, u32)> {
-    s.trace().indications_at(node).map(|Ind::Deliver { from, msg }| (*from, *msg)).collect()
+    s.trace()
+        .indications_at(node)
+        .filter_map(|ind| match ind {
+            Ind::Deliver { from, msg } => Some((*from, *msg)),
+            // Over a perfect link there are none. This helper is about deliveries.
+            _ => None,
+        })
+        .collect()
 }
 
 fn settle(s: &mut Sim<Urb>) {

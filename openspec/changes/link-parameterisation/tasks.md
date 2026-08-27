@@ -34,7 +34,7 @@
       resend while the ending prompts nothing. The resend is **not** bounded on `ScopedLink` — it is
       called from the `Link` impl's indication arm, so the tighter bound would fall on every link;
       what makes it unreachable over an unscoped link is the port's own guarantee. See `design.md`
-- [ ] 3.3 Parameterise `MajorityAckUniformReliableBroadcast`, keeping the resend unconditional and
+- [x] 3.3 Parameterise `MajorityAckUniformReliableBroadcast`, keeping the resend unconditional and
       directed, and verify a test that a filtered resend would deadlock still passes
 - [x] 3.4 Parameterise `FloodingConsensus`, and verify its existing suite passes unchanged
 - [x] 3.5 ~~Thread each layer's `Timer` type parameter with a default mirroring the layer's own~~ —
@@ -48,14 +48,14 @@
       link, and verify every test passes without weakening an assertion
 - [x] 4.2 Move the `session_broadcast` suite likewise, and verify the reliable-versus-uniform
       contrast it draws still holds
-- [ ] 4.3 Move the `session_majority_ack_uniform_reliable_broadcast` suite likewise, including the
+- [x] 4.3 Move the `session_majority_ack_uniform_reliable_broadcast` suite likewise, including the
       stall test that spends the `suspend` knob
-- [ ] 4.4 Merge each pair of module docstrings, checking the quoted pseudocode and departures list of
+- [x] 4.4 Merge each pair of module docstrings, checking the quoted pseudocode and departures list of
       both originals survive, and verify no departure is lost by reading the merged text against
       both
-- [ ] 4.5 Delete the four `session_*` modules and their registrations in `lib.rs`, and verify
+- [x] 4.5 Delete the four `session_*` modules and their registrations in `lib.rs`, and verify
       `cargo test --workspace` passes with the counts accounted for
-- [ ] 4.6 Delete the four `openspec/specs/broadcast/session-*` directories as part of the same
+- [x] 4.6 Delete the four `openspec/specs/broadcast/session-*` directories as part of the same
       change, and verify `openspec validate --all --strict` passes
 
 ## 5. Somebody else's link

@@ -64,6 +64,53 @@
 //! - `⟨urb, Init⟩` is not a separate event. `new` establishes the state, and [`Cmd::Start`] begins
 //!   failure detection.
 //! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
+//!
+//! # Over a link that reports scope boundaries
+//!
+//! `L` is a parameter, so this one module is also what `session_uniform_reliable_broadcast` used
+//! to be. Algorithm 3.4 gains **one** clause and nothing else changes:
+//!
+//! ```text
+//! upon event ⟨ SessionEstablished | q ⟩ do
+//!     forall (s, m) ∈ pending do
+//!         trigger ⟨ beb, SendTo | q, [DATA, s, m] ⟩;
+//! ```
+//!
+//! It reuses `pending`, which the algorithm already maintains, and `SendTo`, which is a narrowing
+//! of an existing action rather than a new communication step.
+//!
+//! Two things about that clause are deliberate and neither is what one would write first. It is
+//! **unconditional**, not filtered by `q ∉ ack[m]`: the filtered version deadlocks, for the reason
+//! set out at `resend_to`, which is where a test found it. And it is **directed** at the peer
+//! whose scope returned rather than broadcast to everyone, because the ending was per peer and so
+//! is the repair. Nothing is attempted on the *ending* itself: the peer is unreachable at that
+//! moment and anything sent would be discarded.
+//!
+//! ```text
+//! URB1 [always]       Validity — conditional on the two mechanisms below
+//! URB2 [incarnation]  No duplication — `delivered` is volatile, so a restart forgets it
+//! URB3 [always]       No creation
+//! URB4 [always]       Uniform agreement — conditional on the two mechanisms below
+//! ```
+//!
+//! `URB2` is `[incarnation]` by `docs/scope-annotated-modules.md` Corollary 7.2: the set that
+//! would have to survive is `delivered`, it is held in memory, and the boundary it cannot cross is
+//! this process's own `⟨Init⟩`.
+//!
+//! `URB1` and `URB4` are `[always]` only because between two mechanisms no third outcome is left —
+//! the scope comes back and the resend repairs it, or the peer never returns and the detector's
+//! timeout drops it from `correct`. Each carries a condition that is an assumption rather than a
+//! property of this code. The reconnection path needs the peer to be reachable again; the
+//! accusation path needs the detector's synchrony assumption, and `perfect_failure_detector` is
+//! explicit that outside a synchronous system it accuses correct processes. **Both failing at once
+//! is a permanent split**: each side of a partition accuses the other, each has `correct ⊆ ack[m]`
+//! satisfied among itself, and both deliver — not uniform agreement failing on a technicality but
+//! two disjoint sets of processes proceeding as though the other did not exist.
+//! [`crate::majority_ack_uniform_reliable_broadcast`] cannot suffer that and blocks instead; that
+//! difference is what a quorum buys and a detector costs.
+//!
+//! Read against reliable broadcast, which has neither mechanism and whose agreement is therefore
+//! scoped, this is the clearest statement of what a failure detector buys.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};

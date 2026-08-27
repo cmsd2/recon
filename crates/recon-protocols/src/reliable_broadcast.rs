@@ -44,6 +44,45 @@
 //!   each broadcast carries an identifier — its originator and a per-sender sequence number — and
 //!   deduplication is on that, so identical content broadcast twice is delivered twice.
 //! - `⟨rb, Init⟩` is not a separate event; `new` establishes the same state.
+//!
+//! # Over a link that reports scope boundaries
+//!
+//! `L` is a parameter, so this one module is also what `session_reliable_broadcast` used to be.
+//! Algorithm 3.3 is unchanged; what changes is the scope its agreement holds within.
+//!
+//! Over a perfect link a relay always arrives, because the link retransmits until it does. Over a
+//! session link it may not, and this layer has nothing with which to retry:
+//!
+//! - It relays **once**, on first delivery. That is what makes eager reliable broadcast eager.
+//! - It keeps `delivered` as a set of **identifiers**, not payloads — so even knowing a relay was
+//!   lost, it has no copy to send again. Retaining payloads would be state growing with messages,
+//!   which `docs/bounded-space.md` forbids without a window.
+//! - It is **fail-silent**. Algorithm 3.3 uses no failure detector, so it cannot conclude that a
+//!   process is gone and stop expecting to reach it.
+//!
+//! So when a relay is lost to a scope ending, nothing retries and nothing gives up. This layer
+//! cannot bridge, so it propagates: the boundary is reported upward in its own `Ind` rather than
+//! absorbed, which is what `docs/conditional-guarantees.md` requires of a layer in that position.
+//!
+//! ```text
+//! RB1 [session]       Validity
+//! RB2 [incarnation]   No duplication — `delivered` is volatile, so a restart forgets it
+//! RB3 [always]        No creation
+//! RB4 [session]       Agreement — within the scopes carrying the relay, and not across one
+//! ```
+//!
+//! `RB2` is `[incarnation]` for the reason `docs/scope-annotated-modules.md` gives as Corollary
+//! 7.2, and by the same argument: the redundancy that would have to survive is `delivered`, that
+//! set is held in memory, and the boundary it cannot cross is this process's own `⟨Init⟩`. A
+//! recipient that restarts and is then relayed a message it had already delivered — which the
+//! eager relay of a peer that did *not* restart will happily do — delivers it a second time.
+//! `[always]` would be the claim that a volatile set survives a crash.
+//!
+//! This is not a defect to be fixed here. It is the honest reading of Algorithm 3.3 on a link that
+//! can lose a suffix, and it is exactly what uniform reliable broadcast does not share — that one
+//! has a failure detector, and between reconnection and accusation it has no third outcome.
+//! Reading the two together is the sharpest available argument for why uniform reliable broadcast
+//! needs a detector at all.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};

@@ -25,6 +25,37 @@
 //! This layer adds nothing to the wire: its message type is the perfect link's, unchanged, and
 //! its indication handler is pure forwarding. It is the second of the three protocols in this
 //! stack to contribute no header of its own.
+//!
+//! # Over a link that reports scope boundaries
+//!
+//! `L` is a parameter, so this one module is both the perfect-link broadcast above and what
+//! `session_best_effort_broadcast` used to be. The algorithm is unchanged either way — Algorithm
+//! 3.1 does not mention links — but what it can promise is not.
+//!
+//! Over a perfect link, a message sent to a correct process arrives; the link retransmits until it
+//! does. Over a session link it may not: a session can end with the message in flight, and that
+//! link does not retry. So validity holds only while the sessions carrying a broadcast hold.
+//!
+//! This layer cannot repair that. It keeps nothing but the process set — no copy of what it sent,
+//! no record of who received — so there is nothing to resend from, and giving it one would be
+//! state growing with messages, which `docs/bounded-space.md` forbids. What it can do is refuse to
+//! conceal it: both boundary reports are passed upward, because they are the only signal the
+//! layers above have, and one of them — uniform reliable broadcast — can act on what this layer
+//! cannot.
+//!
+//! ```text
+//! BEB1 [session]  Best-effort validity   — [always] over a link that cannot end
+//! BEB2 [always]   No duplication
+//! BEB3 [always]   No creation
+//! ```
+//!
+//! The scope annotation is the link's, not this layer's: over a link whose guarantees never lapse,
+//! `[session]` is vacuous and BEB1 reads as the book states it.
+//!
+//! One request is not in Module 3.1. [`Cmd::SendTo`] sends to a single member of Π — same wire
+//! message, same link, strictly fewer recipients, no new communication step. It exists so a layer
+//! above can answer a scope that has just come back without paying for a fan-out to everyone
+//! else, and it is a narrowing of `Broadcast` rather than an addition to the module.
 
 use core::marker::PhantomData;
 use core::time::Duration;

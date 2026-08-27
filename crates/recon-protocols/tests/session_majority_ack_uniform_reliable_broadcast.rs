@@ -11,9 +11,11 @@
 
 use core::time::Duration;
 use recon_core::NodeId;
-use recon_protocols::session_majority_ack_uniform_reliable_broadcast::{
-    Cmd, Ind, SessionMajorityAckUniformReliableBroadcast,
+use recon_protocols::majority_ack_uniform_reliable_broadcast::{
+    Cmd, Ind, MajorityAckUniformReliableBroadcast,
 };
+use recon_protocols::session_link::SessionLink;
+use recon_protocols::uniform_reliable_broadcast::Data;
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -25,12 +27,14 @@ const ALL: [NodeId; 5] = [A, B, C, D, E];
 
 const BOUND: Duration = Duration::from_millis(20);
 
-type Urb = SessionMajorityAckUniformReliableBroadcast<u32>;
+// The base module over a session link. The fork it replaces held the same algorithm with the
+// link swapped underneath, which is what the link port made unnecessary.
+type Urb = MajorityAckUniformReliableBroadcast<u32, SessionLink<Data<u32>>>;
 
 fn sim(seed: u64) -> Sim<Urb> {
     let mut s: Sim<Urb> =
         Sim::new(Config::default().seed(seed).sessions().synchronous(BOUND), &ALL, |me| {
-            SessionMajorityAckUniformReliableBroadcast::new(me, ALL)
+            MajorityAckUniformReliableBroadcast::with_link(me, ALL, SessionLink::new())
         });
     s.deliver_session_events();
     s
@@ -98,11 +102,11 @@ fn the_majority_boundary_is_pinned_at_an_even_membership() {
     // With an odd N, `2k > N` and `2k >= N` are the same predicate. Four processes make half a
     // real quantity, so the off-by-one that would let exactly half suffice is visible.
     const FOUR: [NodeId; 4] = [A, B, C, D];
-    type Four = SessionMajorityAckUniformReliableBroadcast<u32>;
+    type Four = MajorityAckUniformReliableBroadcast<u32, SessionLink<Data<u32>>>;
     let four = |seed: u64| -> Sim<Four> {
         let mut s: Sim<Four> =
             Sim::new(Config::default().seed(seed).sessions().synchronous(BOUND), &FOUR, |me| {
-                SessionMajorityAckUniformReliableBroadcast::new(me, FOUR)
+                MajorityAckUniformReliableBroadcast::with_link(me, FOUR, SessionLink::new())
             });
         s.deliver_session_events();
         s
@@ -111,7 +115,7 @@ fn the_majority_boundary_is_pinned_at_an_even_membership() {
         s.trace().indications_at(n).filter(|i| matches!(i, Ind::Deliver { .. })).count()
     };
 
-    assert_eq!(SessionMajorityAckUniformReliableBroadcast::<u32>::new(A, FOUR).majority(), 3);
+    assert_eq!(Four::with_link(A, FOUR, SessionLink::new()).majority(), 3);
 
     let mut half = four(1);
     half.run_for(Duration::from_millis(50));
