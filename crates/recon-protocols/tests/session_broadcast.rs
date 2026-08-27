@@ -6,9 +6,10 @@
 
 use core::time::Duration;
 use recon_core::NodeId;
-use recon_protocols::session_reliable_broadcast::{self as srb, SessionReliableBroadcast};
-use recon_protocols::session_uniform_reliable_broadcast::{
-    self as surb, BroadcastId, SessionUniformReliableBroadcast,
+use recon_protocols::reliable_broadcast::{self as srb, Data as RbData, ReliableBroadcast};
+use recon_protocols::session_link::SessionLink;
+use recon_protocols::uniform_reliable_broadcast::{
+    self as surb, BroadcastId, Data as UrbData, UniformReliableBroadcast,
 };
 use recon_sim::{Config, Sim};
 
@@ -26,13 +27,16 @@ fn detect_after() -> Duration {
     heartbeat() * 3
 }
 
-type Rb = SessionReliableBroadcast<u32>;
-type Urb = SessionUniformReliableBroadcast<u32>;
+// The base modules over a session link. There is no separate session implementation any more —
+// that is what the link port removed — so what this suite pins is that the one implementation,
+// given a link that reports scope boundaries, draws the same contrast the two forks did.
+type Rb = ReliableBroadcast<u32, SessionLink<RbData<u32>>>;
+type Urb = UniformReliableBroadcast<u32, SessionLink<UrbData<u32>>>;
 
 fn rb_sim(seed: u64) -> Sim<Rb> {
     let mut s: Sim<Rb> =
         Sim::new(Config::default().seed(seed).sessions().synchronous(BOUND), &ALL, |me| {
-            SessionReliableBroadcast::new(me, ALL)
+            ReliableBroadcast::with_link(me, ALL, SessionLink::new())
         });
     s.deliver_session_events();
     s
@@ -41,7 +45,13 @@ fn rb_sim(seed: u64) -> Sim<Rb> {
 fn urb_sim(seed: u64) -> Sim<Urb> {
     let mut s: Sim<Urb> =
         Sim::new(Config::default().seed(seed).sessions().synchronous(BOUND), &ALL, |me| {
-            SessionUniformReliableBroadcast::new(me, ALL, heartbeat(), detect_after())
+            UniformReliableBroadcast::with_link(
+                me,
+                ALL,
+                SessionLink::new(),
+                heartbeat(),
+                detect_after(),
+            )
         });
     s.deliver_session_events();
     s

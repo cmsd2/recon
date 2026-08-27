@@ -70,6 +70,16 @@ This is the whole of how four forks collapse into four parameterised modules. It
 type system what `docs/conditional-guarantees.md` states in prose: *a layer that cannot bridge must
 propagate*, and a layer that repairs a scope ending needs a link that raises one.
 
+**Amendment, from building it.** The bound turned out to be the wrong half of this to lean on.
+`ScopedLink` is where a layer *declares* it needs boundaries, and the compile-fail test confirms the
+declaration is enforced. But the code that acts on a boundary — uniform reliable broadcast's resend
+on re-establishment — cannot itself be bounded on `ScopedLink`: it is called from the arm that
+handles the child's indications, which lives in the `Link` impl, so requiring the tighter bound
+there would require it of every link. What makes the resend safe is the port's own guarantee
+instead: `Link::classify` returns a boundary only for a link that reports one, so over a perfect
+link the path is unreachable rather than merely unused. The declaration is checked by the compiler;
+the reachability is a property of the port. Task 3.2 was reworded to say so.
+
 *Alternative considered — one port whose `Ind` always includes the scope variants, with a
 non-session link never emitting them.* Rejected: it obliges the perfect link to declare a scope it
 cannot observe, which `docs/scope-annotated-modules.md` forbids by Definition 2a and Corollary 8.1.

@@ -71,8 +71,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
+use crate::link::Link;
 use crate::perfect_failure_detector::{self as pfd, Heartbeat, PerfectFailureDetector};
-use crate::perfect_link as pl;
+use crate::perfect_link::{self as pl, PerfectLink};
 
 /// Names one broadcast uniquely: who originated it, and their sequence number for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -109,8 +110,8 @@ const _: () = {
 /// The first multiplexing in this stack. It is an enum rather than a keyed registry, so a message
 /// routed to the wrong child cannot compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Wire<P> {
-    Broadcast(BebMsg<P>),
+pub enum Wire<M> {
+    Broadcast(M),
     Detector(Heartbeat),
 }
 
@@ -125,11 +126,21 @@ pub enum Cmd<P> {
 pub enum Ind<P> {
     /// `from` is the process that originated the message, never a relayer.
     Deliver { from: NodeId, msg: P },
+    /// The scope with `peer` ended at `epoch`.
+    ///
+    /// Raised only over a link that reports boundaries. Unlike reliable broadcast, this layer
+    /// *can* bridge one — it holds `pending` until every correct process has acknowledged, so a
+    /// re-establishment lets it resend. It reports the ending anyway, because the layer above may
+    /// have its own reason to know, and because a guarantee that lapsed and was repaired is not
+    /// the same as one that never lapsed.
+    SessionEnded { peer: NodeId, epoch: u64 },
+    /// A scope with `peer` is in force at `epoch`.
+    SessionEstablished { peer: NodeId, epoch: u64 },
 }
 
 /// Broadcast with uniform agreement, over best-effort broadcast and a failure detector.
 #[derive(Debug)]
-pub struct UniformReliableBroadcast<P> {
+pub struct UniformReliableBroadcast<P, L = PerfectLink<Data<P>>> {
     me: NodeId,
     seq: u64,
     /// Every process believed correct. Shrinks on a crash indication and never grows.
@@ -139,7 +150,7 @@ pub struct UniformReliableBroadcast<P> {
     /// Which processes have been seen to acknowledge each message.
     ack: BTreeMap<BroadcastId, BTreeSet<NodeId>>,
     delivered: BTreeSet<BroadcastId>,
-    beb: BestEffortBroadcast<Data<P>>,
+    beb: BestEffortBroadcast<Data<P>, L>,
     detector: PerfectFailureDetector,
     beb_inbox: Vec<beb::Ind<Data<P>>>,
     det_inbox: Vec<pfd::Ind>,
@@ -148,7 +159,7 @@ pub struct UniformReliableBroadcast<P> {
     relay_inbox: Vec<beb::Ind<Data<P>>>,
 }
 
-impl<P> UniformReliableBroadcast<P> {
+impl<P> UniformReliableBroadcast<P, PerfectLink<Data<P>>> {
     /// Broadcast among `members`, which must include `me`.
     ///
     /// `heartbeat` and `detect_after` configure the failure detector; `detect_after` must exceed
@@ -161,6 +172,20 @@ impl<P> UniformReliableBroadcast<P> {
         heartbeat: Duration,
         detect_after: Duration,
     ) -> Self {
+        let link = PerfectLink::new(me, retransmit);
+        Self::with_link(me, members, link, heartbeat, detect_after)
+    }
+}
+
+impl<P, L> UniformReliableBroadcast<P, L> {
+    /// Broadcast among `members`, over the link supplied.
+    pub fn with_link(
+        me: NodeId,
+        members: impl IntoIterator<Item = NodeId>,
+        link: L,
+        heartbeat: Duration,
+        detect_after: Duration,
+    ) -> Self {
         let mut members: BTreeSet<NodeId> = members.into_iter().collect();
         members.insert(me);
         UniformReliableBroadcast {
@@ -170,7 +195,7 @@ impl<P> UniformReliableBroadcast<P> {
             pending: BTreeMap::new(),
             ack: BTreeMap::new(),
             delivered: BTreeSet::new(),
-            beb: BestEffortBroadcast::new(me, members.clone(), retransmit),
+            beb: BestEffortBroadcast::with_link(me, members.clone(), link),
             detector: PerfectFailureDetector::new(me, members, heartbeat, detect_after),
             beb_inbox: Vec::new(),
             det_inbox: Vec::new(),
@@ -199,14 +224,17 @@ impl<P> UniformReliableBroadcast<P> {
     }
 }
 
-impl<P: Clone> UniformReliableBroadcast<P> {
+impl<P: Clone, L> UniformReliableBroadcast<P, L>
+where
+    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+{
     /// Run the broadcast child, then act on what it reported.
     fn with_beb(
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(
-            &mut BestEffortBroadcast<Data<P>>,
-            &mut ProtoCx<'_, BestEffortBroadcast<Data<P>>>,
+            &mut BestEffortBroadcast<Data<P>, L>,
+            &mut ProtoCx<'_, BestEffortBroadcast<Data<P>, L>>,
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.beb_inbox);
@@ -215,21 +243,50 @@ impl<P: Clone> UniformReliableBroadcast<P> {
             cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
-            // The broadcast beneath reports scope boundaries only over a link that raises them.
-            // This layer is not yet parameterised over its link, so its child is the perfect link
-            // and a boundary cannot arrive. Named rather than dropped: silently absorbing a scope
-            // end is the failure `docs/conditional-guarantees.md` calls cardinal, and when this
-            // layer gains its link parameter the arm becomes real handling.
-            let beb::Ind::Deliver { from, msg: Data { id, payload } } = ind else {
-                unreachable!("a perfect link raises no scope boundary")
-            };
-            self.on_beb_deliver(from, id, payload, cx);
+            match ind {
+                beb::Ind::Deliver { from, msg: Data { id, payload } } => {
+                    self.on_beb_deliver(from, id, payload, cx)
+                }
+                beb::Ind::SessionEnded { peer, epoch } => {
+                    // Informative only: the peer is unreachable, so nothing can be resent yet.
+                    // Attempting the repair here would send into a session already gone.
+                    cx.indicate(Ind::SessionEnded { peer, epoch });
+                }
+                beb::Ind::SessionEstablished { peer, epoch } => {
+                    // The moment the repair becomes possible. This layer holds `pending` until
+                    // every correct process has acknowledged, so its redundancy outlives the
+                    // scope and it *can* bridge — which is why it resends rather than merely
+                    // propagating, as reliable broadcast beneath it must.
+                    cx.indicate(Ind::SessionEstablished { peer, epoch });
+                    self.resend_to(peer, cx);
+                }
+            }
         }
         self.beb_inbox = inbox;
         self.check_deliverable(cx);
     }
 
     /// Run the detector child, then act on what it reported.
+    /// Resend everything still outstanding to the peer whose scope has just come back.
+    ///
+    /// Only ever reached over a link that reports boundaries: [`Link::classify`] returns a
+    /// boundary only for a [`crate::link::ScopedLink`], so over a perfect link this is unreachable
+    /// rather than merely unused. Bounding it on `ScopedLink` in the type system was the original
+    /// plan and does not work — the arm that calls it lives in the `Link` impl, which would then
+    /// require the tighter bound for every link — so what makes it safe is the port's own
+    /// guarantee rather than a second bound. See `design.md`.
+    fn resend_to(&mut self, peer: NodeId, cx: &mut ProtoCx<'_, Self>) {
+        let outstanding: Vec<Data<P>> = self
+            .pending
+            .iter()
+            .map(|(id, payload)| Data { id: *id, payload: payload.clone() })
+            .collect();
+        for data in outstanding {
+            // Same wire message as a relay, strictly fewer recipients, no new communication step.
+            self.with_beb(cx, |beb, ccx| beb.on_cmd(beb::Cmd::SendTo { to: peer, msg: data }, ccx));
+        }
+    }
+
     fn with_detector(
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
@@ -312,12 +369,17 @@ impl<P: Clone> UniformReliableBroadcast<P> {
     }
 }
 
-impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
+impl<P: Clone, L> Protocol for UniformReliableBroadcast<P, L>
+where
+    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+{
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
-    type Msg = Wire<P>;
+    type Msg = Wire<L::Msg>;
     /// No scope conditions: this protocol's guarantees do not lapse.
-    type Scope = core::convert::Infallible;
+    /// Whatever the link's guarantees are conditional on. This layer bridges an ending rather
+    /// than absorbing it, but bridging is not the same as never having lapsed.
+    type Scope = L::Scope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -341,7 +403,7 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
         }
     }
 
-    fn on_msg(&mut self, from: NodeId, msg: Wire<P>, cx: &mut ProtoCx<'_, Self>) {
+    fn on_msg(&mut self, from: NodeId, msg: Wire<L::Msg>, cx: &mut ProtoCx<'_, Self>) {
         match msg {
             Wire::Broadcast(m) => self.with_beb(cx, |beb, ccx| beb.on_msg(from, m, ccx)),
             Wire::Detector(h) => self.with_detector(cx, |d, ccx| d.on_msg(from, h, ccx)),
@@ -353,5 +415,10 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
         // did not will recognise that and do nothing.
         self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
         self.with_detector(cx, |d, ccx| d.on_timer(id, ccx));
+    }
+
+    /// Hand the scope ending down to the children. The trait's default would drop it.
+    fn on_scope_event(&mut self, scope: L::Scope, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_scope_event(scope, ccx));
     }
 }

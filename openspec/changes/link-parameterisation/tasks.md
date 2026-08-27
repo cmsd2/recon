@@ -30,8 +30,10 @@
 
 - [x] 3.1 Parameterise `ReliableBroadcast` over the broadcast beneath, with a default, and verify
       its existing suite passes unchanged
-- [ ] 3.2 Parameterise `UniformReliableBroadcast`, bounding the resend path on `ScopedLink`, and
-      verify the establishment prompts a directed resend and the ending prompts nothing
+- [x] 3.2 Parameterise `UniformReliableBroadcast` and verify the establishment prompts a directed
+      resend while the ending prompts nothing. The resend is **not** bounded on `ScopedLink` — it is
+      called from the `Link` impl's indication arm, so the tighter bound would fall on every link;
+      what makes it unreachable over an unscoped link is the port's own guarantee. See `design.md`
 - [ ] 3.3 Parameterise `MajorityAckUniformReliableBroadcast`, keeping the resend unconditional and
       directed, and verify a test that a filtered resend would deadlock still passes
 - [x] 3.4 Parameterise `FloodingConsensus`, and verify its existing suite passes unchanged
@@ -44,7 +46,7 @@
 
 - [x] 4.1 Move the `session_best_effort_broadcast` suite onto `BestEffortBroadcast` with a session
       link, and verify every test passes without weakening an assertion
-- [ ] 4.2 Move the `session_broadcast` suite likewise, and verify the reliable-versus-uniform
+- [x] 4.2 Move the `session_broadcast` suite likewise, and verify the reliable-versus-uniform
       contrast it draws still holds
 - [ ] 4.3 Move the `session_majority_ack_uniform_reliable_broadcast` suite likewise, including the
       stall test that spends the `suspend` knob
