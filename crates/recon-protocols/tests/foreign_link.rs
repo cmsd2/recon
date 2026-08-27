@@ -8,13 +8,28 @@ use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use recon_protocols::best_effort_broadcast::{BestEffortBroadcast, Cmd, Ind};
 use recon_protocols::link::{Link, LinkInd};
-use recon_protocols::perfect_link as pl;
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
 const B: NodeId = NodeId::new(2);
 const C: NodeId = NodeId::new(3);
 const ALL: [NodeId; 3] = [A, B, C];
+
+/// What this link is asked to do, in its own words rather than another link's.
+///
+/// The port carries the translations, not the types, so a foreign link is free to name its
+/// requests and reports whatever it likes. Deliberately not the perfect link's types: reusing
+/// its vocabulary would make this a demonstration that the perfect link's shape works, which is
+/// not the claim. This file now imports no link at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DriverCmd<P> {
+    Transmit { peer: NodeId, bytes: P },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DriverInd<P> {
+    Arrived { peer: NodeId, bytes: P },
+}
 
 /// Somebody else's link: no retransmission, no deduplication, no timer. It speaks the link port
 /// and nothing more, which is the whole of what a broadcast asks of it.
@@ -28,19 +43,23 @@ impl<P> Default for DriverLink<P> {
 }
 
 impl<P: Clone> Protocol for DriverLink<P> {
-    type Cmd = pl::Cmd<P>;
-    type Ind = pl::Ind<P>;
+    type Cmd = DriverCmd<P>;
+    type Ind = DriverInd<P>;
     type Msg = P;
     type Scope = core::convert::Infallible;
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 
-    fn on_cmd(&mut self, pl::Cmd::Send { to, msg }: Self::Cmd, cx: &mut ProtoCx<'_, Self>) {
-        cx.send(to, msg);
+    fn on_cmd(
+        &mut self,
+        DriverCmd::Transmit { peer, bytes }: Self::Cmd,
+        cx: &mut ProtoCx<'_, Self>,
+    ) {
+        cx.send(peer, bytes);
     }
 
     fn on_msg(&mut self, from: NodeId, msg: P, cx: &mut ProtoCx<'_, Self>) {
-        cx.indicate(pl::Ind::Deliver { from, msg });
+        cx.indicate(DriverInd::Arrived { peer: from, bytes: msg });
     }
 
     fn on_timer(&mut self, _id: TimerId, _cx: &mut ProtoCx<'_, Self>) {
@@ -56,12 +75,12 @@ impl<P: Clone> Protocol for DriverLink<P> {
 /// boundary, and a layer needing one cannot be composed over it — which is the honest outcome
 /// rather than a stack that waits for a re-establishment nobody will report.
 impl<P: Clone> Link<P> for DriverLink<P> {
-    fn send(to: NodeId, msg: P) -> pl::Cmd<P> {
-        pl::Cmd::Send { to, msg }
+    fn send(to: NodeId, msg: P) -> DriverCmd<P> {
+        DriverCmd::Transmit { peer: to, bytes: msg }
     }
 
-    fn classify(pl::Ind::Deliver { from, msg }: pl::Ind<P>) -> LinkInd<P> {
-        LinkInd::Deliver { from, msg }
+    fn classify(DriverInd::Arrived { peer, bytes }: DriverInd<P>) -> LinkInd<P> {
+        LinkInd::Deliver { from: peer, msg: bytes }
     }
 }
 

@@ -168,8 +168,27 @@ What is worth doing early, because the simulator can already produce the fault:
    any transport exists.
 2. ~~Make crash actually lose state, with an opt-in for the current suspend-and-resume
    behaviour.~~ Done: `crash` rebuilds from the constructor, `suspend` preserves.
-3. Write the boundary down: layers above the link may depend on its `Cmd` and `Ind` types and
-   nothing else. That is the seam a second implementation will be swapped through.
+3. ~~Write the boundary down: layers above the link may depend on its `Cmd` and `Ind` types and
+   nothing else. That is the seam a second implementation will be swapped through.~~ Done, and it
+   turned out to need building rather than writing down.
+
+   `crates/recon-protocols/src/link.rs` holds the port. A link keeps its own `Cmd` and `Ind` —
+   pinning them to one pair admits the perfect link and excludes the session link, whose `Ind` has
+   three variants — and supplies two translations instead: build a send, and say what an indication
+   means. Every layer above bounds on `Link` and names no implementation, so the same broadcast
+   composes over the perfect link, the session link, or an application's own driver.
+
+   The sentence above was true and inert for as long as it was documentation. Needing a different
+   link once produced four forked broadcast modules, around 2,000 lines whose algorithms were the
+   originals with the link swapped underneath; the 2026-08 audit found a quoted clause gone stale
+   in one fork and not its sibling. Those four are gone, and what replaced them is a type parameter.
+
+   The half of this the type system does enforce is which layers may depend on a boundary.
+   `ScopedLink` is the claim that a link can observe one; the session link makes it and the perfect
+   link does not, because PL2 is scoped to the recipient's incarnation and the link cannot see that
+   incarnation end. A layer that repairs a scope ending bounds on `ScopedLink`, so composing it over
+   a link that reports none is a compile error rather than a stack that waits for ever. That is *a
+   layer that cannot bridge must propagate*, checked rather than asked for.
 
 ## Extending the book's notation to say this
 

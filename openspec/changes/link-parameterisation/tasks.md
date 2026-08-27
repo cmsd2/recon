@@ -66,15 +66,21 @@
       the bare payload, not the built-in link's identifier
 - [x] 5.3 Run consensus over the foreign link and verify every correct process decides, no two
       decide differently, and what is decided was proposed
-- [ ] 5.4 Verify neither the link nor any protocol was edited to make the previous three pass, by
-      confirming the diff for them is confined to test files
+- [x] 5.4 Verify the seam runs one way only. The stated check — that the diff is confined to test
+      files — cannot be run, because this change edits every protocol to *build* the seam. What was
+      checked instead: no module under `src/` mentions the foreign link, and `foreign_link.rs`
+      imports no link at all, naming its own request and indication types rather than borrowing the
+      perfect link's. It was borrowing them until this task was worked; fixing that is what makes
+      task 5.2's claim true
 
 ## 6. The documents this dates
 
-- [ ] 6.1 Update `docs/conditional-guarantees.md` where it says the seam is a rule layers are asked
+- [x] 6.1 Update `docs/conditional-guarantees.md` where it says the seam is a rule layers are asked
       to follow, and verify the section describes the port as it is built
-- [ ] 6.2 Update `README.md`'s protocol table for the four removed modules, and verify the suite
-      counts and totals it claims against what `cargo test --workspace` prints
-- [ ] 6.3 Update `CLAUDE.md`'s composition conventions to say a parent names its child's port rather
+- [x] 6.2 Update `README.md`'s protocol table for the four removed modules, and verify the suite
+      counts and totals it claims against what `cargo test --workspace` prints. The specification
+      tree gains `links/link-port` only when this change is archived and its New Capability is
+      synced, so that line stays as it is until then
+- [x] 6.3 Update `CLAUDE.md`'s composition conventions to say a parent names its child's port rather
       than its child, and verify no other convention it states has been contradicted
-- [ ] 6.4 Run `./scripts/check.sh` and verify it passes in full
+- [x] 6.4 Run `./scripts/check.sh` and verify it passes in full

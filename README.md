@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 343 tests, all in-process, a few seconds
+cargo test --workspace          # 356 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -160,16 +160,26 @@ The bottom abstraction, fair-loss links, is not a module: it is what the simulat
 ### Over session links — what a deployment would run
 
 The stubborn link belongs to the classroom: in a deployment TCP and QUIC already retransmit, and
-the deployable link needs *less* state than the perfect link, not more. These abstractions are the same
-algorithms over a link that can end.
+the deployable link needs *less* state than the perfect link, not more.
+
+There is **no second set of modules** for this. Every broadcast above takes its link as a type
+parameter bounded on [`link.rs`](crates/recon-protocols/src/link.rs), so the session stack is the
+same modules with a different type argument:
+
+```rust
+type Beb = BestEffortBroadcast<u32, SessionLink<u32>>;
+type Urb = UniformReliableBroadcast<u32, SessionLink<Data<u32>>>;
+```
 
 | Abstraction | Module | Status | Space |
 |---|---|---|---|
+| Link port | [`link.rs`](crates/recon-protocols/src/link.rs) | — | — |
 | Session link | [`session_link.rs`](crates/recon-protocols/src/session_link.rs) | deployable | bounded by membership |
-| Best-effort broadcast | [`session_best_effort_broadcast.rs`](crates/recon-protocols/src/session_best_effort_broadcast.rs) | deployable | bounded by membership |
-| Reliable broadcast | [`session_reliable_broadcast.rs`](crates/recon-protocols/src/session_reliable_broadcast.rs) | transcription | unbounded |
-| Uniform reliable broadcast | [`session_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_uniform_reliable_broadcast.rs) | transcription | unbounded |
-| Uniform reliable broadcast, majority-ack | [`session_majority_ack_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/session_majority_ack_uniform_reliable_broadcast.rs) | transcription, **no failure detector** | unbounded |
+
+There were four forked `session_*` broadcast modules until the link became a parameter — around
+2,000 lines whose algorithms were the originals with the link swapped underneath, and in which the
+2026-08 audit found a quoted clause gone stale in one fork and not its sibling. Their tests survive
+unchanged and now exercise the base modules; the modules themselves are gone.
 
 There is a third stack besides these two: the fail-recovery protocols, below.
 
@@ -282,8 +292,7 @@ openspec/specs/
 ├── links/                             stubborn, perfect, session
 ├── failure-detection/                 perfect failure detector
 ├── broadcast/                         best-effort, reliable, uniform reliable,
-│                                      the session variants, majority-ack, and
-│                                      the logged ones
+│                                      majority-ack, and the logged ones
 └── consensus/                         flooding consensus
 ```
 
@@ -369,16 +378,18 @@ cargo test --workspace -- --nocapture                 # with output
 | [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism | 23 |
 | [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles | 80 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
+| [`tests/link_port.rs`](crates/recon-protocols/tests/link_port.rs), `foreign_link.rs` | that both links satisfy the port, that a protocol is not a link by accident, and that a link this project never wrote carries the stack up to consensus | 6 / 3 |
+| `tests/alloc_probe.rs` | what one delivery costs in allocations | 2 |
 | `tests/stubborn_link.rs`, `perfect_link.rs`, `session_link.rs` | the links | 14 / 16 / 11 |
 | `tests/perfect_failure_detector.rs` | completeness and accuracy, where accuracy is lost, and both sides of a stall | 17 |
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the broadcasts over perfect links | 11 / 15 / 17 |
-| `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the broadcasts over session links, and where the two diverge | 6 / 17 |
-| `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, and what that changes | 18 / 16 |
+| `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the same broadcast modules over a **session link**, and where reliable and uniform diverge | 6 / 17 |
+| `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, over each link | 18 / 16 |
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 
-334 across the suites above, plus nine unit tests inside `recon-core` — 343 in total, all in one
-process, no ports opened.
+345 across the suites above, plus nine unit tests inside `recon-core` and two `compile_fail`
+doctests on the link port — 356 in total, all in one process, no ports opened.
 
 ## Licence
 

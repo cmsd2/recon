@@ -250,8 +250,13 @@ Silently absorbing a scope end is the bug the first attempt shipped.
 
 Three things follow for anyone writing a new abstraction:
 
-- Layers above the link may depend on its `Cmd` and `Ind` types and nothing else. That is the
-  seam a session-aware or logged implementation gets swapped through.
+- Layers above the link name a **port**, not an implementation. `recon_protocols::link::Link` is
+  what a layer above may depend on and the whole of what it may: build a send, and classify an
+  indication. A link keeps its own `Cmd` and `Ind`. `ScopedLink` is the further claim that the link
+  can observe a scope boundary — the session link makes it, the perfect link cannot — so a layer
+  that repairs an ending bounds on it and cannot be composed over a link that reports none. Every
+  composing layer takes its child as a type parameter with a default, so `BestEffortBroadcast<P>`
+  still means today's stack. This is why there are no longer four `session_*` broadcast modules.
 - `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile
   state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause, and
   `Sim::resume` ends it — a *stall*, in which timers, deliveries and scope events are held rather
