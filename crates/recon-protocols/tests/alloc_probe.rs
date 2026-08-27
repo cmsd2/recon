@@ -94,6 +94,18 @@ fn measure() {
         |s, i| s.command(ALL[0], urb::Cmd::Broadcast(i)),
     );
 
+    use recon_protocols::best_effort_broadcast as beb;
+    probe(
+        "beb",
+        50,
+        || {
+            Sim::new(Config::default().seed(1), &ALL, |me| {
+                beb::BestEffortBroadcast::<u32>::new(me, ALL, Duration::from_millis(10))
+            })
+        },
+        |s, i| s.command(ALL[0], beb::Cmd::Broadcast(i)),
+    );
+
     use recon_protocols::logged_uniform_reliable_broadcast as lurb;
     probe(
         "logged_urb",
