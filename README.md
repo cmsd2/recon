@@ -305,10 +305,12 @@ its design notes and task list.
 openspec/specs/
 ├── protocol-core/                     the trait, the effects, composition
 ├── simulation/                        determinism, faults, sessions, the trace
-├── links/                             the port, stubborn, perfect, session
+├── links/                             the port, fair-loss, stubborn, perfect,
+│                                      session, logged
 ├── failure-detection/                 perfect failure detector
 ├── broadcast/                         best-effort, reliable, uniform reliable,
-│                                      majority-ack, and the logged ones
+│                                      majority-ack, the logged ones, and the
+│                                      two probabilistic ones
 └── consensus/                         flooding consensus
 ```
 
