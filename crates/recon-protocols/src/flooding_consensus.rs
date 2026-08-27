@@ -249,7 +249,6 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.beb_inbox);
-        inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
@@ -269,7 +268,6 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         f: impl FnOnce(&mut PerfectFailureDetector, &mut ProtoCx<'_, PerfectFailureDetector>),
     ) {
         let mut inbox = core::mem::take(&mut self.det_inbox);
-        inbox.clear();
         {
             let detector = &mut self.detector;
             cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
@@ -365,7 +363,6 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
 
     fn send(&mut self, msg: Flood<P>, cx: &mut ProtoCx<'_, Self>) {
         let mut send_inbox = core::mem::take(&mut self.send_inbox);
-        send_inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(Wire::Broadcast, &mut send_inbox, |ccx| {

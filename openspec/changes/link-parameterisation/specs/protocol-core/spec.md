@@ -1,0 +1,41 @@
+## MODIFIED Requirements
+
+### Requirement: A parent composes a child by owning it and re-wrapping its effects
+
+A protocol that is built on another SHALL own that child directly, and SHALL translate each effect
+the child emits into its own terms before that effect leaves the parent. Composition MUST NOT
+depend on names, identifiers, or registries resolved while running.
+
+A parent SHALL state what it requires of its child as a declared port — the child's request and
+indication types — rather than by naming a particular implementation. The child is a parameter of
+the parent, so a parent is written once and composed over every implementation satisfying the port.
+A parent MUST NOT depend on anything about its child beyond that port.
+
+#### Scenario: A child's outgoing message is re-wrapped
+
+- **WHEN** a child emits a send effect
+- **THEN** the parent emits a corresponding send effect carrying the child's message wrapped in
+  the parent's own message type
+
+#### Scenario: A child's indication is consumed by the parent
+
+- **WHEN** a child emits an indication
+- **THEN** the parent handles it as an input to its own logic, and emits its own indication only
+  where its guarantees require one
+
+#### Scenario: A mis-wired composition is rejected before running
+
+- **WHEN** a parent is written to pass a message of the wrong type to a child
+- **THEN** the error is detected when the project is built, not by observing an undelivered message
+
+#### Scenario: The requirement on a child is visible in the parent's interface
+
+- **WHEN** a reader asks what a parent needs of the layer beneath it
+- **THEN** the answer is the port named in the parent's own declaration, and nothing else is
+  required to know it
+
+#### Scenario: Substituting an implementation does not change the parent
+
+- **WHEN** a parent is composed over a different implementation of the same port
+- **THEN** the parent's source is unchanged, and its guarantees continue to hold as far as the
+  substituted implementation's own guarantees allow

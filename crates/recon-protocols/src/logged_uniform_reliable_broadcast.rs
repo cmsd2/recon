@@ -211,7 +211,6 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
         f: impl FnOnce(&mut StubbornBroadcast<Data<P>>, &mut ProtoCx<'_, StubbornBroadcast<Data<P>>>),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
-        inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
@@ -224,7 +223,6 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
 
     fn rebroadcast(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let mut send_inbox = core::mem::take(&mut self.send_inbox);
-        send_inbox.clear();
         self.beb_seq += 1;
         let id = sbeb::BroadcastId(self.beb_seq);
         {

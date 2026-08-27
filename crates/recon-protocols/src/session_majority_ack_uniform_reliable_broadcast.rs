@@ -190,7 +190,6 @@ impl<P: Clone> SessionMajorityAckUniformReliableBroadcast<P> {
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.beb_inbox);
-        inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
@@ -255,7 +254,6 @@ impl<P: Clone> SessionMajorityAckUniformReliableBroadcast<P> {
         ),
     ) {
         let mut send_inbox = core::mem::take(&mut self.send_inbox);
-        send_inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut send_inbox, |ccx| f(beb, ccx));

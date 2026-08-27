@@ -218,7 +218,6 @@ impl<P: Clone + Ord> LoggedLink<P> {
         f: impl FnOnce(&mut StubbornLink<Wire<P>>, &mut ProtoCx<'_, StubbornLink<Wire<P>>>),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
-        inbox.clear();
         {
             let link = &mut self.link;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));

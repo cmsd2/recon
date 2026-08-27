@@ -210,7 +210,6 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.beb_inbox);
-        inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
@@ -230,7 +229,6 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         f: impl FnOnce(&mut PerfectFailureDetector, &mut ProtoCx<'_, PerfectFailureDetector>),
     ) {
         let mut inbox = core::mem::take(&mut self.det_inbox);
-        inbox.clear();
         {
             let detector = &mut self.detector;
             cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
@@ -264,7 +262,6 @@ impl<P: Clone> UniformReliableBroadcast<P> {
     /// Re-broadcast, so the message survives its originator's crash.
     fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
-        relay_inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(Wire::Broadcast, &mut relay_inbox, |ccx| {

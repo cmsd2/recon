@@ -132,7 +132,6 @@ impl<P: Clone> PerfectLink<P> {
         f: impl FnOnce(&mut StubbornLink<Wire<P>>, &mut ProtoCx<'_, StubbornLink<Wire<P>>>),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
-        inbox.clear();
         {
             let stubborn = &mut self.stubborn;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(stubborn, ccx));

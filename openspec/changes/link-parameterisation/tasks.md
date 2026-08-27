@@ -1,0 +1,74 @@
+## 1. The port
+
+- [ ] 1.1 Define `Link` — the request and indication types a layer above the link may depend on —
+      and verify the project builds with nothing yet using it
+- [ ] 1.2 Define `ScopedLink` as `Link` plus the reporting of scope endings and establishments, and
+      verify a link cannot implement it without raising those boundaries
+- [ ] 1.3 Implement `Link` for the perfect link, and verify it declares no scope boundary — a link
+      may not name a scope it cannot observe
+- [ ] 1.4 Implement `Link` and `ScopedLink` for the session link, and verify `cargo test --workspace`
+      still passes with nothing composed over the new traits yet
+- [ ] 1.5 Add a compile-fail or negative test showing a link that does not satisfy the port is
+      rejected when the project is built, so the seam is checked rather than asserted
+
+## 2. Best-effort broadcast over any link
+
+- [ ] 2.1 Parameterise `BestEffortBroadcast<P, L>` over `L: Link<P>`, defaulting to
+      `PerfectLink<P>`, and verify every existing call site compiles untouched
+- [ ] 2.2 Add a constructor taking the link, and verify `cargo test -p recon-protocols --test
+      best_effort_broadcast` passes unchanged
+- [ ] 2.3 Move `delivered_count` to the impl block for the default link, since it is specific to the
+      perfect link, and verify the reliable-broadcast tests that call it still pass
+- [ ] 2.4 Pass scope boundaries reported by the link upward when `L: ScopedLink`, and verify both an
+      ending and an establishment reach the layer above, distinguishable from one another
+- [ ] 2.5 Offer the directed send to one member on the base module, and verify only the addressed
+      member receives it
+
+## 3. The layers above
+
+- [ ] 3.1 Parameterise `ReliableBroadcast` over the broadcast beneath, with a default, and verify
+      its existing suite passes unchanged
+- [ ] 3.2 Parameterise `UniformReliableBroadcast`, bounding the resend path on `ScopedLink`, and
+      verify the establishment prompts a directed resend and the ending prompts nothing
+- [ ] 3.3 Parameterise `MajorityAckUniformReliableBroadcast`, keeping the resend unconditional and
+      directed, and verify a test that a filtered resend would deadlock still passes
+- [ ] 3.4 Parameterise `FloodingConsensus`, and verify its existing suite passes unchanged
+- [ ] 3.5 Thread each layer's `Timer` type parameter with a default mirroring the layer's own, and
+      verify `cargo build --workspace --all-targets` is clean
+
+## 4. Collapsing the forks
+
+- [ ] 4.1 Move the `session_best_effort_broadcast` suite onto `BestEffortBroadcast` with a session
+      link, and verify every test passes without weakening an assertion
+- [ ] 4.2 Move the `session_broadcast` suite likewise, and verify the reliable-versus-uniform
+      contrast it draws still holds
+- [ ] 4.3 Move the `session_majority_ack_uniform_reliable_broadcast` suite likewise, including the
+      stall test that spends the `suspend` knob
+- [ ] 4.4 Merge each pair of module docstrings, checking the quoted pseudocode and departures list of
+      both originals survive, and verify no departure is lost by reading the merged text against
+      both
+- [ ] 4.5 Delete the four `session_*` modules and their registrations in `lib.rs`, and verify
+      `cargo test --workspace` passes with the counts accounted for
+- [ ] 4.6 Delete the four `openspec/specs/broadcast/session-*` directories as part of the same
+      change, and verify `openspec validate --all --strict` passes
+
+## 5. Somebody else's link
+
+- [ ] 5.1 Add a test link satisfying `Link` with no retransmission, no deduplication and no timer,
+      and verify a broadcast delivers over it
+- [ ] 5.2 Verify non-vacuously that the foreign link really is a different stack — its wire carries
+      the bare payload, not the built-in link's identifier
+- [ ] 5.3 Run consensus over the foreign link and verify every correct process decides, no two
+      decide differently, and what is decided was proposed
+- [ ] 5.4 Verify neither the link nor any protocol was edited to make the previous three pass, by
+      confirming the diff for them is confined to test files
+
+## 6. The documents this dates
+
+- [ ] 6.1 Update `docs/conditional-guarantees.md` where it says the seam is a rule layers are asked
+      to follow, and verify the section describes the port as it is built
+- [ ] 6.2 Update `README.md`'s protocol table for the four removed modules, and verify the suite
+      counts and totals it claims against what `cargo test --workspace` prints
+- [ ] 6.3 Update `CLAUDE.md`'s composition conventions to say a parent names its child's port rather
+      than its child, and verify no other convention it states has been contradicted
+- [ ] 6.4 Run `./scripts/check.sh` and verify it passes in full

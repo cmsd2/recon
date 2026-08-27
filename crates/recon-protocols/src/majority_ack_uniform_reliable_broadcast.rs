@@ -178,7 +178,6 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.beb_inbox);
-        inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
@@ -208,7 +207,6 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
     /// Re-broadcast, so the message survives its originator's crash.
     fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
-        relay_inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {

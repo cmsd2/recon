@@ -113,7 +113,6 @@ impl<P: Clone> StubbornBroadcast<P> {
         f: impl FnOnce(&mut StubbornLink<P>, &mut ProtoCx<'_, StubbornLink<P>>),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
-        inbox.clear();
         {
             let link = &mut self.link;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));

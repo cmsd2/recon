@@ -110,7 +110,6 @@ impl<P: Clone> SessionBestEffortBroadcast<P> {
         f: impl FnOnce(&mut SessionLink<P>, &mut ProtoCx<'_, SessionLink<P>>),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
-        inbox.clear();
         {
             let link = &mut self.link;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));

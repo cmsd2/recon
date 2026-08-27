@@ -138,7 +138,6 @@ impl<P: Clone> ReliableBroadcast<P> {
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
-        inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
@@ -168,7 +167,6 @@ impl<P: Clone> ReliableBroadcast<P> {
     /// records that reasoning rather than trusting it.
     fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
-        relay_inbox.clear();
         {
             let beb = &mut self.beb;
             cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {
