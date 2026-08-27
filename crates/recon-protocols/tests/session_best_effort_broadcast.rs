@@ -1,9 +1,15 @@
 //! Best-effort broadcast over session links: validity while sessions hold, and honesty when they
 //! do not.
+//!
+//! The protocol under test is `BestEffortBroadcast` itself, with a session link as its type
+//! argument. There is no separate session implementation — that is what the link port removed — so
+//! what these tests now pin is that the one implementation, given a link that reports scope
+//! boundaries, behaves as the fork it replaced did.
 
 use core::time::Duration;
 use recon_core::{Event, MemStore, NodeId, SessionEvent, Time, step_with};
-use recon_protocols::session_best_effort_broadcast::{Cmd, Ind, SessionBestEffortBroadcast};
+use recon_protocols::best_effort_broadcast::{BestEffortBroadcast, Cmd, Ind};
+use recon_protocols::session_link::SessionLink;
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -12,7 +18,11 @@ const C: NodeId = NodeId::new(3);
 const D: NodeId = NodeId::new(4);
 const ALL: [NodeId; 4] = [A, B, C, D];
 
-type Beb = SessionBestEffortBroadcast<u32>;
+type Beb = BestEffortBroadcast<u32, SessionLink<u32>>;
+
+fn beb(me: NodeId) -> Beb {
+    BestEffortBroadcast::with_link(me, ALL, SessionLink::new())
+}
 
 fn sim(seed: u64) -> Sim<Beb> {
     let mut s: Sim<Beb> = Sim::new(
@@ -21,7 +31,7 @@ fn sim(seed: u64) -> Sim<Beb> {
             .sessions()
             .latency(Duration::from_millis(1), Duration::from_millis(20)),
         &ALL,
-        |me| SessionBestEffortBroadcast::new(me, ALL),
+        beb,
     );
     s.deliver_session_events();
     s
@@ -50,7 +60,7 @@ fn session_reports(s: &Sim<Beb>, node: NodeId) -> (usize, usize) {
 #[test]
 fn state_holds_nothing_but_the_process_set() {
     let mut ids = 0;
-    let mut p: Beb = SessionBestEffortBroadcast::new(A, ALL);
+    let mut p: Beb = beb(A);
     let mut r = rand_chacha::ChaCha8Rng::from_seed([0; 32]);
     for i in 0..500u32 {
         step_with(
@@ -70,13 +80,13 @@ fn state_holds_nothing_but_the_process_set() {
             &mut ids,
         );
     }
-    assert_eq!(p.tracked_peers(), ALL.len(), "five hundred messages, no per-message state");
+    assert_eq!(p.peers().count(), ALL.len(), "five hundred messages, no per-message state");
 }
 
 #[test]
 fn both_session_reports_reach_the_layer_above() {
     let mut ids = 0;
-    let mut p: Beb = SessionBestEffortBroadcast::new(A, ALL);
+    let mut p: Beb = beb(A);
     let mut r = rand_chacha::ChaCha8Rng::from_seed([0; 32]);
 
     let ended = step_with(

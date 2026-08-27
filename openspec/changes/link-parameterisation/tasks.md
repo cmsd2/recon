@@ -21,9 +21,9 @@
       best_effort_broadcast` passes unchanged
 - [x] 2.3 Move `delivered_count` to the impl block for the default link, since it is specific to the
       perfect link, and verify the reliable-broadcast tests that call it still pass
-- [ ] 2.4 Pass scope boundaries reported by the link upward when `L: ScopedLink`, and verify both an
+- [x] 2.4 Pass scope boundaries reported by the link upward when `L: ScopedLink`, and verify both an
       ending and an establishment reach the layer above, distinguishable from one another
-- [ ] 2.5 Offer the directed send to one member on the base module, and verify only the addressed
+- [x] 2.5 Offer the directed send to one member on the base module, and verify only the addressed
       member receives it
 
 ## 3. The layers above
@@ -42,7 +42,7 @@
 
 ## 4. Collapsing the forks
 
-- [ ] 4.1 Move the `session_best_effort_broadcast` suite onto `BestEffortBroadcast` with a session
+- [x] 4.1 Move the `session_best_effort_broadcast` suite onto `BestEffortBroadcast` with a session
       link, and verify every test passes without weakening an assertion
 - [ ] 4.2 Move the `session_broadcast` suite likewise, and verify the reliable-versus-uniform
       contrast it draws still holds

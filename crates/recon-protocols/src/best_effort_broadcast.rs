@@ -38,6 +38,16 @@ use crate::perfect_link::PerfectLink;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {
     Broadcast(P),
+    /// Send to one member only.
+    ///
+    /// Not part of Module 3.1, which has only `Broadcast`. It exists so a layer above can answer a
+    /// scope that has just come back without re-sending to everyone else: same wire message, same
+    /// link, strictly fewer recipients. No new communication step, so no guarantee of Module 3.1
+    /// is affected — this is a narrowing of `Broadcast`, not an addition to it.
+    SendTo {
+        to: NodeId,
+        msg: P,
+    },
 }
 
 /// Indications to the layer above.
@@ -145,12 +155,21 @@ where
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 
-    fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
+    fn on_cmd(&mut self, cmd: Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
         let peers = &self.peers;
-        cx.with_child(core::convert::identity, forward::<P, L>, |ccx| {
-            for &q in peers {
-                link.on_cmd(L::send(q, msg.clone()), ccx);
+        cx.with_child(core::convert::identity, forward::<P, L>, |ccx| match cmd {
+            // Algorithm 3.1: `forall q in Π do trigger <pl, Send | q, m>`. Π includes the sender,
+            // so a correct process delivers its own broadcast.
+            Cmd::Broadcast(msg) => {
+                for &q in peers {
+                    link.on_cmd(L::send(q, msg.clone()), ccx);
+                }
+            }
+            // The same send, to one member of Π rather than all of it.
+            Cmd::SendTo { to, msg } => {
+                debug_assert!(peers.contains(&to), "a directed send addresses a member of Π");
+                link.on_cmd(L::send(to, msg), ccx);
             }
         });
     }
@@ -163,5 +182,19 @@ where
     fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
         cx.with_child(core::convert::identity, forward::<P, L>, |ccx| link.on_timer(id, ccx));
+    }
+
+    /// Hand the scope ending down to the link, which is the layer that knows what it means.
+    ///
+    /// `Scope` is the link's, so leaving this to the trait's default would take a scope event the
+    /// driver raised and drop it — the layer above would never learn its guarantees had lapsed,
+    /// and neither would the link. That is the failure `docs/conditional-guarantees.md` calls
+    /// cardinal, and the default is silent about committing it, which is why this handler exists
+    /// even though its body only forwards.
+    fn on_scope_event(&mut self, scope: L::Scope, cx: &mut ProtoCx<'_, Self>) {
+        let link = &mut self.link;
+        cx.with_child(core::convert::identity, forward::<P, L>, |ccx| {
+            link.on_scope_event(scope, ccx)
+        });
     }
 }
