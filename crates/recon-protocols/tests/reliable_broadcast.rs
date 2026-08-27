@@ -4,7 +4,7 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Time, step};
+use recon_core::{Effect, Event, MemStore, NodeId, Time, step_with};
 use recon_protocols::best_effort_broadcast::{self as beb, BestEffortBroadcast};
 use recon_protocols::reliable_broadcast::{BroadcastId, Cmd, Data, Ind, ReliableBroadcast, Wire};
 use recon_sim::{Config, Sim};
@@ -35,8 +35,16 @@ fn delivered(s: &Sim<ReliableBroadcast<u32>>, node: NodeId) -> Vec<(NodeId, u32)
 
 #[test]
 fn the_wire_carries_the_originator() {
+    let mut ids = 0;
     let mut p: ReliableBroadcast<u32> = ReliableBroadcast::new(A, ALL, interval());
-    let fx = step(&mut p, Event::Cmd(Cmd::Broadcast(9u32)), Time::ZERO, &mut rng());
+    let fx = step_with(
+        &mut p,
+        Event::Cmd(Cmd::Broadcast(9u32)),
+        Time::ZERO,
+        &mut rng(),
+        &mut store(),
+        &mut ids,
+    );
 
     let sends: Vec<Wire<u32>> = fx
         .iter()
@@ -63,12 +71,20 @@ fn the_wire_survives_encoding() {
 
 #[test]
 fn a_first_receipt_delivers_and_relays() {
+    let mut ids = 0;
     let mut p: ReliableBroadcast<u32> = ReliableBroadcast::new(B, ALL, interval());
     let mut r = rng();
 
     // Arrive at B by way of the full stack from A.
     let mut a: ReliableBroadcast<u32> = ReliableBroadcast::new(A, ALL, interval());
-    let from_a = step(&mut a, Event::Cmd(Cmd::Broadcast(5u32)), Time::ZERO, &mut r);
+    let from_a = step_with(
+        &mut a,
+        Event::Cmd(Cmd::Broadcast(5u32)),
+        Time::ZERO,
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     let to_b = from_a
         .iter()
         .find_map(|e| match e {
@@ -77,7 +93,14 @@ fn a_first_receipt_delivers_and_relays() {
         })
         .expect("a message addressed to B");
 
-    let fx = step(&mut p, Event::Msg { from: A, msg: to_b }, Time::from_millis(1), &mut r);
+    let fx = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: to_b },
+        Time::from_millis(1),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
 
     let indications = fx.iter().filter(|e| matches!(e, Effect::Indicate(_))).count();
     let sends = fx.iter().filter(|e| matches!(e, Effect::Send { .. })).count();
@@ -88,10 +111,18 @@ fn a_first_receipt_delivers_and_relays() {
 
 #[test]
 fn a_repeat_receipt_neither_delivers_nor_relays() {
+    let mut ids = 0;
     // Termination: without this the relay would feed itself for ever.
     let mut a: ReliableBroadcast<u32> = ReliableBroadcast::new(A, ALL, interval());
     let mut r = rng();
-    let from_a = step(&mut a, Event::Cmd(Cmd::Broadcast(5u32)), Time::ZERO, &mut r);
+    let from_a = step_with(
+        &mut a,
+        Event::Cmd(Cmd::Broadcast(5u32)),
+        Time::ZERO,
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     let to_b = from_a
         .iter()
         .find_map(|e| match e {
@@ -101,8 +132,22 @@ fn a_repeat_receipt_neither_delivers_nor_relays() {
         .expect("a message addressed to B");
 
     let mut p: ReliableBroadcast<u32> = ReliableBroadcast::new(B, ALL, interval());
-    let _ = step(&mut p, Event::Msg { from: A, msg: to_b.clone() }, Time::ZERO, &mut r);
-    let second = step(&mut p, Event::Msg { from: A, msg: to_b }, Time::from_millis(1), &mut r);
+    let _ = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: to_b.clone() },
+        Time::ZERO,
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
+    let second = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: to_b },
+        Time::from_millis(1),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
 
     assert!(!second.iter().any(|e| matches!(e, Effect::Indicate(_))), "no second delivery");
     assert!(
@@ -285,4 +330,9 @@ fn agreement_holds_through_partition_and_healing() {
         let all = counts.iter().all(|c| *c == 1);
         assert!(!any || all, "seed {seed}: {counts:?}");
     }
+}
+
+/// A fresh store per call: these protocols write nothing durably.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
 }

@@ -44,7 +44,7 @@
 //! What this layer does do is report the session events upward rather than absorb them, so that a
 //! layer which *can* act is not denied the signal.
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -85,11 +85,6 @@ pub enum Ind<P> {
         peer: NodeId,
         epoch: u64,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Broadcast(beb::Timer),
 }
 
 pub type Wire<P> = Data<P>;
@@ -135,9 +130,7 @@ impl<P: Clone> SessionReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, Timer::Broadcast, &mut inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             match ind {
@@ -170,12 +163,9 @@ impl<P: Clone> SessionReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                Timer::Broadcast,
-                &mut relay_inbox,
-                |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {
+                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
+            });
         }
         debug_assert!(
             relay_inbox.is_empty(),
@@ -189,7 +179,6 @@ impl<P: Clone> Protocol for SessionReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -205,8 +194,8 @@ impl<P: Clone> Protocol for SessionReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, Timer::Broadcast(t): Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.with_beb(cx, |beb, ccx| beb.on_timer(t, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
     }
 
     fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {

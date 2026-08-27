@@ -27,7 +27,7 @@
 //! stack to contribute no header of its own.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::BTreeSet;
 
 use crate::perfect_link::{self as pl, PerfectLink};
@@ -42,12 +42,6 @@ pub enum Cmd<P> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ind<P> {
     Deliver { from: NodeId, msg: P },
-}
-
-/// Timers, which are the child's re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Link(pl::Timer),
 }
 
 /// Translate the perfect link's delivery into this layer's — the whole of Algorithm 3.1's
@@ -88,7 +82,6 @@ impl<P: Clone> Protocol for BestEffortBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = pl::Wire<P>;
-    type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -98,7 +91,7 @@ impl<P: Clone> Protocol for BestEffortBroadcast<P> {
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
         let peers = &self.peers;
-        cx.with_child(core::convert::identity, forward, Timer::Link, |ccx| {
+        cx.with_child(core::convert::identity, forward, |ccx| {
             for &q in peers {
                 link.on_cmd(pl::Cmd::Send { to: q, msg: msg.clone() }, ccx);
             }
@@ -107,15 +100,11 @@ impl<P: Clone> Protocol for BestEffortBroadcast<P> {
 
     fn on_msg(&mut self, from: NodeId, msg: pl::Wire<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
-        cx.with_child(core::convert::identity, forward, Timer::Link, |ccx| {
-            link.on_msg(from, msg, ccx)
-        });
+        cx.with_child(core::convert::identity, forward, |ccx| link.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, Timer::Link(token): Timer, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
-        cx.with_child(core::convert::identity, forward, Timer::Link, |ccx| {
-            link.on_timer(token, ccx)
-        });
+        cx.with_child(core::convert::identity, forward, |ccx| link.on_timer(id, ccx));
     }
 }

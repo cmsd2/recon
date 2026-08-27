@@ -66,7 +66,7 @@
 //! therefore scoped, this is the clearest statement of what a failure detector buys.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -103,12 +103,6 @@ pub enum Ind<P> {
     Deliver { from: NodeId, msg: P },
     SessionEnded { peer: NodeId, epoch: u64 },
     SessionEstablished { peer: NodeId, epoch: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Broadcast(beb::Timer),
-    Detector(pfd::Tick),
 }
 
 /// Uniform reliable broadcast that survives a link which can lose a suffix.
@@ -181,9 +175,7 @@ impl<P: Clone> SessionUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             match ind {
@@ -213,9 +205,7 @@ impl<P: Clone> SessionUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, Timer::Detector, &mut inbox, |ccx| {
-                f(detector, ccx)
-            });
+            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
         }
         for ind in inbox.drain(..) {
             let pfd::Ind::Crash { node } = ind;
@@ -288,9 +278,7 @@ impl<P: Clone> SessionUniformReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut relay_inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(Wire::Broadcast, &mut relay_inbox, |ccx| f(beb, ccx));
         }
         debug_assert!(
             relay_inbox.is_empty(),
@@ -326,7 +314,6 @@ impl<P: Clone> Protocol for SessionUniformReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -358,11 +345,11 @@ impl<P: Clone> Protocol for SessionUniformReliableBroadcast<P> {
         }
     }
 
-    fn on_timer(&mut self, token: Timer, cx: &mut ProtoCx<'_, Self>) {
-        match token {
-            Timer::Broadcast(t) => self.with_beb(cx, |beb, ccx| beb.on_timer(t, ccx)),
-            Timer::Detector(t) => self.with_detector(cx, |d, ccx| d.on_timer(t, ccx)),
-        }
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        // Handed to both children: the identity does not say which registered it, and the one that
+        // did not will recognise that and do nothing.
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
+        self.with_detector(cx, |d, ccx| d.on_timer(id, ccx));
     }
 
     fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {

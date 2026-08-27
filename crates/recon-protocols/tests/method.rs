@@ -8,7 +8,7 @@
 //! assertions, so that each can itself be tested against a case it must reject.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use recon_protocols::best_effort_broadcast::{BestEffortBroadcast, Cmd, Ind};
 use recon_protocols::perfect_link::{self as pl};
 use recon_sim::{Config, DropReason, Sim};
@@ -242,7 +242,6 @@ impl Protocol for Silent {
     type Cmd = Cmd<u32>;
     type Ind = Ind<u32>;
     type Msg = pl::Wire<u32>;
-    type Timer = ();
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -250,7 +249,7 @@ impl Protocol for Silent {
 
     fn on_cmd(&mut self, _: Cmd<u32>, _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: pl::Wire<u32>, _: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
 }
 
 #[test]
@@ -293,7 +292,6 @@ impl Protocol for Defective {
     type Cmd = Cmd<u32>;
     type Ind = Ind<u32>;
     type Msg = pl::Wire<u32>;
-    type Timer = <BestEffortBroadcast<u32> as Protocol>::Timer;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -309,8 +307,8 @@ impl Protocol for Defective {
     fn on_msg(&mut self, from: NodeId, msg: pl::Wire<u32>, cx: &mut ProtoCx<'_, Self>) {
         self.inner.on_msg(from, msg, cx);
     }
-    fn on_timer(&mut self, t: Self::Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.inner.on_timer(t, cx);
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.inner.on_timer(id, cx);
     }
 }
 

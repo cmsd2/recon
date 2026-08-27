@@ -95,7 +95,7 @@
 //!   failure detection, without which no round can ever complete after a crash.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -149,13 +149,6 @@ pub enum Cmd<P> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ind<P> {
     Decide(P),
-}
-
-/// Timers, which are the children's re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Broadcast(beb::Timer),
-    Detector(pfd::Tick),
 }
 
 /// Regular consensus in the fail-stop model, over best-effort broadcast and a failure detector.
@@ -259,9 +252,7 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             let beb::Ind::Deliver { from, msg } = ind;
@@ -281,9 +272,7 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         inbox.clear();
         {
             let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, Timer::Detector, &mut inbox, |ccx| {
-                f(detector, ccx)
-            });
+            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
         }
         for ind in inbox.drain(..) {
             let pfd::Ind::Crash { node } = ind;
@@ -379,7 +368,7 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
         send_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut send_inbox, |ccx| {
+            cx.with_child_consuming(Wire::Broadcast, &mut send_inbox, |ccx| {
                 beb.on_cmd(beb::Cmd::Broadcast(msg), ccx)
             });
         }
@@ -395,7 +384,6 @@ impl<P: Clone + Ord> Protocol for FloodingConsensus<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     /// No session beneath, so no scope end can be constructed — as for both children.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -429,10 +417,10 @@ impl<P: Clone + Ord> Protocol for FloodingConsensus<P> {
         }
     }
 
-    fn on_timer(&mut self, token: Timer, cx: &mut ProtoCx<'_, Self>) {
-        match token {
-            Timer::Broadcast(t) => self.with_beb(cx, |beb, ccx| beb.on_timer(t, ccx)),
-            Timer::Detector(t) => self.with_detector(cx, |d, ccx| d.on_timer(t, ccx)),
-        }
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        // Handed to both children: the identity does not say which registered it, and the one that
+        // did not will recognise that and do nothing.
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
+        self.with_detector(cx, |d, ccx| d.on_timer(id, ccx));
     }
 }

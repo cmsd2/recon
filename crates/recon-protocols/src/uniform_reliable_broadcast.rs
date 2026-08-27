@@ -66,7 +66,7 @@
 //! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -125,13 +125,6 @@ pub enum Cmd<P> {
 pub enum Ind<P> {
     /// `from` is the process that originated the message, never a relayer.
     Deliver { from: NodeId, msg: P },
-}
-
-/// Timers, which are the children's re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Broadcast(beb::Timer),
-    Detector(pfd::Tick),
 }
 
 /// Broadcast with uniform agreement, over best-effort broadcast and a failure detector.
@@ -220,9 +213,7 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             let beb::Ind::Deliver { from, msg: Data { id, payload } } = ind;
@@ -242,9 +233,7 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         inbox.clear();
         {
             let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, Timer::Detector, &mut inbox, |ccx| {
-                f(detector, ccx)
-            });
+            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
         }
         for ind in inbox.drain(..) {
             let pfd::Ind::Crash { node } = ind;
@@ -278,7 +267,7 @@ impl<P: Clone> UniformReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, Timer::Broadcast, &mut relay_inbox, |ccx| {
+            cx.with_child_consuming(Wire::Broadcast, &mut relay_inbox, |ccx| {
                 beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
             });
         }
@@ -323,7 +312,6 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -356,10 +344,10 @@ impl<P: Clone> Protocol for UniformReliableBroadcast<P> {
         }
     }
 
-    fn on_timer(&mut self, token: Timer, cx: &mut ProtoCx<'_, Self>) {
-        match token {
-            Timer::Broadcast(t) => self.with_beb(cx, |beb, ccx| beb.on_timer(t, ccx)),
-            Timer::Detector(t) => self.with_detector(cx, |d, ccx| d.on_timer(t, ccx)),
-        }
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        // Handed to both children: the identity does not say which registered it, and the one that
+        // did not will recognise that and do nothing.
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
+        self.with_detector(cx, |d, ccx| d.on_timer(id, ccx));
     }
 }

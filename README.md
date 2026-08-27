@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 336 tests, all in-process, a few seconds
+cargo test --workspace          # 343 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -367,17 +367,17 @@ cargo test --workspace -- --nocapture                 # with output
 | Suite | Covers | Tests |
 |---|---|---|
 | [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism | 23 |
-| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace | 76 |
+| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles | 80 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
-| `tests/stubborn_link.rs`, `perfect_link.rs`, `session_link.rs` | the links | 13 / 16 / 11 |
-| `tests/perfect_failure_detector.rs` | completeness and accuracy, where accuracy is lost, and both sides of a stall | 16 |
+| `tests/stubborn_link.rs`, `perfect_link.rs`, `session_link.rs` | the links | 14 / 16 / 11 |
+| `tests/perfect_failure_detector.rs` | completeness and accuracy, where accuracy is lost, and both sides of a stall | 17 |
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the broadcasts over perfect links | 11 / 15 / 17 |
 | `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the broadcasts over session links, and where the two diverge | 6 / 17 |
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, and what that changes | 18 / 16 |
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
-| [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, and what a false suspicion costs it | 22 |
+| [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 
-327 across the suites above, plus nine unit tests inside `recon-core` — 336 in total, all in one
+334 across the suites above, plus nine unit tests inside `recon-core` — 343 in total, all in one
 process, no ports opened.
 
 ## Licence

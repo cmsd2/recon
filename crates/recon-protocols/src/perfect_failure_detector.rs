@@ -78,7 +78,7 @@
 //! simulator's side.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, Time};
+use recon_core::{NodeId, ProtoCx, Protocol, Time, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -99,10 +99,6 @@ pub enum Ind {
     Crash { node: NodeId },
 }
 
-/// This protocol's only timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Tick;
-
 /// Detects crashes by heartbeat timeout.
 #[derive(Debug)]
 pub struct PerfectFailureDetector {
@@ -116,7 +112,9 @@ pub struct PerfectFailureDetector {
     period: Duration,
     /// How long a peer may be silent before it is declared crashed.
     timeout: Duration,
-    armed: bool,
+    /// The tick outstanding, if any. A handle rather than a flag: an expiry this detector has
+    /// superseded is then recognisable, where `true` said only that something was pending.
+    tick: Option<TimerId>,
 }
 
 impl PerfectFailureDetector {
@@ -145,7 +143,7 @@ impl PerfectFailureDetector {
             detected: BTreeSet::new(),
             period,
             timeout,
-            armed: false,
+            tick: None,
         }
     }
 
@@ -194,7 +192,6 @@ impl Protocol for PerfectFailureDetector {
     type Cmd = Cmd;
     type Ind = Ind;
     type Msg = Heartbeat;
-    type Timer = Tick;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -206,13 +203,12 @@ impl Protocol for PerfectFailureDetector {
     /// The book's own trigger, now that there is one. It used to be a `Start` command because
     /// there was no init event to hang the first timer on; there is, so there is no command.
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
-        if self.armed {
+        if self.tick.is_some() {
             return;
         }
-        self.armed = true;
         self.assume_alive(cx.now());
         self.beat(cx);
-        cx.set_timer(self.period, Tick);
+        self.tick = Some(cx.set_timer(self.period));
     }
 
     fn on_cmd(&mut self, cmd: Cmd, _cx: &mut ProtoCx<'_, Self>) {
@@ -227,7 +223,12 @@ impl Protocol for PerfectFailureDetector {
         }
     }
 
-    fn on_timer(&mut self, Tick: Tick, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        // Handed down from every layer above along with everybody else's, so only the one this
+        // detector is waiting on does anything. An expiry it has superseded accuses nobody.
+        if self.tick != Some(id) {
+            return;
+        }
         let now = cx.now();
         let silent: Vec<NodeId> = self
             .peers
@@ -245,6 +246,6 @@ impl Protocol for PerfectFailureDetector {
         }
 
         self.beat(cx);
-        cx.set_timer(self.period, Tick);
+        self.tick = Some(cx.set_timer(self.period));
     }
 }

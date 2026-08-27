@@ -90,7 +90,7 @@
 //! - No `Init` event and no `Start` command; there is nothing to start.
 //! - Neither `ack` nor `pending` is garbage collected, as in the book.
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, TimerId};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::session_best_effort_broadcast::{self as beb, SessionBestEffortBroadcast};
@@ -99,9 +99,6 @@ use crate::uniform_reliable_broadcast::{BroadcastId, Data};
 /// The message type: the broadcast child's, unwrapped. With one child there is nothing to
 /// multiplex and no discriminant to add.
 pub type Msg<P> = <SessionBestEffortBroadcast<Data<P>> as Protocol>::Msg;
-
-/// Timers, which are the broadcast child's.
-pub type Timer = beb::Timer;
 
 /// Requests from the layer above. Broadcasting is the only one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,12 +193,7 @@ impl<P: Clone> SessionMajorityAckUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut inbox,
-                |ccx| f(beb, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             match ind {
@@ -266,12 +258,7 @@ impl<P: Clone> SessionMajorityAckUniformReliableBroadcast<P> {
         send_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut send_inbox,
-                |ccx| f(beb, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut send_inbox, |ccx| f(beb, ccx));
         }
         debug_assert!(
             send_inbox.is_empty(),
@@ -311,7 +298,6 @@ impl<P: Clone> Protocol for SessionMajorityAckUniformReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Msg<P>;
-    type Timer = Timer;
     /// Inherited from the link: a session ending is a scope boundary this layer must see.
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -331,8 +317,8 @@ impl<P: Clone> Protocol for SessionMajorityAckUniformReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, token: Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.with_beb(cx, |beb, ccx| beb.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
     }
 
     fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {

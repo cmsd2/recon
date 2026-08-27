@@ -89,7 +89,7 @@
 //! broadcast, which is what buys nothing here.
 
 use core::time::Duration;
-use recon_core::{NodeId, Position, ProtoCx, Protocol};
+use recon_core::{NodeId, Position, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -214,12 +214,7 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut inbox,
-                |ccx| f(beb, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for sbeb::Ind::Deliver { from, msg } in inbox.drain(..) {
             self.on_arrival(from, msg, cx);
@@ -234,12 +229,9 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
         let id = sbeb::BroadcastId(self.beb_seq);
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut send_inbox,
-                |ccx| beb.on_cmd(sbeb::Cmd::Broadcast { id, msg: data }, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut send_inbox, |ccx| {
+                beb.on_cmd(sbeb::Cmd::Broadcast { id, msg: data }, ccx)
+            });
         }
         debug_assert!(send_inbox.is_empty(), "broadcasting must not deliver synchronously");
         self.send_inbox = send_inbox;
@@ -282,7 +274,6 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Data<P>;
-    type Timer = crate::stubborn_link::Retransmit;
     type Scope = core::convert::Infallible;
     /// Nothing is rewritten; the metadata is written once so a restart finds something.
     type Meta = ();
@@ -306,8 +297,8 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, token: crate::stubborn_link::Retransmit, cx: &mut ProtoCx<'_, Self>) {
-        self.with_beb(cx, |beb, ccx| beb.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
     }
 
     /// `upon event ⟨ lurb, Recovery ⟩`.

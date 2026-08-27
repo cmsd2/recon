@@ -4,7 +4,7 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Time, step};
+use recon_core::{Effect, Event, MemStore, NodeId, Time, step_with};
 use recon_protocols::best_effort_broadcast::{BestEffortBroadcast, Cmd, Ind};
 use recon_protocols::perfect_link::Wire;
 use recon_sim::{Config, Sim};
@@ -40,8 +40,16 @@ fn delivered(s: &Sim<BestEffortBroadcast<u32>>, node: NodeId) -> Vec<(NodeId, u3
 
 #[test]
 fn the_layer_contributes_no_wire_fields_of_its_own() {
+    let mut ids = 0;
     let mut p = beb();
-    let fx = step(&mut p, Event::Cmd(Cmd::Broadcast(9u32)), Time::ZERO, &mut rng());
+    let fx = step_with(
+        &mut p,
+        Event::Cmd(Cmd::Broadcast(9u32)),
+        Time::ZERO,
+        &mut rng(),
+        &mut store(),
+        &mut ids,
+    );
 
     // Every outgoing message is the perfect link's Wire, unchanged — no broadcast header.
     let sends: Vec<_> = fx
@@ -68,8 +76,16 @@ fn the_layer_contributes_no_wire_fields_of_its_own() {
 
 #[test]
 fn a_broadcast_reaches_every_process_including_the_sender() {
+    let mut ids = 0;
     let mut p = beb();
-    let fx = step(&mut p, Event::Cmd(Cmd::Broadcast(1u32)), Time::ZERO, &mut rng());
+    let fx = step_with(
+        &mut p,
+        Event::Cmd(Cmd::Broadcast(1u32)),
+        Time::ZERO,
+        &mut rng(),
+        &mut store(),
+        &mut ids,
+    );
     let targets: Vec<NodeId> = fx
         .iter()
         .filter_map(|e| match e {
@@ -231,4 +247,9 @@ fn partial_delivery_after_a_crash_is_permitted() {
         "a crashed sender should be able to produce partial delivery — if this never \
          happens the test is not exercising the case it claims to"
     );
+}
+
+/// A fresh store per call: these protocols write nothing durably.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
 }

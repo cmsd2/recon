@@ -4,8 +4,8 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Time, step};
-use recon_protocols::stubborn_link::{Cmd, Ind, Retransmit, SendId, StubbornLink};
+use recon_core::{Effect, Event, MemStore, NodeId, Time, TimerId, step_with};
+use recon_protocols::stubborn_link::{Cmd, Ind, SendId, StubbornLink};
 use recon_sim::{Config, DropReason, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -15,6 +15,11 @@ type Payload = u32;
 
 fn interval() -> Duration {
     Duration::from_millis(10)
+}
+
+/// A fresh store per call: this protocol writes nothing durably, so nothing carries between them.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
 }
 
 fn link() -> StubbornLink<Payload> {
@@ -29,22 +34,36 @@ fn rng() -> ChaCha8Rng {
     ChaCha8Rng::seed_from_u64(0)
 }
 
+/// The handle the protocol just registered, read out of what it emitted rather than assumed. A
+/// test that names a literal is asserting the allocation order, not the protocol's behaviour.
+fn armed<M, I>(fx: &[Effect<M, I>]) -> TimerId {
+    fx.iter()
+        .find_map(|e| match e {
+            Effect::SetTimer { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("a timer was armed")
+}
+
 // ------------------------------------------------------ Retransmission: task 4.1
 
 #[test]
 fn a_send_transmits_immediately_and_arms_the_timer() {
     let mut p = link();
-    let fx = step(
+    let mut ids = 0;
+    let fx = step_with(
         &mut p,
         Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 7 }),
         Time::ZERO,
         &mut rng(),
+        &mut MemStore::default(),
+        &mut ids,
     );
     assert_eq!(
         fx,
         vec![
             Effect::Send { to: B, msg: 7 },
-            Effect::SetTimer { after: interval(), token: Retransmit },
+            Effect::SetTimer { after: interval(), id: TimerId(0) },
         ]
     );
     assert_eq!(p.outstanding(), 1);
@@ -54,16 +73,21 @@ fn a_send_transmits_immediately_and_arms_the_timer() {
 fn the_timer_retransmits_everything_outstanding_and_re_arms() {
     let mut p = link();
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 }), Time::ZERO, &mut r);
-    step(&mut p, Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 }), Time::ZERO, &mut r);
+    let mut ids = 0;
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 });
+    let armed_first = armed(&step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids));
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 });
+    step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
 
-    let fx = step(&mut p, Event::Timer(Retransmit), Time::from_millis(10), &mut r);
+    let at = Time::from_millis(10);
+    let fx = step_with(&mut p, Event::Timer(armed_first), at, &mut r, &mut store(), &mut ids);
     assert_eq!(
         fx,
         vec![
             Effect::Send { to: B, msg: 1 },
             Effect::Send { to: B, msg: 2 },
-            Effect::SetTimer { after: interval(), token: Retransmit },
+            // A fresh handle: the timer it re-arms is not the one that just fired.
+            Effect::SetTimer { after: interval(), id: TimerId(1) },
         ],
         "every outstanding transmission is resent, and the timer re-arms"
     );
@@ -74,9 +98,11 @@ fn a_second_send_does_not_arm_a_second_timer() {
     // Two timers would double the retransmission rate and compound on every send.
     let mut p = link();
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 }), Time::ZERO, &mut r);
-    let fx =
-        step(&mut p, Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 }), Time::ZERO, &mut r);
+    let mut ids = 0;
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 });
+    step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 });
+    let fx = step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
     assert_eq!(fx, vec![Effect::Send { to: B, msg: 2 }], "no second timer");
 }
 
@@ -84,11 +110,15 @@ fn a_second_send_does_not_arm_a_second_timer() {
 fn retransmission_ceases_when_stopped() {
     let mut p = link();
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 }), Time::ZERO, &mut r);
-    step(&mut p, Event::Cmd(Cmd::Stop { id: SendId(1) }), Time::ZERO, &mut r);
+    let mut ids = 0;
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 });
+    let tick = armed(&step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids));
+    let cmd = Event::Cmd(Cmd::Stop { id: SendId(1) });
+    step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
     assert_eq!(p.outstanding(), 0);
 
-    let fx = step(&mut p, Event::Timer(Retransmit), Time::from_millis(10), &mut r);
+    let at = Time::from_millis(10);
+    let fx = step_with(&mut p, Event::Timer(tick), at, &mut r, &mut store(), &mut ids);
     assert_eq!(fx, vec![], "nothing outstanding, so nothing resent and no timer re-armed");
 }
 
@@ -96,16 +126,21 @@ fn retransmission_ceases_when_stopped() {
 fn stopping_one_transmission_leaves_the_others() {
     let mut p = link();
     let mut r = rng();
-    step(&mut p, Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 }), Time::ZERO, &mut r);
-    step(&mut p, Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 }), Time::ZERO, &mut r);
-    step(&mut p, Event::Cmd(Cmd::Stop { id: SendId(1) }), Time::ZERO, &mut r);
+    let mut ids = 0;
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 });
+    let tick = armed(&step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids));
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(2), to: B, msg: 2 });
+    step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let cmd = Event::Cmd(Cmd::Stop { id: SendId(1) });
+    step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
 
-    let fx = step(&mut p, Event::Timer(Retransmit), Time::from_millis(10), &mut r);
+    let at = Time::from_millis(10);
+    let fx = step_with(&mut p, Event::Timer(tick), at, &mut r, &mut store(), &mut ids);
     assert_eq!(
         fx,
         vec![
             Effect::Send { to: B, msg: 2 },
-            Effect::SetTimer { after: interval(), token: Retransmit },
+            Effect::SetTimer { after: interval(), id: TimerId(1) },
         ]
     );
 }
@@ -235,4 +270,41 @@ fn nothing_is_delivered_when_nothing_is_sent() {
     s.run_until(Time::from_millis(500));
     assert_eq!(s.trace().delivery_count(), 0);
     assert_eq!(s.trace().indication_count(), 0);
+}
+
+// ------------------------------------- What the handle makes possible
+
+#[test]
+fn a_superseded_expiry_is_ignored() {
+    // `armed: bool` could say that something was pending but not *which*, so a stale expiry was
+    // indistinguishable from the live one and was acted on. Holding the handle makes the
+    // difference visible: the link retransmits only for the timer it is actually waiting on.
+    let mut p = link();
+    let mut r = rng();
+    let mut ids = 0;
+
+    let cmd = Event::Cmd(Cmd::Send { id: SendId(1), to: B, msg: 1 });
+    let stale = armed(&step_with(&mut p, cmd, Time::ZERO, &mut r, &mut store(), &mut ids));
+
+    // Firing it re-arms, so the link is now waiting on a different handle.
+    let at = Time::from_millis(10);
+    let live = armed(&step_with(&mut p, Event::Timer(stale), at, &mut r, &mut store(), &mut ids));
+    assert_ne!(live, stale, "re-arming registers a new timer, not the same one again");
+
+    let at = Time::from_millis(20);
+    let fx = step_with(&mut p, Event::Timer(stale), at, &mut r, &mut store(), &mut ids);
+    assert_eq!(fx, vec![], "the superseded expiry retransmits nothing and arms nothing");
+
+    // Non-vacuity: the handle it *is* waiting on still does the work, so the assertion above is
+    // not satisfied by a link that has quietly stopped retransmitting altogether.
+    let at = Time::from_millis(30);
+    let fx = step_with(&mut p, Event::Timer(live), at, &mut r, &mut store(), &mut ids);
+    assert_eq!(
+        fx,
+        vec![
+            Effect::Send { to: B, msg: 1 },
+            Effect::SetTimer { after: interval(), id: TimerId(2) },
+        ],
+        "the live expiry still retransmits and re-arms"
+    );
 }

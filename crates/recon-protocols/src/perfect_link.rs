@@ -47,7 +47,7 @@
 //! duplicates. [`crate::logged_link`] is that configuration, and makes the counter durable.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -82,12 +82,6 @@ pub enum Cmd<P> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ind<P> {
     Deliver { from: NodeId, msg: P },
-}
-
-/// Timers, which are the child's re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Stubborn(sl::Retransmit),
 }
 
 /// Reliable delivery, exactly once, over a stubborn link.
@@ -141,9 +135,7 @@ impl<P: Clone> PerfectLink<P> {
         inbox.clear();
         {
             let stubborn = &mut self.stubborn;
-            cx.with_child_consuming(core::convert::identity, Timer::Stubborn, &mut inbox, |ccx| {
-                f(stubborn, ccx)
-            });
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(stubborn, ccx));
         }
         for ind in inbox.drain(..) {
             let sl::Ind::Deliver { from, msg: Wire { id, payload } } = ind;
@@ -159,7 +151,6 @@ impl<P: Clone> Protocol for PerfectLink<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -179,7 +170,7 @@ impl<P: Clone> Protocol for PerfectLink<P> {
         self.with_stubborn(cx, |sl, ccx| sl.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, Timer::Stubborn(token): Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.with_stubborn(cx, |sl, ccx| sl.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_stubborn(cx, |sl, ccx| sl.on_timer(id, ccx));
     }
 }

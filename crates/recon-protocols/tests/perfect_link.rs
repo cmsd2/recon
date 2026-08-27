@@ -4,9 +4,8 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Time, step};
-use recon_protocols::perfect_link::{Cmd, Ind, MsgId, PerfectLink, Timer, Wire};
-use recon_protocols::stubborn_link::Retransmit;
+use recon_core::{Effect, Event, MemStore, NodeId, Time, TimerId, step_with};
+use recon_protocols::perfect_link::{Cmd, Ind, MsgId, PerfectLink, Wire};
 use recon_sim::{Config, DropReason, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -32,15 +31,18 @@ fn rng() -> ChaCha8Rng {
 #[test]
 fn the_wire_carries_exactly_one_identifier_and_the_payload() {
     let mut p: PerfectLink<u32> = PerfectLink::new(A, interval());
-    let fx = step(&mut p, Event::Cmd(Cmd::Send { to: B, msg: 7u32 }), Time::ZERO, &mut rng());
+    let mut ids = 0;
+    let cmd = Event::Cmd(Cmd::Send { to: B, msg: 7u32 });
+    let fx = step_with(&mut p, cmd, Time::ZERO, &mut rng(), &mut MemStore::default(), &mut ids);
 
     assert_eq!(
         fx,
         vec![
             Effect::Send { to: B, msg: Wire { id: MsgId { src: A, seq: 1 }, payload: 7 } },
-            Effect::SetTimer { after: interval(), token: Timer::Stubborn(Retransmit) },
+            // The child's timer, untouched: this layer supplies no mapping for one.
+            Effect::SetTimer { after: interval(), id: TimerId(0) },
         ],
-        "one identifier, one payload, and the child's timer re-wrapped"
+        "one identifier, one payload, and the child's timer passed straight up"
     );
 }
 
@@ -48,14 +50,24 @@ fn the_wire_carries_exactly_one_identifier_and_the_payload() {
 fn identifiers_advance_per_send() {
     let mut p: PerfectLink<u32> = PerfectLink::new(A, interval());
     let mut r = rng();
-    let ids: Vec<u64> = (0..3)
-        .flat_map(|_| step(&mut p, Event::Cmd(Cmd::Send { to: B, msg: 0u32 }), Time::ZERO, &mut r))
+    let mut ids = 0;
+    let seqs: Vec<u64> = (0..3)
+        .flat_map(|_| {
+            step_with(
+                &mut p,
+                Event::Cmd(Cmd::Send { to: B, msg: 0u32 }),
+                Time::ZERO,
+                &mut r,
+                &mut MemStore::default(),
+                &mut ids,
+            )
+        })
         .filter_map(|e| match e {
             Effect::Send { msg: Wire { id, .. }, .. } => Some(id.seq),
             _ => None,
         })
         .collect();
-    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(seqs, vec![1, 2, 3]);
 }
 
 #[test]
@@ -182,16 +194,37 @@ struct StandIn {
 fn the_link_is_testable_with_no_layer_above_it() {
     let mut p: PerfectLink<StandIn> = PerfectLink::new(A, interval());
     let mut r = rng();
+    let mut ids = 0;
     let payload = StandIn { label: "arbitrary" };
 
-    let fx =
-        step(&mut p, Event::Cmd(Cmd::Send { to: B, msg: payload.clone() }), Time::ZERO, &mut r);
+    let fx = step_with(
+        &mut p,
+        Event::Cmd(Cmd::Send { to: B, msg: payload.clone() }),
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
     assert!(matches!(fx[0], Effect::Send { to: B, .. }));
 
     // And an arriving copy surfaces exactly once, however many times it arrives.
     let wire = Wire { id: MsgId { src: B, seq: 1 }, payload: payload.clone() };
-    let first = step(&mut p, Event::Msg { from: B, msg: wire.clone() }, Time::ZERO, &mut r);
-    let second = step(&mut p, Event::Msg { from: B, msg: wire }, Time::ZERO, &mut r);
+    let first = step_with(
+        &mut p,
+        Event::Msg { from: B, msg: wire.clone() },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
+    let second = step_with(
+        &mut p,
+        Event::Msg { from: B, msg: wire },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
 
     assert_eq!(first, vec![Effect::Indicate(Ind::Deliver { from: B, msg: payload })]);
     assert_eq!(second, vec![], "the second copy is suppressed");
@@ -201,12 +234,32 @@ fn the_link_is_testable_with_no_layer_above_it() {
 fn deduplication_is_per_identifier_not_per_sender() {
     let mut p: PerfectLink<u32> = PerfectLink::new(A, interval());
     let mut r = rng();
+    let mut ids = 0;
     let one = Wire { id: MsgId { src: B, seq: 1 }, payload: 0u32 };
     let two = Wire { id: MsgId { src: B, seq: 2 }, payload: 0u32 };
 
-    assert_eq!(step(&mut p, Event::Msg { from: B, msg: one }, Time::ZERO, &mut r).len(), 1);
     assert_eq!(
-        step(&mut p, Event::Msg { from: B, msg: two }, Time::ZERO, &mut r).len(),
+        step_with(
+            &mut p,
+            Event::Msg { from: B, msg: one },
+            Time::ZERO,
+            &mut r,
+            &mut MemStore::default(),
+            &mut ids
+        )
+        .len(),
+        1
+    );
+    assert_eq!(
+        step_with(
+            &mut p,
+            Event::Msg { from: B, msg: two },
+            Time::ZERO,
+            &mut r,
+            &mut MemStore::default(),
+            &mut ids
+        )
+        .len(),
         1,
         "a different identifier with identical content is a different message"
     );
@@ -223,16 +276,38 @@ fn no_duplication_does_not_survive_the_recipient_restarting() {
     // scope that qualification hides.
     let mut p: PerfectLink<u32> = PerfectLink::new(B, interval());
     let mut r = rng();
+    let mut ids = 0;
     let wire = Wire { id: MsgId { src: A, seq: 1 }, payload: 5u32 };
 
-    let first = step(&mut p, Event::Msg { from: A, msg: wire.clone() }, Time::ZERO, &mut r);
-    let again = step(&mut p, Event::Msg { from: A, msg: wire.clone() }, Time::ZERO, &mut r);
+    let first = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: wire.clone() },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
+    let again = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: wire.clone() },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
     assert_eq!(first.len(), 1);
     assert_eq!(again.len(), 0, "within one incarnation, the duplicate is suppressed");
 
     // The process restarts: fresh state, nothing remembered.
     let mut p: PerfectLink<u32> = PerfectLink::new(B, interval());
-    let after_restart = step(&mut p, Event::Msg { from: A, msg: wire }, Time::ZERO, &mut r);
+    let after_restart = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: wire },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
     assert_eq!(
         after_restart.len(),
         1,

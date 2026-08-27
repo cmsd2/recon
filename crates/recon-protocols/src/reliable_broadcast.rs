@@ -46,7 +46,7 @@
 //! - `⟨rb, Init⟩` is not a separate event; `new` establishes the same state.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -83,12 +83,6 @@ pub enum Cmd<P> {
 pub enum Ind<P> {
     /// `from` is the process that *originated* the message, never the one that relayed it.
     Deliver { from: NodeId, msg: P },
-}
-
-/// Timers, which are the child's re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Broadcast(beb::Timer),
 }
 
 /// The wire type: this layer's data, carried by best-effort broadcast.
@@ -147,9 +141,7 @@ impl<P: Clone> ReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, Timer::Broadcast, &mut inbox, |ccx| {
-                f(beb, ccx)
-            });
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             let beb::Ind::Deliver { msg: Data { id, payload }, .. } = ind;
@@ -179,12 +171,9 @@ impl<P: Clone> ReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                Timer::Broadcast,
-                &mut relay_inbox,
-                |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {
+                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
+            });
         }
         debug_assert!(
             relay_inbox.is_empty(),
@@ -198,7 +187,6 @@ impl<P: Clone> Protocol for ReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -215,7 +203,7 @@ impl<P: Clone> Protocol for ReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, Timer::Broadcast(token): Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.with_beb(cx, |beb, ccx| beb.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
     }
 }

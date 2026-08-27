@@ -11,6 +11,7 @@ reading of log files.
 
 ### Requirement: A run is fully determined by its seed and configuration
 
+
 The simulator SHALL produce an identical delivery trace for identical seed and configuration. All
 scheduling decisions, fault decisions, and randomness supplied to protocols SHALL derive from that
 seed. Iteration over internal collections MUST NOT introduce ordering that varies between runs.
@@ -32,6 +33,7 @@ seed. Iteration over internal collections MUST NOT introduce ordering that varie
 
 ### Requirement: Time is virtual and advances only through scheduled events
 
+
 The simulator SHALL maintain a monotonic virtual clock that advances to the timestamp of the next
 scheduled event. A run's duration in wall-clock terms SHALL be independent of the simulated
 durations within it.
@@ -47,6 +49,7 @@ durations within it.
 - **THEN** they are processed in an order that is the same on every run of that seed
 
 ### Requirement: The network provides fair-loss semantics with configurable faults
+
 
 The simulator SHALL act as the fair-loss link layer. It SHALL support configuring message loss,
 duplication, reordering, delivery delay, and network partitions between named groups of processes.
@@ -76,9 +79,14 @@ a message retransmitted infinitely often SHALL eventually be delivered.
 
 ### Requirement: Every run produces an inspectable trace
 
+
 The simulator SHALL record a trace containing, in order, each message sent, each delivery
 outcome including drops and duplicates, each timer fired, and each indication raised, with the
 virtual time and originating process for each entry.
+
+A timer entry SHALL carry the handle of the timer that fired, so that a claim about *which* timer
+fired can be settled from the trace rather than from protocol internals. The trace SHALL NOT be
+parameterised by a timer type, having none to be parameterised by.
 
 #### Scenario: Properties are asserted over the trace
 
@@ -92,7 +100,13 @@ virtual time and originating process for each entry.
 - **THEN** the trace distinguishes messages that were dropped or duplicated from those delivered
   normally
 
+#### Scenario: Which timer fired is visible in the trace
+
+- **WHEN** two layers of one process each have a timer outstanding and one of them fires
+- **THEN** the trace names which, by the handle the registering layer was given
+
 ### Requirement: Multiple processes run within a single test process
+
 
 The simulator SHALL run a configured set of named processes within one operating-system process
 and one thread, with no sockets opened and no network interfaces used.
@@ -103,6 +117,7 @@ and one thread, with no sockets opened and no network interfaces used.
 - **THEN** it executes inside the test process, opening no sockets
 
 ### Requirement: A crash loses volatile state
+
 
 The simulator SHALL model a crash as the loss of a process's volatile state. A process that
 crashes and later restarts SHALL resume with freshly initialised state and no pending timers,
@@ -130,6 +145,7 @@ while preserving its state, for scenarios that require a pause rather than a cra
 
 ### Requirement: Encoding can be exercised on demand
 
+
 The simulator SHALL move message payloads between processes as typed values by default. It SHALL
 offer a mode in which every delivered message is round-tripped through the wire encoding, so that
 encoding defects can be detected without being incurred on every run.
@@ -145,6 +161,7 @@ encoding defects can be detected without being incurred on every run.
 - **THEN** no encoding or decoding is performed for deliveries within the simulation
 
 ### Requirement: A synchronous mode with a bounded delivery delay
+
 
 The simulator SHALL offer a mode in which every message between connected, uncrashed processes is
 delivered within a known upper bound and none is lost. The bound SHALL be readable by a test, so
@@ -178,6 +195,7 @@ configuration of loss, duplication, reordering and latency is unchanged.
 
 ### Requirement: A session network model
 
+
 The simulator SHALL offer a mode in which communication between each pair of processes takes place
 within a session. While a session holds, messages between connected, uncrashed processes SHALL be
 delivered reliably, in the order sent, and without duplication. This mode is additional; the
@@ -195,6 +213,7 @@ fair-loss behaviour remains the default and is unchanged.
 - **THEN** loss, duplication and reordering behave exactly as before
 
 ### Requirement: A session ends on disruption, losing an unknown suffix
+
 
 A session SHALL end when the processes are partitioned, when either crashes, or when a break is
 requested explicitly. On ending, an unknown suffix of the messages in flight SHALL be discarded,
@@ -223,6 +242,7 @@ and a new session SHALL begin at a higher epoch once communication is possible a
 
 ### Requirement: Session events are visible in the trace
 
+
 The simulator SHALL record session establishment, session ends and suffix losses in the trace, so
 that a property can be asserted over them without inspecting protocol state.
 
@@ -237,6 +257,7 @@ that a property can be asserted over them without inspecting protocol state.
 - **THEN** the trace distinguishes those discarded by the session ending from those delivered
 
 ### Requirement: A session is re-established without being prompted
+
 
 Once communication with a peer becomes possible again, the simulator SHALL establish a session with
 it without waiting for either process to send. It MAY delay before doing so, modelling a link that
@@ -265,6 +286,7 @@ above, which neither end controls and which may be silent indefinitely.
   becomes possible
 
 ### Requirement: A session establishment is reported to the processes
+
 
 When a session is established with a peer — whether prompted by this process sending, by the peer
 sending, or by any other traffic — the simulator SHALL report it to both processes, naming the
@@ -299,6 +321,7 @@ provoked by a heartbeat, by an application send, or by the peer connecting inwar
 
 ### Requirement: Stable storage survives a crash
 
+
 The simulator SHALL provide each process with storage that survives a crash and a restart, while
 volatile state does not. That storage SHALL hold a metadata value and an append-only sequence of
 entries, and SHALL be readable synchronously by the process that owns it. Storage SHALL be part of
@@ -332,6 +355,7 @@ the run's deterministic state, so that a seed reproduces a run including everyth
 - **THEN** it produces an identical trace
 
 ### Requirement: A write takes time and can be interrupted by a crash
+
 
 A write SHALL be durable when it returns: once a write call has returned, no subsequent crash can
 take it. A synchronous state machine offers no later point at which a driver could wait on a
@@ -380,6 +404,7 @@ never interrupted is not correct.
 
 ### Requirement: Storage activity is visible in the trace
 
+
 Writes, appends, deaths inside a write, and whether a recovering process found anything SHALL
 appear in the trace, so that properties about durability can be asserted over the trace rather than
 over protocol internals.
@@ -404,6 +429,7 @@ over protocol internals.
 
 ### Requirement: Nothing is dispatched to a process while it is starting or recovering
 
+
 The simulator SHALL NOT deliver a message, fire a timer, or dispatch a command to a process
 between entering its initialisation or recovery handler and that handler returning.
 
@@ -421,3 +447,30 @@ checked rather than an arrangement that can be disturbed.
 
 - **WHEN** a recovery handler reads its durable state and acts on what it finds
 - **THEN** nothing else has been dispatched to it in the meantime
+
+### Requirement: The run owns the source of timer identities
+
+
+The simulator SHALL supply one source of timer identities per run and SHALL pass it to every
+protocol it drives, so that identities are distinct across every layer of every process in that run.
+
+A source owned per protocol, or begun afresh for each event, would hand two layers the same identity
+and let each accept the other's expiry. Owning it at the run is what makes the guarantee that
+identities do not collide something the driver provides rather than something each protocol must
+arrange.
+
+#### Scenario: Identities do not collide across a composition
+
+- **WHEN** several layers of one process each register a timer during a run
+- **THEN** every handle is distinct
+
+#### Scenario: A run remains reproducible from its seed
+
+- **WHEN** the same seed and configuration are run twice, with timers registered and fired
+- **THEN** the two traces are identical, including which handle each timer entry names
+
+#### Scenario: An expiry is delivered to the process that registered it
+
+- **WHEN** a timer registered by one process fires
+- **THEN** it is delivered to that process, and to no other
+

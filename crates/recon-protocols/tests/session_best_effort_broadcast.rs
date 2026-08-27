@@ -2,7 +2,7 @@
 //! do not.
 
 use core::time::Duration;
-use recon_core::{Event, NodeId, SessionEvent, Time, step};
+use recon_core::{Event, MemStore, NodeId, SessionEvent, Time, step_with};
 use recon_protocols::session_best_effort_broadcast::{Cmd, Ind, SessionBestEffortBroadcast};
 use recon_sim::{Config, Sim};
 
@@ -49,31 +49,51 @@ fn session_reports(s: &Sim<Beb>, node: NodeId) -> (usize, usize) {
 
 #[test]
 fn state_holds_nothing_but_the_process_set() {
+    let mut ids = 0;
     let mut p: Beb = SessionBestEffortBroadcast::new(A, ALL);
     let mut r = rand_chacha::ChaCha8Rng::from_seed([0; 32]);
     for i in 0..500u32 {
-        step(&mut p, Event::Cmd(Cmd::Broadcast(i)), Time::ZERO, &mut r);
-        step(&mut p, Event::Msg { from: B, msg: i }, Time::ZERO, &mut r);
+        step_with(
+            &mut p,
+            Event::Cmd(Cmd::Broadcast(i)),
+            Time::ZERO,
+            &mut r,
+            &mut store(),
+            &mut ids,
+        );
+        step_with(
+            &mut p,
+            Event::Msg { from: B, msg: i },
+            Time::ZERO,
+            &mut r,
+            &mut store(),
+            &mut ids,
+        );
     }
     assert_eq!(p.tracked_peers(), ALL.len(), "five hundred messages, no per-message state");
 }
 
 #[test]
 fn both_session_reports_reach_the_layer_above() {
+    let mut ids = 0;
     let mut p: Beb = SessionBestEffortBroadcast::new(A, ALL);
     let mut r = rand_chacha::ChaCha8Rng::from_seed([0; 32]);
 
-    let ended = step(
+    let ended = step_with(
         &mut p,
         Event::ScopeEvent(SessionEvent::Ended { peer: B, epoch: 1 }),
         Time::ZERO,
         &mut r,
+        &mut store(),
+        &mut ids,
     );
-    let established = step(
+    let established = step_with(
         &mut p,
         Event::ScopeEvent(SessionEvent::Established { peer: B, epoch: 2 }),
         Time::ZERO,
         &mut r,
+        &mut store(),
+        &mut ids,
     );
 
     assert_eq!(ended.len(), 1);
@@ -157,3 +177,8 @@ fn a_directed_send_reaches_only_the_addressed_member() {
 }
 
 use rand::SeedableRng;
+
+/// A fresh store per call: these protocols write nothing durably.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
+}

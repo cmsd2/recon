@@ -137,7 +137,9 @@ each one exists because its absence killed the first attempt.
    A failing run must be reproducible from its seed.
 
 4. **Compose statically; extract the DSL, don't design it.** Parents own children as concrete
-   typed fields and re-wrap child effects rather than re-encoding them. Write two or three
+   typed fields and re-wrap the child effects that carry the child's vocabulary — messages and
+   indications — rather than re-encoding them. A timer is not one of those: it is named by an
+   opaque `TimerId` the driver issues, so it passes through composition untouched. Write two or three
    protocols by hand before writing any macro to remove the boilerplate. Building the framework
    first is the mistake this repository already made.
 
@@ -161,7 +163,17 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
 - **Composition picks one of two forms**, and which one is decided by a single question: does the
   layer transform its child's indications, or pass them on? Forwarding layers use
   `Cx::with_child`; transforming layers use `Cx::with_child_consuming`, which collects the child's
-  indications for the parent to handle after the child call returns.
+  indications for the parent to handle after the child call returns. Neither takes a timer mapper:
+  a timer has nothing in it belonging to one layer.
+- **A timer is a handle, not a type.** `Cx::set_timer` returns a `TimerId` the driver issued, and
+  the same handle comes back to `on_timer`. So a layer that registers no timer declares nothing
+  about timers, and inserting a layer leaves the timers beneath it alone. The price is that the
+  handle carries no routing: an expiry is offered to *every* layer, each composing layer passes it
+  to each of its children, and **a layer that registered a timer must compare before acting** —
+  `if self.tick != Some(id) { return; }`. Nothing in the type system enforces that; a test in
+  `crates/recon-protocols/tests/flooding_consensus.rs` does. Identities must come from one source
+  per run, or two layers get the same handle and each accepts the other's expiry: `Sim` owns one,
+  and a test driving a stack by hand uses `step_with` rather than `step` for the same reason.
 - **Wire types nest, and are encoded exactly once** at the bottom boundary. No intermediate
   representation is ever materialised — that, not nesting, is what cost the first attempt.
 - **A layer that adds no per-hop state adds no wire field.** Three protocols currently share one

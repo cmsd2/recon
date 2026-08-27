@@ -2,7 +2,7 @@
 //! observed is the simulator's behaviour and not a protocol's.
 
 use core::time::Duration;
-use recon_core::{NodeId, Position, ProtoCx, Protocol, Store, Time};
+use recon_core::{NodeId, Position, ProtoCx, Protocol, Store, Time, TimerId};
 use recon_sim::{Config, DropReason, Sim, TraceEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,14 +28,10 @@ struct Wire(u32);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Got(NodeId, u32);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Tock;
-
 impl Protocol for Parrot {
     type Cmd = Cmd;
     type Ind = Got;
     type Msg = Wire;
-    type Timer = Tock;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -44,7 +40,9 @@ impl Protocol for Parrot {
     fn on_cmd(&mut self, cmd: Cmd, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
             Cmd::SendTo(to, n) => cx.send(to, Wire(n)),
-            Cmd::Tick(d) => cx.set_timer(d, Tock),
+            Cmd::Tick(d) => {
+                cx.set_timer(d);
+            }
         }
     }
 
@@ -52,7 +50,7 @@ impl Protocol for Parrot {
         cx.indicate(Got(from, n));
     }
 
-    fn on_timer(&mut self, Tock: Tock, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, _: TimerId, cx: &mut ProtoCx<'_, Self>) {
         let _ = self.me;
         cx.indicate(Got(self.me, u32::MAX));
     }
@@ -394,7 +392,6 @@ impl Protocol for Counter {
     type Cmd = CountCmd;
     type Ind = u32;
     type Msg = ();
-    type Timer = ();
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -406,11 +403,13 @@ impl Protocol for Counter {
                 self.seen += 1;
                 cx.indicate(self.seen);
             }
-            CountCmd::ArmTimer(d) => cx.set_timer(d, ()),
+            CountCmd::ArmTimer(d) => {
+                cx.set_timer(d);
+            }
         }
     }
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _: (), cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, _: TimerId, cx: &mut ProtoCx<'_, Self>) {
         cx.indicate(u32::MAX);
     }
 }
@@ -1112,7 +1111,6 @@ impl Protocol for Keeper {
     type Cmd = LedgerCmd;
     type Ind = Ledger;
     type Msg = u32;
-    type Timer = ();
     type Scope = core::convert::Infallible;
     type Meta = Ledger;
     type Entry = u32;
@@ -1141,7 +1139,7 @@ impl Protocol for Keeper {
         cx.indicate(Ledger { total: msg, told: Vec::new() });
     }
 
-    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
 
     fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
         self.saw_before_recovery = Some(self.events_handled);
@@ -1380,7 +1378,7 @@ fn recovery_reads_and_acts_within_the_handler() {
     s.crash(A);
     s.restart(A);
 
-    let after: Vec<&TraceEvent<u32, Ledger, ()>> = s
+    let after: Vec<&TraceEvent<u32, Ledger>> = s
         .trace()
         .events()
         .iter()
@@ -1424,14 +1422,13 @@ impl Protocol for Listener {
     type Cmd = ();
     type Ind = ();
     type Msg = ();
-    type Timer = ();
     type Scope = recon_core::SessionEvent;
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 
     fn on_cmd(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, (): (), _cx: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _cx: &mut ProtoCx<'_, Self>) {}
     fn on_scope_event(&mut self, e: recon_core::SessionEvent, _cx: &mut ProtoCx<'_, Self>) {
         self.heard.push(e);
     }
@@ -1474,4 +1471,140 @@ fn forgetting_deliver_session_events_silently_disables_the_whole_bridge() {
             && heard.iter().any(|e| matches!(e, recon_core::SessionEvent::Ended { .. })),
         "with the opt-in, both boundaries arrive: {heard:?}"
     );
+}
+
+// ------------------------------ Timers are named by a handle the run owns: tasks 3.3 to 3.5
+
+/// Two layers, each with a timer of its own, in one process. Each remembers the handle it was
+/// given, so a test can ask which of them a trace entry belongs to — which is the whole question
+/// a handle has to answer once the type no longer says where in the composition it came from.
+#[derive(Default)]
+struct TwoTimers {
+    slow: Option<TimerId>,
+    fast: Option<TimerId>,
+    slow_fires: u32,
+    fast_fires: u32,
+}
+
+impl TwoTimers {
+    fn slow_period() -> Duration {
+        Duration::from_millis(70)
+    }
+    fn fast_period() -> Duration {
+        Duration::from_millis(10)
+    }
+}
+
+impl Protocol for TwoTimers {
+    type Cmd = ();
+    type Ind = ();
+    type Msg = ();
+    type Scope = core::convert::Infallible;
+    /// Keeps nothing durably: a crash loses everything this protocol knows.
+    type Meta = core::convert::Infallible;
+    type Entry = core::convert::Infallible;
+
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.slow = Some(cx.set_timer(Self::slow_period()));
+        self.fast = Some(cx.set_timer(Self::fast_period()));
+    }
+
+    fn on_cmd(&mut self, (): (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_msg(&mut self, _: NodeId, (): (), _: &mut ProtoCx<'_, Self>) {}
+
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        // Each layer acts only on the expiry it registered, and re-arms with a fresh handle.
+        if self.slow == Some(id) {
+            self.slow_fires += 1;
+            self.slow = Some(cx.set_timer(Self::slow_period()));
+        } else if self.fast == Some(id) {
+            self.fast_fires += 1;
+            self.fast = Some(cx.set_timer(Self::fast_period()));
+        }
+    }
+}
+
+fn two_timers(config: Config) -> Sim<TwoTimers> {
+    Sim::new(config, &[A, B], |_| TwoTimers::default())
+}
+
+#[test]
+fn two_layers_of_one_process_are_given_different_handles() {
+    // A source owned per protocol, or begun afresh for each event, would hand both the same
+    // identity — and each would then accept the other's expiry as its own.
+    let mut s = two_timers(Config::default().seed(3));
+    s.run_for(Duration::from_millis(1));
+
+    let a = s.protocol(A).expect("A exists");
+    let (slow, fast) = (a.slow.expect("slow armed"), a.fast.expect("fast armed"));
+    assert_ne!(slow, fast, "two timers registered in one process must not share a handle");
+}
+
+#[test]
+fn handles_are_distinct_across_every_layer_of_every_process() {
+    // Distinctness is a property of the run, not of a layer: A's handles and B's must not
+    // collide either, or a trace entry would not say whose timer it names.
+    let mut s = two_timers(Config::default().seed(3));
+    s.run_for(Duration::from_millis(1));
+
+    let mut seen = std::collections::BTreeSet::new();
+    for node in [A, B] {
+        let p = s.protocol(node).expect("the process exists");
+        for id in [p.slow.expect("slow armed"), p.fast.expect("fast armed")] {
+            assert!(seen.insert(id), "handle {id:?} was issued twice within one run");
+        }
+    }
+    assert_eq!(seen.len(), 4);
+}
+
+#[test]
+fn the_trace_names_which_timer_fired() {
+    // The claim the trace has to settle: with two timers outstanding at once, an entry says
+    // *which* of them fired — by the handle the registering layer was given, which that layer
+    // still holds. Before this it said only that "a timer" fired.
+    let mut s = two_timers(Config::default().seed(3));
+    s.run_for(Duration::from_millis(1));
+    let slow_first = s.protocol(A).expect("A exists").slow.expect("slow armed");
+
+    // Far enough for the fast timer to have fired repeatedly and the slow one exactly once.
+    s.run_for(Duration::from_millis(100));
+
+    let fired: Vec<TimerId> = s
+        .trace()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            TraceEvent::TimerFired { node, id, .. } if *node == A => Some(*id),
+            _ => None,
+        })
+        .collect();
+
+    assert!(fired.contains(&slow_first), "the slow timer's own handle appears in the trace");
+    assert_eq!(
+        fired.iter().filter(|id| **id == slow_first).count(),
+        1,
+        "and names that firing alone — a handle is spent when the timer it named fires"
+    );
+    let a = s.protocol(A).expect("A exists");
+    assert_eq!(a.slow_fires, 1, "one slow expiry...");
+    assert!(a.fast_fires > 5, "...against many fast ones, so the trace had to distinguish them");
+}
+
+#[test]
+fn a_run_with_timers_reproduces_from_its_seed_including_its_handles() {
+    // The trace comparison covers the handles because a timer entry now carries one. An identity
+    // drawn from anywhere but the run — a process-global counter, say — would break this while
+    // leaving every other trace entry identical.
+    let run = |seed: u64| {
+        let mut s = two_timers(Config::default().seed(seed));
+        s.run_for(Duration::from_millis(200));
+        let events: Vec<String> = s.trace().events().iter().map(|e| format!("{e:?}")).collect();
+        let timers = s.trace().timer_fires();
+        (events, timers)
+    };
+
+    let (first, fires) = run(9);
+    let (again, _) = run(9);
+    assert!(fires > 10, "non-vacuity: the run must actually have fired timers");
+    assert_eq!(first, again, "the same seed must reproduce the same trace, handles included");
 }

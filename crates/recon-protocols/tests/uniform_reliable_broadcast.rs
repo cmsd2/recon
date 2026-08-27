@@ -2,7 +2,7 @@
 //! by contrast, that reliable broadcast genuinely fails the case this protocol is for.
 
 use core::time::Duration;
-use recon_core::{Effect, Event, NodeId, Time, step};
+use recon_core::{Effect, Event, MemStore, NodeId, Time, step_with};
 use recon_protocols::perfect_failure_detector::Heartbeat;
 use recon_protocols::reliable_broadcast::{self as rb, ReliableBroadcast};
 use recon_protocols::uniform_reliable_broadcast::{
@@ -54,16 +54,24 @@ fn rng() -> rand_chacha::ChaCha8Rng {
 
 #[test]
 fn the_wire_multiplexes_broadcasts_and_heartbeats() {
+    let mut ids = 0;
     let mut p = urb(A);
     let mut r = rng();
 
-    let started = step(&mut p, Event::Init, Time::ZERO, &mut r);
+    let started = step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
     assert!(
         started.iter().any(|e| matches!(e, Effect::Send { msg: Wire::Detector(_), .. })),
         "starting must put heartbeats on the wire"
     );
 
-    let sent = step(&mut p, Event::Cmd(Cmd::Broadcast(9u32)), Time::from_millis(1), &mut r);
+    let sent = step_with(
+        &mut p,
+        Event::Cmd(Cmd::Broadcast(9u32)),
+        Time::from_millis(1),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     assert!(
         sent.iter().any(|e| matches!(e, Effect::Send { msg: Wire::Broadcast(_), .. })),
         "broadcasting must put payloads on the wire"
@@ -87,13 +95,21 @@ fn both_wire_variants_survive_encoding() {
 
 #[test]
 fn a_repeat_receipt_records_the_acknowledgement_but_does_not_relay() {
+    let mut ids = 0;
     let mut p = urb(B);
     let mut r = rng();
-    step(&mut p, Event::Init, Time::ZERO, &mut r);
+    step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
 
     // Build a message from A as it would arrive.
     let mut a = urb(A);
-    let from_a = step(&mut a, Event::Cmd(Cmd::Broadcast(5u32)), Time::ZERO, &mut r);
+    let from_a = step_with(
+        &mut a,
+        Event::Cmd(Cmd::Broadcast(5u32)),
+        Time::ZERO,
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     let to_b = from_a
         .iter()
         .find_map(|e| match e {
@@ -102,8 +118,14 @@ fn a_repeat_receipt_records_the_acknowledgement_but_does_not_relay() {
         })
         .expect("a message for B");
 
-    let first =
-        step(&mut p, Event::Msg { from: A, msg: to_b.clone() }, Time::from_millis(1), &mut r);
+    let first = step_with(
+        &mut p,
+        Event::Msg { from: A, msg: to_b.clone() },
+        Time::from_millis(1),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     let relays = first.iter().filter(|e| matches!(e, Effect::Send { .. })).count();
     assert!(relays >= 4, "a first receipt relays to everyone, saw {relays}");
     assert_eq!(p.pending_count(), 1);
@@ -111,8 +133,15 @@ fn a_repeat_receipt_records_the_acknowledgement_but_does_not_relay() {
     // C's relay of the same message is a *different* wire message — it carries C's own perfect
     // link identifier — so it is not suppressed as a duplicate below.
     let mut c = urb(C);
-    step(&mut c, Event::Init, Time::ZERO, &mut r);
-    let c_relayed = step(&mut c, Event::Msg { from: A, msg: to_b }, Time::from_millis(1), &mut r);
+    step_with(&mut c, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let c_relayed = step_with(
+        &mut c,
+        Event::Msg { from: A, msg: to_b },
+        Time::from_millis(1),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     let c_to_b = c_relayed
         .iter()
         .find_map(|e| match e {
@@ -121,7 +150,14 @@ fn a_repeat_receipt_records_the_acknowledgement_but_does_not_relay() {
         })
         .expect("C relays to B");
 
-    let second = step(&mut p, Event::Msg { from: C, msg: c_to_b }, Time::from_millis(2), &mut r);
+    let second = step_with(
+        &mut p,
+        Event::Msg { from: C, msg: c_to_b },
+        Time::from_millis(2),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     assert!(
         !second.iter().any(|e| matches!(e, Effect::Send { msg: Wire::Broadcast(_), .. })),
         "a repeat receipt must not relay again"
@@ -283,7 +319,6 @@ where
     Pr: recon_core::Protocol,
     Pr::Msg: Clone + PartialEq,
     Pr::Ind: Clone,
-    Pr::Timer: Clone,
     Pr::Meta: Clone,
     Pr::Entry: Clone,
     F: FnMut(NodeId) -> Pr + 'static,
@@ -386,4 +421,9 @@ fn the_detector_does_accuse_the_unreachable_side_of_a_partition() {
         "A should have accused the far side, saw correct = {a_correct:?}"
     );
     assert!(a_correct.contains(&B), "but not its own side");
+}
+
+/// A fresh store per call: these protocols write nothing durably.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
 }

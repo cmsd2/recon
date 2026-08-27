@@ -30,7 +30,7 @@
 //! end is an event this link is told about, so it can react to it, report it, and be tested
 //! against it.
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, TimerId};
 use std::collections::BTreeMap;
 
 /// What crosses the wire: the payload, unchanged.
@@ -91,7 +91,6 @@ impl<P: Clone> Protocol for SessionLink<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = ();
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -108,7 +107,9 @@ impl<P: Clone> Protocol for SessionLink<P> {
         cx.indicate(Ind::Deliver { from, msg });
     }
 
-    fn on_timer(&mut self, (): (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _id: TimerId, _cx: &mut ProtoCx<'_, Self>) {
+        // Registers none, and has no child to pass one to.
+    }
 
     fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {
         // The one thing this link exists to do that a perfect link cannot: say so. Both events

@@ -76,7 +76,7 @@
 //!   nothing to start, failure detection having gone.
 //! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
 
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
@@ -100,9 +100,6 @@ pub enum Ind<P> {
     /// `from` is the process that originated the message, never a relayer.
     Deliver { from: NodeId, msg: P },
 }
-
-/// Timers, which are the broadcast child's re-wrapped.
-pub type Timer = beb::Timer;
 
 /// Broadcast with uniform agreement, resting on a correct majority and on nothing else.
 #[derive(Debug)]
@@ -184,12 +181,7 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
         inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut inbox,
-                |ccx| f(beb, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
             let beb::Ind::Deliver { from, msg: Data { id, payload } } = ind;
@@ -219,12 +211,9 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
         relay_inbox.clear();
         {
             let beb = &mut self.beb;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut relay_inbox,
-                |ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {
+                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
+            });
         }
         debug_assert!(
             relay_inbox.is_empty(),
@@ -267,7 +256,6 @@ impl<P: Clone> Protocol for MajorityAckUniformReliableBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Msg<P>;
-    type Timer = Timer;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -287,7 +275,7 @@ impl<P: Clone> Protocol for MajorityAckUniformReliableBroadcast<P> {
         self.with_beb(cx, |beb, ccx| beb.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, token: Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.with_beb(cx, |beb, ccx| beb.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_beb(cx, |beb, ccx| beb.on_timer(id, ccx));
     }
 }

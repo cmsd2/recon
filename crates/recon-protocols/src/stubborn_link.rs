@@ -44,7 +44,7 @@
 //!   precondition that naming brings with it.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::BTreeMap;
 
 /// Identifies one stubborn transmission, so it can later be stopped.
@@ -76,10 +76,6 @@ pub enum Ind<M> {
     Deliver { from: NodeId, msg: M },
 }
 
-/// This protocol's only timer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Retransmit;
-
 /// Retransmits until told to stop.
 ///
 /// Adds nothing to the wire: what it transmits is exactly the payload it was given. That is why
@@ -88,13 +84,16 @@ pub struct Retransmit;
 pub struct StubbornLink<M> {
     interval: Duration,
     sent: BTreeMap<SendId, (NodeId, M)>,
-    armed: bool,
+    /// The retransmission timer outstanding, if any. A handle rather than a flag: an expiry this
+    /// link is no longer waiting on is then recognisable, where `true` said only that something
+    /// was pending.
+    tick: Option<TimerId>,
 }
 
 impl<M> StubbornLink<M> {
     /// Retransmit everything outstanding every `interval`.
     pub fn new(interval: Duration) -> Self {
-        StubbornLink { interval, sent: BTreeMap::new(), armed: false }
+        StubbornLink { interval, sent: BTreeMap::new(), tick: None }
     }
 
     /// How many transmissions are still being retried.
@@ -115,9 +114,8 @@ impl<M: Clone> StubbornLink<M> {
     /// equivalent in behaviour and leaves no timer running when nothing is outstanding — which
     /// also means a run reaches quiescence instead of ticking indefinitely.
     fn arm(&mut self, cx: &mut ProtoCx<'_, Self>) {
-        if !self.armed && !self.sent.is_empty() {
-            cx.set_timer(self.interval, Retransmit);
-            self.armed = true;
+        if self.tick.is_none() && !self.sent.is_empty() {
+            self.tick = Some(cx.set_timer(self.interval));
         }
     }
 }
@@ -126,7 +124,6 @@ impl<M: Clone> Protocol for StubbornLink<M> {
     type Cmd = Cmd<M>;
     type Ind = Ind<M>;
     type Msg = M;
-    type Timer = Retransmit;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -155,11 +152,17 @@ impl<M: Clone> Protocol for StubbornLink<M> {
         cx.indicate(Ind::Deliver { from, msg });
     }
 
-    fn on_timer(&mut self, Retransmit: Retransmit, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        // Every layer above hands every expiry down, so most of what arrives here was registered
+        // by somebody else. Only the one this link is waiting on does anything — which also makes
+        // an expiry this link has superseded recognisable rather than merely indistinguishable.
+        if self.tick != Some(id) {
+            return;
+        }
         for (to, msg) in self.sent.values() {
             cx.send(*to, msg.clone());
         }
-        self.armed = false;
+        self.tick = None;
         self.arm(cx);
     }
 }

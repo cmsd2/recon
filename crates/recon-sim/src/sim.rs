@@ -12,7 +12,7 @@ use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
 use recon_core::{
     Cx, Effect, MemStore, NodeId, Position, ProtoCx, ProtoEffect, Protocol, SessionEvent, Store,
-    Time, WriteKind,
+    Time, TimerId, WriteKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,7 +28,7 @@ enum Scheduled<P: Protocol> {
     },
     Timer {
         node: NodeId,
-        token: P::Timer,
+        id: TimerId,
     },
     Command {
         node: NodeId,
@@ -101,7 +101,10 @@ pub struct Sim<P: Protocol> {
     storage: BTreeMap<NodeId, MemStore<P::Meta, P::Entry>>,
     /// Processes whose next write is fatal — dying mid-`fsync`.
     doomed: BTreeSet<NodeId>,
-    trace: Trace<P::Msg, P::Ind, P::Timer>,
+    trace: Trace<P::Msg, P::Ind>,
+    /// One source of timer identities for the whole run: two layers of one process must never
+    /// be handed the same handle, or each would accept the other's expiry.
+    next_timer: u64,
     effects: Vec<ProtoEffect<P>>,
     codec_check: Option<CodecCheck<P::Msg>>,
 }
@@ -111,7 +114,6 @@ where
     P: Protocol,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
-    P::Timer: Clone,
     P::Meta: Clone,
     P::Entry: Clone,
 {
@@ -127,6 +129,7 @@ where
             map.insert(id, Node { protocol: make(id), liveness: Liveness::Running });
         }
         let mut sim = Sim {
+            next_timer: 0,
             now: Time::ZERO,
             rng,
             config,
@@ -176,7 +179,7 @@ where
     }
 
     /// The record of what has happened so far.
-    pub fn trace(&self) -> &Trace<P::Msg, P::Ind, P::Timer> {
+    pub fn trace(&self) -> &Trace<P::Msg, P::Ind> {
         &self.trace
     }
 
@@ -410,18 +413,18 @@ where
                 }
                 self.run_handler(node, |p, cx| p.on_scope_event(scope, cx));
             }
-            Scheduled::Timer { node, token } => {
+            Scheduled::Timer { node, id } => {
                 if self.suspended(node) {
                     // Held, not dropped: the process still exists and will want this.
-                    self.deferred.push((node, Scheduled::Timer { node, token }));
+                    self.deferred.push((node, Scheduled::Timer { node, id }));
                     return;
                 }
                 if self.stopped(node) {
                     return;
                 }
                 let at = self.now;
-                self.trace.push(TraceEvent::TimerFired { at, node, token: token.clone() });
-                self.run_handler(node, |p, cx| p.on_timer(token, cx));
+                self.trace.push(TraceEvent::TimerFired { at, node, id });
+                self.run_handler(node, |p, cx| p.on_timer(id, cx));
             }
             Scheduled::Deliver { from, to, msg } => {
                 if self.suspended(to) {
@@ -492,7 +495,8 @@ where
             let inner = self.storage.entry(node).or_default();
             let mut store =
                 FaultyStore { inner, writes: &mut writes, doomed, keep, died: &mut died };
-            let mut cx = Cx::new(&mut effects, self.now, &mut self.rng, &mut store);
+            let mut cx =
+                Cx::new(&mut effects, self.now, &mut self.rng, &mut store, &mut self.next_timer);
             f(&mut n.protocol, &mut cx);
         }
 
@@ -521,8 +525,8 @@ where
                     let at = self.now;
                     self.trace.push(TraceEvent::Indicated { at, node, ind });
                 }
-                Effect::SetTimer { after, token } => {
-                    self.schedule(self.now + after, Scheduled::Timer { node, token });
+                Effect::SetTimer { after, id } => {
+                    self.schedule(self.now + after, Scheduled::Timer { node, id });
                 }
             }
         }
@@ -631,7 +635,6 @@ where
     P: Protocol,
     P::Msg: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
     P::Ind: Clone,
-    P::Timer: Clone,
     P::Meta: Clone,
     P::Entry: Clone,
 {
@@ -654,7 +657,6 @@ where
     P: Protocol,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
-    P::Timer: Clone,
     P::Meta: Clone,
     P::Entry: Clone,
 {
@@ -839,7 +841,6 @@ where
     P: Protocol,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
-    P::Timer: Clone,
     P::Meta: Clone,
     P::Entry: Clone,
     P::Scope: From<SessionEvent>,

@@ -112,7 +112,7 @@
 //! is the cost of adding to it, not its size.
 
 use core::time::Duration;
-use recon_core::{NodeId, Position, ProtoCx, Protocol};
+use recon_core::{NodeId, Position, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -221,12 +221,7 @@ impl<P: Clone + Ord> LoggedLink<P> {
         inbox.clear();
         {
             let link = &mut self.link;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut inbox,
-                |ccx| f(link, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));
         }
         for sl::Ind::Deliver { from, msg } in inbox.drain(..) {
             self.on_arrival(from, msg, cx);
@@ -254,7 +249,6 @@ impl<P: Clone + Ord> Protocol for LoggedLink<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = sl::Retransmit;
     type Scope = core::convert::Infallible;
     /// The send counter: one small value, rewritten before each send. See the module note.
     type Meta = u64;
@@ -288,8 +282,8 @@ impl<P: Clone + Ord> Protocol for LoggedLink<P> {
         self.with_link(cx, |link, ccx| link.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, token: sl::Retransmit, cx: &mut ProtoCx<'_, Self>) {
-        self.with_link(cx, |link, ccx| link.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_link(cx, |link, ccx| link.on_timer(id, ccx));
     }
 
     /// `upon event ⟨ lpl, Recovery ⟩ do retrieve(delivered); trigger ⟨ lpl, Deliver | delivered ⟩`.

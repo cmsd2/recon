@@ -4,9 +4,8 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Time, step};
-use recon_protocols::flooding_consensus::{Cmd, Flood, FloodingConsensus, Ind, Timer, Wire};
-use recon_protocols::perfect_failure_detector::Tick;
+use recon_core::{Effect, Event, MemStore, NodeId, Time, TimerId, step_with};
+use recon_protocols::flooding_consensus::{Cmd, Flood, FloodingConsensus, Ind, Wire};
 use recon_sim::{Config, Sim, TraceEvent};
 
 const A: NodeId = NodeId::new(1);
@@ -135,28 +134,43 @@ fn a_round_completes_on_a_crash_indication_alone() {
     let mut r = ChaCha8Rng::seed_from_u64(0);
     let at = Time::from_millis(1);
     let mut a = fc(A);
-    step(&mut a, Event::Init, Time::ZERO, &mut r);
+    // A composition, so one identity source across every call: two layers each starting at zero
+    // would each accept the other's expiry.
+    let mut ids = 0;
+    let init = step_with(&mut a, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let tick = armed(&init);
 
     // A proposes, and hears its own round-1 message plus B's and C's — but never D's.
-    let own = step(&mut a, Event::Cmd(Cmd::Propose(4)), Time::ZERO, &mut r);
+    let own =
+        step_with(&mut a, Event::Cmd(Cmd::Propose(4)), Time::ZERO, &mut r, &mut store(), &mut ids);
     let to_self = addressed_to(&own, A).expect("the broadcast reaches the sender too");
-    step(&mut a, Event::Msg { from: A, msg: to_self }, at, &mut r);
+    step_with(&mut a, Event::Msg { from: A, msg: to_self }, at, &mut r, &mut store(), &mut ids);
     for peer in [B, C] {
         let mut p = fc(peer);
-        let sent = step(&mut p, Event::Cmd(Cmd::Propose(4)), Time::ZERO, &mut r);
+        let sent = step_with(
+            &mut p,
+            Event::Cmd(Cmd::Propose(4)),
+            Time::ZERO,
+            &mut r,
+            &mut store(),
+            &mut ids,
+        );
         let msg = addressed_to(&sent, A).expect("a proposal addressed to A");
-        let fx = step(&mut a, Event::Msg { from: peer, msg }, at, &mut r);
+        let fx =
+            step_with(&mut a, Event::Msg { from: peer, msg }, at, &mut r, &mut store(), &mut ids);
         assert!(round_broadcast(&fx, 2).is_none(), "the round cannot complete while D is awaited");
     }
 
     // A tick inside the timeout accuses nobody; one beyond it accuses every silent peer. Nothing
     // but the detector's own timer happens in either step — no consensus message arrives.
     let inside = Time::from_offset(detect_after() / 2);
-    let quiet = step(&mut a, Event::Timer(Timer::Detector(Tick)), inside, &mut r);
+    let quiet = step_with(&mut a, Event::Timer(tick), inside, &mut r, &mut store(), &mut ids);
     assert!(round_broadcast(&quiet, 2).is_none(), "nobody is accused inside the timeout");
 
+    // The detector re-armed as it fired, so the handle to fire now is the one it just registered.
+    let tick = armed(&quiet);
     let beyond = Time::from_offset(detect_after() * 2);
-    let accused = step(&mut a, Event::Timer(Timer::Detector(Tick)), beyond, &mut r);
+    let accused = step_with(&mut a, Event::Timer(tick), beyond, &mut r, &mut store(), &mut ids);
     assert!(
         round_broadcast(&accused, 2).is_some(),
         "the crash indication alone must complete the round and broadcast round 2; if the guard \
@@ -196,12 +210,21 @@ fn a_decided_from_an_accused_sender_is_discarded() {
     // A hears no heartbeat at all, so one tick beyond the timeout accuses every peer. It has not
     // proposed, so `correct = {A}` cannot complete a round either: A is undecided and wrong.
     let mut accuser = fc(A);
-    step(&mut accuser, Event::Init, Time::ZERO, &mut r);
-    step(&mut accuser, Event::Timer(Timer::Detector(Tick)), at, &mut r);
+    let mut ids = 0;
+    let init = step_with(&mut accuser, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let tick = armed(&init);
+    step_with(&mut accuser, Event::Timer(tick), at, &mut r, &mut store(), &mut ids);
     assert!(!accuser.correct().any(|p| p == decider), "A has accused the decider");
     assert!(accuser.decision().is_none(), "and decided nothing of its own");
 
-    let fx = step(&mut accuser, Event::Msg { from: decider, msg: wire.clone() }, at, &mut r);
+    let fx = step_with(
+        &mut accuser,
+        Event::Msg { from: decider, msg: wire.clone() },
+        at,
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     assert!(
         !fx.iter().any(|e| matches!(e, Effect::Indicate(Ind::Decide(_)))),
         "the decision of an accused process is discarded, however correct it was"
@@ -211,9 +234,16 @@ fn a_decided_from_an_accused_sender_is_discarded() {
     // Non-vacuity: the very same message, at a process that has accused nobody, decides. Without
     // this the assertion above would pass on a protocol that ignored DECIDED entirely.
     let mut listener = fc(A);
-    step(&mut listener, Event::Init, Time::ZERO, &mut r);
-    let fx =
-        step(&mut listener, Event::Msg { from: decider, msg: wire }, Time::from_millis(1), &mut r);
+    let mut ids = 0;
+    step_with(&mut listener, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let fx = step_with(
+        &mut listener,
+        Event::Msg { from: decider, msg: wire },
+        Time::from_millis(1),
+        &mut r,
+        &mut store(),
+        &mut ids,
+    );
     assert!(
         fx.iter().any(|e| matches!(e, Effect::Indicate(Ind::Decide(_)))),
         "the same message from a process still in `correct` decides"
@@ -221,8 +251,23 @@ fn a_decided_from_an_accused_sender_is_discarded() {
     assert!(listener.decision().is_some());
 }
 
+/// The handle the composition just registered, read out of what it emitted rather than assumed.
+fn armed<M, I>(fx: &[Effect<M, I>]) -> TimerId {
+    fx.iter()
+        .find_map(|e| match e {
+            Effect::SetTimer { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("a timer was armed")
+}
+
+/// A fresh store per call: this stack writes nothing durably.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
+}
+
 /// The message this broadcast addressed to `to`, if any.
-fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], to: NodeId) -> Option<Wire<u32>> {
+fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>>], to: NodeId) -> Option<Wire<u32>> {
     fx.iter().find_map(|e| match e {
         Effect::Send { to: t, msg } if *t == to => Some(msg.clone()),
         _ => None,
@@ -230,7 +275,7 @@ fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], to: NodeId) -> Option
 }
 
 /// A proposal broadcast for `round`, if these effects contain one.
-fn round_broadcast(fx: &[Effect<Wire<u32>, Ind<u32>, Timer>], round: u64) -> Option<()> {
+fn round_broadcast(fx: &[Effect<Wire<u32>, Ind<u32>>], round: u64) -> Option<()> {
     fx.iter().find_map(|e| match e {
         Effect::Send { msg: Wire::Broadcast(w), .. } => match &w.payload {
             Flood::Proposal { round: r, .. } if *r == round => Some(()),
@@ -579,4 +624,44 @@ fn the_wire_survives_encoding() {
     for n in ALL {
         assert_eq!(decision(&s, n), Some(3), "{n}");
     }
+}
+
+// -------------------------------------- The obligation a handle does not enforce
+
+#[test]
+fn a_layer_does_nothing_with_another_layers_expiry() {
+    // The cost of a handle that carries no routing: an expiry is offered to every layer, so most
+    // of what reaches one belongs to somebody else. A layer that acted on another's would run its
+    // timeout logic at a moment an unrelated layer chose — here, the detector would judge silence
+    // on the stubborn link's retransmit schedule. Nothing in the type system prevents that; this
+    // test is what prevents it.
+    let mut r = ChaCha8Rng::seed_from_u64(0);
+    let mut a = fc(A);
+    let mut ids = 0;
+
+    // Two layers of one stack, each with a timer outstanding: the detector's tick, armed at
+    // initialisation, and the stubborn link's retransmit, armed by the first broadcast.
+    let init = step_with(&mut a, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let detector_tick = armed(&init);
+    let cmd = Event::Cmd(Cmd::Propose(4));
+    let sent = step_with(&mut a, cmd, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let link_tick = armed(&sent);
+    assert_ne!(detector_tick, link_tick, "two layers, two handles");
+
+    // Beyond the detection timeout, so a tick the detector *is* waiting on would accuse.
+    let late = Time::from_offset(detect_after() * 2);
+    let fx = step_with(&mut a, Event::Timer(link_tick), late, &mut r, &mut store(), &mut ids);
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Indicate(Ind::Decide(_)))),
+        "the link's expiry must not carry the detector's round forward"
+    );
+    assert!(
+        a.correct().count() == ALL.len(),
+        "and must not accuse anybody: the detector did not register that timer"
+    );
+
+    // Its own timer is still outstanding, which the detector's handle firing now demonstrates.
+    let fx = step_with(&mut a, Event::Timer(detector_tick), late, &mut r, &mut store(), &mut ids);
+    assert!(a.correct().count() < ALL.len(), "the detector's own expiry does accuse the silent");
+    assert!(!fx.is_empty(), "and is acted upon rather than ignored in turn");
 }

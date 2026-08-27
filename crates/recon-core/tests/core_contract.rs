@@ -6,7 +6,7 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::{
     Cx, Effect, EffectSink, Event, MemStore, NoStore, NodeId, Position, ProtoCx, Protocol, Store,
-    Time, step, step_in,
+    Time, TimerId, step, step_in, step_with,
 };
 
 const A: NodeId = NodeId::new(1);
@@ -28,14 +28,11 @@ struct Echo {
 struct Ping(u32);
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Echoed(u32);
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Tick;
 
 impl Protocol for Echo {
     type Cmd = Ping;
     type Ind = Echoed;
     type Msg = Ping;
-    type Timer = Tick;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -43,7 +40,7 @@ impl Protocol for Echo {
 
     fn on_cmd(&mut self, Ping(n): Ping, cx: &mut ProtoCx<'_, Self>) {
         cx.send(B, Ping(n));
-        cx.set_timer(Duration::from_millis(10), Tick);
+        cx.set_timer(Duration::from_millis(10));
     }
 
     fn on_msg(&mut self, _from: NodeId, Ping(n): Ping, cx: &mut ProtoCx<'_, Self>) {
@@ -51,7 +48,7 @@ impl Protocol for Echo {
         cx.indicate(Echoed(n));
     }
 
-    fn on_timer(&mut self, Tick: Tick, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, _: TimerId, cx: &mut ProtoCx<'_, Self>) {
         cx.indicate(Echoed(u32::MAX));
     }
 }
@@ -66,7 +63,7 @@ fn a_trivial_protocol_compiles_against_the_trait() {
         fx,
         vec![
             Effect::Send { to: B, msg: Ping(7) },
-            Effect::SetTimer { after: Duration::from_millis(10), token: Tick },
+            Effect::SetTimer { after: Duration::from_millis(10), id: TimerId(0) },
         ]
     );
 
@@ -74,7 +71,7 @@ fn a_trivial_protocol_compiles_against_the_trait() {
     assert_eq!(fx, vec![Effect::Indicate(Echoed(7))]);
     assert_eq!(p.seen, 1);
 
-    let fx = step(&mut p, Event::Timer(Tick), Time::ZERO, &mut r);
+    let fx = step(&mut p, Event::Timer(TimerId(0)), Time::ZERO, &mut r);
     assert_eq!(fx, vec![Effect::Indicate(Echoed(u32::MAX))]);
 }
 
@@ -103,7 +100,6 @@ impl Protocol for Chooser {
     type Cmd = Choose;
     type Ind = Chose;
     type Msg = ();
-    type Timer = ();
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -115,7 +111,7 @@ impl Protocol for Chooser {
         cx.indicate(Chose(pick, now));
     }
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
 }
 
 #[test]
@@ -162,7 +158,7 @@ fn identical_event_sequences_produce_identical_effects() {
             Time::from_millis(1),
             &mut r,
         ));
-        all.extend(step(&mut p, Event::Timer(Tick), Time::from_millis(2), &mut r));
+        all.extend(step(&mut p, Event::Timer(TimerId(0)), Time::from_millis(2), &mut r));
         (all, p.seen)
     };
     assert_eq!(drive(), drive());
@@ -186,16 +182,11 @@ enum WrapMsg {
 enum WrapInd {
     FromChild(Echoed),
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum WrapTimer {
-    Inner(Tick),
-}
 
 impl Protocol for Wrapper {
     type Cmd = Ping;
     type Ind = WrapInd;
     type Msg = WrapMsg;
-    type Timer = WrapTimer;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -203,23 +194,17 @@ impl Protocol for Wrapper {
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
-            child.on_cmd(cmd, ccx)
-        });
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, |ccx| child.on_cmd(cmd, ccx));
     }
 
     fn on_msg(&mut self, from: NodeId, WrapMsg::Inner(inner): WrapMsg, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
-            child.on_msg(from, inner, ccx)
-        });
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, |ccx| child.on_msg(from, inner, ccx));
     }
 
-    fn on_timer(&mut self, WrapTimer::Inner(inner): WrapTimer, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         let child = &mut self.child;
-        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, WrapTimer::Inner, |ccx| {
-            child.on_timer(inner, ccx)
-        });
+        cx.with_child(WrapMsg::Inner, WrapInd::FromChild, |ccx| child.on_timer(id, ccx));
     }
 }
 
@@ -228,20 +213,28 @@ fn child_effects_surface_re_wrapped() {
     let mut w = Wrapper { child: Echo::default() };
     let mut r = rng(0);
 
-    let fx = step(&mut w, Event::Cmd(Ping(5)), Time::ZERO, &mut r);
-    assert_eq!(
-        fx,
-        vec![
-            Effect::Send { to: B, msg: WrapMsg::Inner(Ping(5)) },
-            Effect::SetTimer { after: Duration::from_millis(10), token: WrapTimer::Inner(Tick) },
-        ],
-        "the child's message and timer must arrive wrapped in the parent's types"
-    );
+    // A composition, so the identities must run on across calls rather than restart at each.
+    let mut ids = 0;
+    let mut st = MemStore::default();
 
-    let fx = step(&mut w, Event::Msg { from: A, msg: WrapMsg::Inner(Ping(5)) }, Time::ZERO, &mut r);
+    let fx = step_with(&mut w, Event::Cmd(Ping(5)), Time::ZERO, &mut r, &mut st, &mut ids);
+    let registered = match fx.as_slice() {
+        [Effect::Send { to: B, msg: WrapMsg::Inner(Ping(5)) }, Effect::SetTimer { after, id }]
+            if *after == Duration::from_millis(10) =>
+        {
+            *id
+        }
+        other => panic!("the child's message wrapped, its timer untouched: {other:?}"),
+    };
+
+    let ev = Event::Msg { from: A, msg: WrapMsg::Inner(Ping(5)) };
+    let fx = step_with(&mut w, ev, Time::ZERO, &mut r, &mut st, &mut ids);
     assert_eq!(fx, vec![Effect::Indicate(WrapInd::FromChild(Echoed(5)))]);
 
-    let fx = step(&mut w, Event::Timer(WrapTimer::Inner(Tick)), Time::ZERO, &mut r);
+    // The handle the child was given comes back to it unchanged: the parent supplied no mapping,
+    // so there is nothing for it to unwrap.
+    let ev = Event::Timer(registered);
+    let fx = step_with(&mut w, ev, Time::ZERO, &mut r, &mut st, &mut ids);
     assert_eq!(fx, vec![Effect::Indicate(WrapInd::FromChild(Echoed(u32::MAX)))]);
 }
 
@@ -258,16 +251,11 @@ enum OuterMsg {
 enum OuterInd {
     Up(WrapInd),
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum OuterTimer {
-    Down(WrapTimer),
-}
 
 impl Protocol for Outer {
     type Cmd = Ping;
     type Ind = OuterInd;
     type Msg = OuterMsg;
-    type Timer = OuterTimer;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -275,32 +263,31 @@ impl Protocol for Outer {
 
     fn on_cmd(&mut self, cmd: Ping, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_cmd(cmd, ccx));
+        cx.with_child(OuterMsg::Down, OuterInd::Up, |ccx| inner.on_cmd(cmd, ccx));
     }
     fn on_msg(&mut self, from: NodeId, OuterMsg::Down(m): OuterMsg, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| {
-            inner.on_msg(from, m, ccx)
-        });
+        cx.with_child(OuterMsg::Down, OuterInd::Up, |ccx| inner.on_msg(from, m, ccx));
     }
-    fn on_timer(&mut self, OuterTimer::Down(t): OuterTimer, cx: &mut ProtoCx<'_, Self>) {
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         let inner = &mut self.inner;
-        cx.with_child(OuterMsg::Down, OuterInd::Up, OuterTimer::Down, |ccx| inner.on_timer(t, ccx));
+        cx.with_child(OuterMsg::Down, OuterInd::Up, |ccx| inner.on_timer(id, ccx));
     }
 }
 
 #[test]
 fn mapping_composes_through_two_layers() {
     let mut o = Outer { inner: Wrapper { child: Echo::default() } };
-    let fx = step(&mut o, Event::Cmd(Ping(2)), Time::ZERO, &mut rng(0));
+    let mut ids = 0;
+    let mut st = MemStore::default();
+    let fx = step_with(&mut o, Event::Cmd(Ping(2)), Time::ZERO, &mut rng(0), &mut st, &mut ids);
+    // Messages nest twice over. The timer nests not at all: inserting a layer leaves the timers
+    // beneath it exactly as they were, which is the point of naming one by a handle.
     assert_eq!(
         fx,
         vec![
             Effect::Send { to: B, msg: OuterMsg::Down(WrapMsg::Inner(Ping(2))) },
-            Effect::SetTimer {
-                after: Duration::from_millis(10),
-                token: OuterTimer::Down(WrapTimer::Inner(Tick))
-            },
+            Effect::SetTimer { after: Duration::from_millis(10), id: TimerId(0) },
         ]
     );
 }
@@ -315,8 +302,8 @@ struct CountingSink {
     timers: usize,
 }
 
-impl<M, I, T> EffectSink<M, I, T> for CountingSink {
-    fn emit(&mut self, effect: Effect<M, I, T>) {
+impl<M, I> EffectSink<M, I> for CountingSink {
+    fn emit(&mut self, effect: Effect<M, I>) {
         match effect {
             Effect::Send { .. } => self.sends += 1,
             Effect::Indicate(_) => self.indications += 1,
@@ -332,7 +319,8 @@ fn a_protocol_runs_against_a_non_allocating_sink() {
     let mut r = rng(0);
     {
         let mut none = NoStore;
-        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none);
+        let mut ids = 0;
+        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none, &mut ids);
         let mut p = Echo::default();
         p.on_cmd(Ping(1), &mut cx);
         p.on_msg(A, Ping(1), &mut cx);
@@ -347,7 +335,8 @@ fn composition_works_against_a_non_allocating_sink() {
     let mut r = rng(0);
     {
         let mut none = NoStore;
-        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none);
+        let mut ids = 0;
+        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none, &mut ids);
         let mut w = Wrapper { child: Echo::default() };
         w.on_cmd(Ping(1), &mut cx);
     }
@@ -357,21 +346,23 @@ fn composition_works_against_a_non_allocating_sink() {
 #[test]
 fn a_reused_buffer_settles_its_capacity() {
     // The ordinary driver case: one Vec, reused, so allocation is amortised to nothing.
-    let mut buf: Vec<Effect<WrapMsg, WrapInd, WrapTimer>> = Vec::new();
+    let mut buf: Vec<Effect<WrapMsg, WrapInd>> = Vec::new();
     let mut r = rng(0);
     let mut w = Wrapper { child: Echo::default() };
 
     for _ in 0..4 {
         buf.clear();
         let mut none = NoStore;
-        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none);
+        let mut ids = 0;
+        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none, &mut ids);
         w.on_cmd(Ping(1), &mut cx);
     }
     let settled = buf.capacity();
     for _ in 0..200 {
         buf.clear();
         let mut none = NoStore;
-        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none);
+        let mut ids = 0;
+        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none, &mut ids);
         w.on_cmd(Ping(1), &mut cx);
     }
     assert_eq!(buf.capacity(), settled, "a reused buffer must not regrow per event");
@@ -381,17 +372,16 @@ fn a_reused_buffer_settles_its_capacity() {
 
 #[test]
 fn mapping_preserves_effect_shape() {
-    let e: Effect<u8, u8, u8> = Effect::Send { to: A, msg: 1 };
-    assert_eq!(e.map(|m| m + 1, |i| i, |t| t), Effect::Send { to: A, msg: 2 });
+    let e: Effect<u8, u8> = Effect::Send { to: A, msg: 1 };
+    assert_eq!(e.map(|m| m + 1, |i| i), Effect::Send { to: A, msg: 2 });
 
-    let e: Effect<u8, u8, u8> = Effect::Indicate(1);
-    assert_eq!(e.map(|m| m, |i| i + 1, |t| t), Effect::Indicate(2));
+    let e: Effect<u8, u8> = Effect::Indicate(1);
+    assert_eq!(e.map(|m| m, |i| i + 1), Effect::Indicate(2));
 
-    let e: Effect<u8, u8, u8> = Effect::SetTimer { after: Duration::ZERO, token: 1 };
-    assert_eq!(
-        e.map(|m| m, |i| i, |t| t + 1),
-        Effect::SetTimer { after: Duration::ZERO, token: 2 }
-    );
+    // A timer passes through untouched: there is nothing in it belonging to one layer, so there
+    // is no mapper for it to be given.
+    let e: Effect<u8, u8> = Effect::SetTimer { after: Duration::ZERO, id: TimerId(1) };
+    assert_eq!(e.map(|m| m, |i| i), Effect::SetTimer { after: Duration::ZERO, id: TimerId(1) });
 }
 
 // ------------------------------- Scopes: tasks 1.1 to 1.3
@@ -412,7 +402,6 @@ impl Protocol for Scoped {
     type Cmd = ();
     type Ind = Lapsed;
     type Msg = ();
-    type Timer = ();
     type Scope = WindowClosed;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -420,7 +409,7 @@ impl Protocol for Scoped {
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
 
     fn on_scope_event(&mut self, WindowClosed(n): WindowClosed, cx: &mut ProtoCx<'_, Self>) {
         self.lapses += 1;
@@ -452,7 +441,6 @@ impl Protocol for Counter {
     type Cmd = u32;
     type Ind = Total;
     type Msg = ();
-    type Timer = ();
     type Scope = Infallible;
     /// Rewritten each time; a running total does not accumulate.
     type Meta = Total;
@@ -468,7 +456,7 @@ impl Protocol for Counter {
     }
 
     fn on_msg(&mut self, _from: NodeId, _msg: (), _cx: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _t: (), _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _cx: &mut ProtoCx<'_, Self>) {}
 
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
         // First-start-only: a later restart then recovers rather than beginning again.
@@ -601,7 +589,6 @@ impl Protocol for Bridger {
     type Cmd = ();
     type Ind = ();
     type Msg = ();
-    type Timer = ();
     type Scope = BridgerScope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -609,19 +596,14 @@ impl Protocol for Bridger {
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
 
     fn on_scope_event(&mut self, BridgerScope::Child(w): BridgerScope, cx: &mut ProtoCx<'_, Self>) {
         // Route down. The child's indications are consumed, not forwarded — this parent repairs
         // the lapse itself and says nothing upward.
         let child = &mut self.child;
         let mut inbox: Vec<Lapsed> = Vec::new();
-        cx.with_child_consuming(
-            |_: ()| (),
-            |_: ()| (),
-            &mut inbox,
-            |ccx| child.on_scope_event(w, ccx),
-        );
+        cx.with_child_consuming(|_: ()| (), &mut inbox, |ccx| child.on_scope_event(w, ccx));
         self.repaired += inbox.len() as u32;
     }
 }
@@ -643,7 +625,6 @@ impl Protocol for Propagator {
     type Cmd = ();
     type Ind = MyGuaranteeLapsed;
     type Msg = ();
-    type Timer = ();
     type Scope = PropagatorScope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
@@ -651,7 +632,7 @@ impl Protocol for Propagator {
 
     fn on_cmd(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
     fn on_msg(&mut self, _: NodeId, _: (), _: &mut ProtoCx<'_, Self>) {}
-    fn on_timer(&mut self, _: (), _: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
 
     fn on_scope_event(
         &mut self,
@@ -660,12 +641,7 @@ impl Protocol for Propagator {
     ) {
         let child = &mut self.child;
         let mut inbox: Vec<Lapsed> = Vec::new();
-        cx.with_child_consuming(
-            |_: ()| (),
-            |_: ()| (),
-            &mut inbox,
-            |ccx| child.on_scope_event(w, ccx),
-        );
+        cx.with_child_consuming(|_: ()| (), &mut inbox, |ccx| child.on_scope_event(w, ccx));
         // Re-stated in this layer's own terms rather than forwarded verbatim.
         for Lapsed(n) in inbox {
             cx.indicate(MyGuaranteeLapsed(n));

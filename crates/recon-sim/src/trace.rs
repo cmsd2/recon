@@ -4,7 +4,7 @@
 //! was sent, what arrived, what was lost, and what each protocol claimed to deliver, which is
 //! exactly the vocabulary the guarantees are written in.
 
-use recon_core::{NodeId, Time, WriteKind};
+use recon_core::{NodeId, Time, TimerId, WriteKind};
 
 /// Why a message never arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub enum DropReason {
 
 /// One thing that happened, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceEvent<M, I, T> {
+pub enum TraceEvent<M, I> {
     /// A protocol asked for a message to be transmitted.
     Sent { at: Time, from: NodeId, to: NodeId, msg: M },
     /// A message was handed to the recipient protocol.
@@ -35,7 +35,7 @@ pub enum TraceEvent<M, I, T> {
     /// A message was selected for extreme delay.
     Reordered { at: Time, from: NodeId, to: NodeId, msg: M },
     /// A timer previously set by a protocol fired.
-    TimerFired { at: Time, node: NodeId, token: T },
+    TimerFired { at: Time, node: NodeId, id: TimerId },
     /// A protocol delivered on its guarantee to the layer above.
     Indicated { at: Time, node: NodeId, ind: I },
     /// A session was established between two processes.
@@ -64,7 +64,7 @@ pub enum TraceEvent<M, I, T> {
     Recovered { at: Time, node: NodeId, had_state: bool },
 }
 
-impl<M, I, T> TraceEvent<M, I, T> {
+impl<M, I> TraceEvent<M, I> {
     pub fn at(&self) -> Time {
         match self {
             TraceEvent::Sent { at, .. }
@@ -90,22 +90,22 @@ impl<M, I, T> TraceEvent<M, I, T> {
 
 /// An ordered log of everything a run did.
 #[derive(Debug, Clone)]
-pub struct Trace<M, I, T> {
-    events: Vec<TraceEvent<M, I, T>>,
+pub struct Trace<M, I> {
+    events: Vec<TraceEvent<M, I>>,
 }
 
-impl<M, I, T> Default for Trace<M, I, T> {
+impl<M, I> Default for Trace<M, I> {
     fn default() -> Self {
         Trace { events: Vec::new() }
     }
 }
 
-impl<M, I, T> Trace<M, I, T> {
-    pub(crate) fn push(&mut self, e: TraceEvent<M, I, T>) {
+impl<M, I> Trace<M, I> {
+    pub(crate) fn push(&mut self, e: TraceEvent<M, I>) {
         self.events.push(e);
     }
 
-    pub fn events(&self) -> &[TraceEvent<M, I, T>] {
+    pub fn events(&self) -> &[TraceEvent<M, I>] {
         &self.events
     }
 

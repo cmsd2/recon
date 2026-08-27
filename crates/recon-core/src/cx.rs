@@ -1,7 +1,7 @@
 //! Where a protocol's effects go, and how it is told the time.
 
 use crate::store::{NoStore, Store};
-use crate::{Effect, NodeId, Time};
+use crate::{Effect, NodeId, Time, TimerId};
 use core::convert::Infallible;
 use core::time::Duration;
 use rand::RngCore;
@@ -13,12 +13,12 @@ use rand::RngCore;
 /// latency-sensitive driver passes a fixed-capacity sink; a test passes one that merely counts.
 /// Protocol code is identical in every case, because a protocol only ever calls
 /// [`Cx::send`] and friends.
-pub trait EffectSink<M, I, T> {
-    fn emit(&mut self, effect: Effect<M, I, T>);
+pub trait EffectSink<M, I> {
+    fn emit(&mut self, effect: Effect<M, I>);
 }
 
-impl<M, I, T> EffectSink<M, I, T> for Vec<Effect<M, I, T>> {
-    fn emit(&mut self, effect: Effect<M, I, T>) {
+impl<M, I> EffectSink<M, I> for Vec<Effect<M, I>> {
+    fn emit(&mut self, effect: Effect<M, I>) {
         self.push(effect);
     }
 }
@@ -27,16 +27,15 @@ impl<M, I, T> EffectSink<M, I, T> for Vec<Effect<M, I, T>> {
 ///
 /// This is what makes composition free of intermediate buffers: the child pushes, the mapper
 /// re-wraps, and the parent's sink receives — in one step, with nothing collected in between.
-struct MapSink<'p, PM, PI, PT, CM, CI, CT> {
-    parent: &'p mut dyn EffectSink<PM, PI, PT>,
+struct MapSink<'p, PM, PI, CM, CI> {
+    parent: &'p mut dyn EffectSink<PM, PI>,
     msg: fn(CM) -> PM,
     ind: fn(CI) -> PI,
-    timer: fn(CT) -> PT,
 }
 
-impl<PM, PI, PT, CM, CI, CT> EffectSink<CM, CI, CT> for MapSink<'_, PM, PI, PT, CM, CI, CT> {
-    fn emit(&mut self, effect: Effect<CM, CI, CT>) {
-        self.parent.emit(effect.map(self.msg, self.ind, self.timer));
+impl<PM, PI, CM, CI> EffectSink<CM, CI> for MapSink<'_, PM, PI, CM, CI> {
+    fn emit(&mut self, effect: Effect<CM, CI>) {
+        self.parent.emit(effect.map(self.msg, self.ind));
     }
 }
 
@@ -46,22 +45,19 @@ impl<PM, PI, PT, CM, CI, CT> EffectSink<CM, CI, CT> for MapSink<'_, PM, PI, PT, 
 /// "a message arrived" is an *input* to the parent's logic, not an output of it. The parent
 /// cannot react during the call — it is already borrowed by the child — so indications are
 /// collected and processed once the child returns.
-struct ConsumeSink<'p, 'c, PM, PI, PT, CM, CI, CT> {
-    parent: &'p mut dyn EffectSink<PM, PI, PT>,
+struct ConsumeSink<'p, 'c, PM, PI, CM, CI> {
+    parent: &'p mut dyn EffectSink<PM, PI>,
     collected: &'c mut Vec<CI>,
     msg: fn(CM) -> PM,
-    timer: fn(CT) -> PT,
 }
 
-impl<PM, PI, PT, CM, CI, CT> EffectSink<CM, CI, CT>
-    for ConsumeSink<'_, '_, PM, PI, PT, CM, CI, CT>
-{
-    fn emit(&mut self, effect: Effect<CM, CI, CT>) {
+impl<PM, PI, CM, CI> EffectSink<CM, CI> for ConsumeSink<'_, '_, PM, PI, CM, CI> {
+    fn emit(&mut self, effect: Effect<CM, CI>) {
         match effect {
             Effect::Send { to, msg } => self.parent.emit(Effect::Send { to, msg: (self.msg)(msg) }),
-            Effect::SetTimer { after, token } => {
-                self.parent.emit(Effect::SetTimer { after, token: (self.timer)(token) })
-            }
+            // A timer belongs to whoever registered it, so it passes straight through: there is
+            // nothing in it for a parent to re-wrap.
+            Effect::SetTimer { after, id } => self.parent.emit(Effect::SetTimer { after, id }),
             Effect::Indicate(ind) => self.collected.push(ind),
         }
     }
@@ -72,22 +68,27 @@ impl<PM, PI, PT, CM, CI, CT> EffectSink<CM, CI, CT>
 /// Supplies the current time and a seeded randomness source, and receives every effect the
 /// protocol emits. Nothing else reaches a protocol: given the same state, event, `now`, and RNG
 /// stream, it behaves identically every time.
-pub struct Cx<'a, M, I, T, Me, En> {
-    sink: &'a mut dyn EffectSink<M, I, T>,
+pub struct Cx<'a, M, I, Me, En> {
+    sink: &'a mut dyn EffectSink<M, I>,
     now: Time,
     rng: &'a mut dyn RngCore,
     store: &'a mut dyn Store<Me, En>,
+    /// Where registered timers get their identities. Owned by the driver and shared down the whole
+    /// composition, so an identity is unique to a run rather than to a layer — two layers each
+    /// starting from zero would each accept the other's expiry.
+    next_timer: &'a mut u64,
 }
 
-impl<'a, M, I, T, Me, En> Cx<'a, M, I, T, Me, En> {
+impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
     /// Build a context over any sink and any store.
     pub fn new(
-        sink: &'a mut dyn EffectSink<M, I, T>,
+        sink: &'a mut dyn EffectSink<M, I>,
         now: Time,
         rng: &'a mut dyn RngCore,
         store: &'a mut dyn Store<Me, En>,
+        next_timer: &'a mut u64,
     ) -> Self {
-        Cx { sink, now, rng, store }
+        Cx { sink, now, rng, store, next_timer }
     }
 
     /// Transmit `msg` to `to`.
@@ -100,9 +101,16 @@ impl<'a, M, I, T, Me, En> Cx<'a, M, I, T, Me, En> {
         self.sink.emit(Effect::Indicate(ind));
     }
 
-    /// Ask for `token` to be handed back after `after`.
-    pub fn set_timer(&mut self, after: Duration, token: T) {
-        self.sink.emit(Effect::SetTimer { after, token });
+    /// Register a timer for `after`, and take a handle naming it.
+    ///
+    /// The handle is what a later expiry is compared against, so a protocol can tell the timer it
+    /// is waiting on from one it has superseded. It says nothing about which protocol registered
+    /// it or where that protocol sits in a composition.
+    pub fn set_timer(&mut self, after: Duration) -> TimerId {
+        let id = TimerId(*self.next_timer);
+        *self.next_timer += 1;
+        self.sink.emit(Effect::SetTimer { after, id });
+        id
     }
 
     /// This protocol's durable state. A write does not return until it would survive a crash, so
@@ -130,17 +138,21 @@ impl<'a, M, I, T, Me, En> Cx<'a, M, I, T, Me, En> {
     /// be composed. See [`crate::store::NoStore`].
     /// Nothing is buffered: a child's effect is re-wrapped as it is emitted and passed straight
     /// on to this context's sink.
-    pub fn with_child<CM, CI, CT>(
+    pub fn with_child<CM, CI>(
         &mut self,
         msg: fn(CM) -> M,
         ind: fn(CI) -> I,
-        timer: fn(CT) -> T,
-        f: impl FnOnce(&mut Cx<'_, CM, CI, CT, Infallible, Infallible>),
+        f: impl FnOnce(&mut Cx<'_, CM, CI, Infallible, Infallible>),
     ) {
-        let mut mapped = MapSink { parent: &mut *self.sink, msg, ind, timer };
+        let mut mapped = MapSink { parent: &mut *self.sink, msg, ind };
         let mut none = NoStore;
-        let mut child =
-            Cx { sink: &mut mapped, now: self.now, rng: &mut *self.rng, store: &mut none };
+        let mut child = Cx {
+            sink: &mut mapped,
+            now: self.now,
+            rng: &mut *self.rng,
+            store: &mut none,
+            next_timer: &mut *self.next_timer,
+        };
         f(&mut child);
     }
 
@@ -150,17 +162,21 @@ impl<'a, M, I, T, Me, En> Cx<'a, M, I, T, Me, En> {
     /// This is the usual shape. A child's indication is the parent's input — the stubborn link
     /// reporting a delivery is what the perfect link deduplicates — so it must be consumed, not
     /// passed through. `collected` belongs to the caller and is reused across events.
-    pub fn with_child_consuming<CM, CI, CT>(
+    pub fn with_child_consuming<CM, CI>(
         &mut self,
         msg: fn(CM) -> M,
-        timer: fn(CT) -> T,
         collected: &mut Vec<CI>,
-        f: impl FnOnce(&mut Cx<'_, CM, CI, CT, Infallible, Infallible>),
+        f: impl FnOnce(&mut Cx<'_, CM, CI, Infallible, Infallible>),
     ) {
-        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg, timer };
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg };
         let mut none = NoStore;
-        let mut child =
-            Cx { sink: &mut sink, now: self.now, rng: &mut *self.rng, store: &mut none };
+        let mut child = Cx {
+            sink: &mut sink,
+            now: self.now,
+            rng: &mut *self.rng,
+            store: &mut none,
+            next_timer: &mut *self.next_timer,
+        };
         f(&mut child);
     }
 }

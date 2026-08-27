@@ -4,8 +4,8 @@
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, NodeId, Protocol, Time, step};
-use recon_protocols::perfect_failure_detector::{Heartbeat, Ind, PerfectFailureDetector, Tick};
+use recon_core::{Effect, Event, MemStore, NodeId, Protocol, Time, TimerId, step_with};
+use recon_protocols::perfect_failure_detector::{Heartbeat, Ind, PerfectFailureDetector};
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -29,6 +29,21 @@ fn timeout() -> Duration {
 
 fn detector(me: NodeId) -> PerfectFailureDetector {
     PerfectFailureDetector::new(me, ALL, period(), timeout())
+}
+
+/// The handle the protocol just registered, read out of what it emitted rather than assumed.
+fn armed<M, I>(fx: &[Effect<M, I>]) -> TimerId {
+    fx.iter()
+        .find_map(|e| match e {
+            Effect::SetTimer { id, .. } => Some(*id),
+            _ => None,
+        })
+        .expect("a timer was armed")
+}
+
+/// A fresh store per call: this protocol writes nothing durably.
+fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
+    MemStore::default()
 }
 
 fn rng() -> ChaCha8Rng {
@@ -58,14 +73,15 @@ fn the_heartbeat_survives_encoding() {
 #[test]
 fn initialising_beats_to_every_peer_and_arms_the_timer() {
     let mut p = detector(A);
-    let fx = step(&mut p, Event::Init, Time::ZERO, &mut rng());
+    let mut ids = 0;
+    let fx = step_with(&mut p, Event::Init, Time::ZERO, &mut rng(), &mut store(), &mut ids);
     assert_eq!(
         fx,
         vec![
             Effect::Send { to: B, msg: Heartbeat },
             Effect::Send { to: C, msg: Heartbeat },
             Effect::Send { to: D, msg: Heartbeat },
-            Effect::SetTimer { after: period(), token: Tick },
+            Effect::SetTimer { after: period(), id: TimerId(0) },
         ],
         "a heartbeat to each peer but not to itself, then the timer"
     );
@@ -77,8 +93,9 @@ fn initialising_twice_does_not_arm_a_second_timer() {
     // initialises each process exactly once, so this guards the protocol rather than the driver.
     let mut p = detector(A);
     let mut r = rng();
-    step(&mut p, Event::Init, Time::ZERO, &mut r);
-    let again = step(&mut p, Event::Init, Time::ZERO, &mut r);
+    let mut ids = 0;
+    step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let again = step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
     assert_eq!(again, vec![]);
 }
 
@@ -86,11 +103,15 @@ fn initialising_twice_does_not_arm_a_second_timer() {
 fn a_heartbeat_before_the_tick_prevents_accusation() {
     let mut p = detector(A);
     let mut r = rng();
-    step(&mut p, Event::Init, Time::ZERO, &mut r);
+    let mut ids = 0;
+    let init = step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let tick = armed(&init);
     for peer in [B, C, D] {
-        step(&mut p, Event::Msg { from: peer, msg: Heartbeat }, Time::from_millis(5), &mut r);
+        let ev = Event::Msg { from: peer, msg: Heartbeat };
+        step_with(&mut p, ev, Time::from_millis(5), &mut r, &mut store(), &mut ids);
     }
-    let fx = step(&mut p, Event::Timer(Tick), Time::from_offset(period()), &mut r);
+    let at = Time::from_offset(period());
+    let fx = step_with(&mut p, Event::Timer(tick), at, &mut r, &mut store(), &mut ids);
     assert!(
         !fx.iter().any(|e| matches!(e, Effect::Indicate(_))),
         "everyone was heard from, so nobody is accused"
@@ -101,12 +122,15 @@ fn a_heartbeat_before_the_tick_prevents_accusation() {
 fn silence_beyond_the_timeout_accuses_exactly_once() {
     let mut p = detector(A);
     let mut r = rng();
-    step(&mut p, Event::Init, Time::ZERO, &mut r);
+    let mut ids = 0;
+    let init = step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let tick = armed(&init);
 
     let past = Time::from_offset(timeout() * 2);
-    step(&mut p, Event::Msg { from: B, msg: Heartbeat }, past, &mut r);
+    let ev = Event::Msg { from: B, msg: Heartbeat };
+    step_with(&mut p, ev, past, &mut r, &mut store(), &mut ids);
 
-    let first = step(&mut p, Event::Timer(Tick), past, &mut r);
+    let first = step_with(&mut p, Event::Timer(tick), past, &mut r, &mut store(), &mut ids);
     let accusations: Vec<_> = first
         .iter()
         .filter_map(|e| match e {
@@ -118,8 +142,11 @@ fn silence_beyond_the_timeout_accuses_exactly_once() {
 
     // B keeps announcing itself; C and D stay silent but are already reported.
     let later = Time::from_offset(timeout() * 3);
-    step(&mut p, Event::Msg { from: B, msg: Heartbeat }, later, &mut r);
-    let second = step(&mut p, Event::Timer(Tick), later, &mut r);
+    let ev = Event::Msg { from: B, msg: Heartbeat };
+    step_with(&mut p, ev, later, &mut r, &mut store(), &mut ids);
+    // The tick re-armed itself when it fired, so the one to fire now is the newer handle.
+    let tick = armed(&first);
+    let second = step_with(&mut p, Event::Timer(tick), later, &mut r, &mut store(), &mut ids);
     assert!(!second.iter().any(|e| matches!(e, Effect::Indicate(_))), "reported once, not again");
     assert!(p.has_detected(C) && p.has_detected(D) && !p.has_detected(B));
 }
@@ -163,7 +190,8 @@ fn the_detector_has_no_commands_at_all() {
         match c {}
     }
     let mut p = detector(A);
-    let fx = step(&mut p, Event::Init, Time::ZERO, &mut rng());
+    let mut ids = 0;
+    let fx = step_with(&mut p, Event::Init, Time::ZERO, &mut rng(), &mut store(), &mut ids);
     assert!(!fx.is_empty(), "and initialising is what starts it");
 }
 
@@ -305,5 +333,39 @@ fn accuracy_is_lost_when_the_timing_assumption_is_withdrawn() {
         accused_anywhere,
         "on a lossy network a correct process must eventually be accused — if not, the \
          synchronous mode is not what makes the accuracy tests pass"
+    );
+}
+
+// ------------------------------------- What the handle makes possible
+
+#[test]
+fn a_superseded_expiry_accuses_nobody() {
+    // The detector's whole judgement is "has this peer been heard from since the last tick", so
+    // acting on a stale expiry would evaluate that question at a moment it did not choose — and
+    // for this protocol the consequence of getting it wrong is accusing a living process.
+    let mut p = detector(A);
+    let mut r = rng();
+    let mut ids = 0;
+
+    let init = step_with(&mut p, Event::Init, Time::ZERO, &mut r, &mut store(), &mut ids);
+    let stale = armed(&init);
+
+    // The tick fires and re-arms, so the detector is now waiting on a different handle.
+    let at = Time::from_offset(period());
+    let live = armed(&step_with(&mut p, Event::Timer(stale), at, &mut r, &mut store(), &mut ids));
+    assert_ne!(live, stale, "re-arming registers a new timer, not the same one again");
+
+    // Long enough that a tick the detector *is* waiting on would accuse every silent peer.
+    let late = Time::from_offset(timeout() * 3);
+    let fx = step_with(&mut p, Event::Timer(stale), late, &mut r, &mut store(), &mut ids);
+    assert_eq!(fx, vec![], "the superseded expiry accuses nobody and beats to nobody");
+    assert!(![B, C, D].iter().any(|n| p.has_detected(*n)), "and nobody has been detected");
+
+    // Non-vacuity: the live handle at the same instant does accuse, so the assertion above is
+    // not satisfied by a detector that has stopped judging altogether.
+    let fx = step_with(&mut p, Event::Timer(live), late, &mut r, &mut store(), &mut ids);
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Indicate(Ind::Crash { .. }))),
+        "the live expiry at the same instant does accuse the silent"
     );
 }

@@ -33,7 +33,7 @@
 //! BEB3 [always]   No creation
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent};
+use recon_core::{NodeId, ProtoCx, Protocol, SessionEvent, TimerId};
 use std::collections::BTreeSet;
 
 use crate::session_link::{self as sl, SessionLink};
@@ -70,12 +70,6 @@ pub enum Ind<P> {
         peer: NodeId,
         epoch: u64,
     },
-}
-
-/// Timers, which are the child's re-wrapped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Timer {
-    Link(<SessionLink<()> as Protocol>::Timer),
 }
 
 /// The wire type: the payload, unchanged. Neither this layer nor the link beneath adds a header.
@@ -119,9 +113,7 @@ impl<P: Clone> SessionBestEffortBroadcast<P> {
         inbox.clear();
         {
             let link = &mut self.link;
-            cx.with_child_consuming(core::convert::identity, Timer::Link, &mut inbox, |ccx| {
-                f(link, ccx)
-            });
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));
         }
         for ind in inbox.drain(..) {
             match ind {
@@ -142,7 +134,6 @@ impl<P: Clone> Protocol for SessionBestEffortBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<P>;
-    type Timer = Timer;
     /// Passed straight through: this layer has no scope of its own, and inherits the link's.
     type Scope = SessionEvent;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -168,8 +159,8 @@ impl<P: Clone> Protocol for SessionBestEffortBroadcast<P> {
         self.with_link(cx, |link, ccx| link.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, Timer::Link(t): Timer, cx: &mut ProtoCx<'_, Self>) {
-        self.with_link(cx, |link, ccx| link.on_timer(t, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_link(cx, |link, ccx| link.on_timer(id, ccx));
     }
 
     fn on_scope_event(&mut self, event: SessionEvent, cx: &mut ProtoCx<'_, Self>) {

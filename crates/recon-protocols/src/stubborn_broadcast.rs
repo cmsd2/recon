@@ -40,7 +40,7 @@
 //!   unbounded for that reason and says so.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol};
+use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::stubborn_link::{self as sl, SendId, StubbornLink};
@@ -116,12 +116,7 @@ impl<P: Clone> StubbornBroadcast<P> {
         inbox.clear();
         {
             let link = &mut self.link;
-            cx.with_child_consuming(
-                core::convert::identity,
-                core::convert::identity,
-                &mut inbox,
-                |ccx| f(link, ccx),
-            );
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));
         }
         for sl::Ind::Deliver { from, msg } in inbox.drain(..) {
             // Straight through. No deduplication, deliberately.
@@ -135,7 +130,6 @@ impl<P: Clone> Protocol for StubbornBroadcast<P> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = P;
-    type Timer = sl::Retransmit;
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: what it is transmitting is rebuilt by the layer above on recovery.
     type Meta = core::convert::Infallible;
@@ -172,7 +166,7 @@ impl<P: Clone> Protocol for StubbornBroadcast<P> {
         self.with_link(cx, |link, ccx| link.on_msg(from, msg, ccx));
     }
 
-    fn on_timer(&mut self, token: sl::Retransmit, cx: &mut ProtoCx<'_, Self>) {
-        self.with_link(cx, |link, ccx| link.on_timer(token, ccx));
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
+        self.with_link(cx, |link, ccx| link.on_timer(id, ccx));
     }
 }

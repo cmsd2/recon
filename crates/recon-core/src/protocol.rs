@@ -1,6 +1,6 @@
 //! The protocol contract.
 
-use crate::{Cx, Effect, NodeId, Time};
+use crate::{Cx, Effect, NodeId, Time, TimerId};
 use rand::RngCore;
 
 /// A synchronous protocol state machine.
@@ -19,9 +19,6 @@ pub trait Protocol {
     type Ind;
     /// What crosses the wire to a peer running the same protocol.
     type Msg;
-    /// Tokens identifying this protocol's own timers.
-    type Timer;
-
     /// The durable value this protocol rewrites: a position, a count, an epoch. Small enough that
     /// rewriting it costs nothing.
     ///
@@ -59,8 +56,14 @@ pub trait Protocol {
     /// Handle a message received from `from`.
     fn on_msg(&mut self, from: NodeId, msg: Self::Msg, cx: &mut ProtoCx<'_, Self>);
 
-    /// Handle a timer this protocol previously set.
-    fn on_timer(&mut self, token: Self::Timer, cx: &mut ProtoCx<'_, Self>);
+    /// Handle a timer that fired somewhere in this protocol or in what it composes.
+    ///
+    /// The identity says nothing about which layer registered it, so a protocol that composes
+    /// children hands the expiry to each of them, and a protocol that registered timers acts only
+    /// on one it registered. A protocol that registered none does nothing but pass it on. That is
+    /// the price of a timer's type not encoding the composition path, and it is a handful of calls
+    /// deep rather than a type that grows with the stack.
+    fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>);
 
     /// Begin, on a first start — when nothing has been written down.
     ///
@@ -104,24 +107,23 @@ pub type ProtoCx<'a, P> = Cx<
     'a,
     <P as Protocol>::Msg,
     <P as Protocol>::Ind,
-    <P as Protocol>::Timer,
     <P as Protocol>::Meta,
     <P as Protocol>::Entry,
 >;
 
 /// The effect type for a given protocol.
-pub type ProtoEffect<P> =
-    Effect<<P as Protocol>::Msg, <P as Protocol>::Ind, <P as Protocol>::Timer>;
+pub type ProtoEffect<P> = Effect<<P as Protocol>::Msg, <P as Protocol>::Ind>;
 
 /// An event a protocol can be given. Used by drivers and by the test helper.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Event<C, M, T, S> {
+pub enum Event<C, M, S> {
     Cmd(C),
     Msg {
         from: NodeId,
         msg: M,
     },
-    Timer(T),
+    /// A timer registered by this protocol, or by something it composes, has fired.
+    Timer(TimerId),
     /// A scope this protocol's guarantees depended on has ended.
     ScopeEvent(S),
     /// This process is starting for the first time, with nothing written down.
@@ -131,18 +133,19 @@ pub enum Event<C, M, T, S> {
 }
 
 /// The event type for a given protocol.
-pub type ProtoEvent<P> = Event<
-    <P as Protocol>::Cmd,
-    <P as Protocol>::Msg,
-    <P as Protocol>::Timer,
-    <P as Protocol>::Scope,
->;
+pub type ProtoEvent<P> = Event<<P as Protocol>::Cmd, <P as Protocol>::Msg, <P as Protocol>::Scope>;
 
 /// Deliver one event to `p` and return the effects it emitted.
 ///
 /// Restores the ergonomics of a pure function for tests — `assert_eq!(step(..), [..])` — without
 /// making production paths allocate a vector per event. Intended for tests; drivers own a
 /// reusable buffer and call the handlers directly.
+///
+/// **For a protocol driven alone.** This starts the timer identities at zero on every call, so a
+/// composition driven through it hands two layers the same handle and each accepts the other's
+/// expiry as its own — a wrong test that need not fail. Use [`step_with`] for a stack, and
+/// [`step_in`] for a protocol whose writes must survive between calls. The distinction is not
+/// expressible in the type: a composed protocol looks like any other from here.
 pub fn step<P: Protocol + ?Sized>(
     p: &mut P,
     event: ProtoEvent<P>,
@@ -165,13 +168,31 @@ pub fn step_in<P: Protocol + ?Sized>(
     rng: &mut dyn RngCore,
     store: &mut dyn crate::store::Store<P::Meta, P::Entry>,
 ) -> Vec<ProtoEffect<P>> {
+    let mut next_timer = 0;
+    step_with(p, event, now, rng, store, &mut next_timer)
+}
+
+/// Deliver one event to `p` against a timer identity source the caller owns.
+///
+/// [`step`] and [`step_in`] start identities at zero on every call, which is right for a protocol
+/// driven alone and wrong for a composed one: two layers would each be handed identity zero, and
+/// each would accept the other's expiry as its own. A driver owns one source for a whole run — see
+/// `Sim` — and a test driving a stack by hand must do the same.
+pub fn step_with<P: Protocol + ?Sized>(
+    p: &mut P,
+    event: ProtoEvent<P>,
+    now: Time,
+    rng: &mut dyn RngCore,
+    store: &mut dyn crate::store::Store<P::Meta, P::Entry>,
+    next_timer: &mut u64,
+) -> Vec<ProtoEffect<P>> {
     let mut effects = Vec::new();
     {
-        let mut cx = Cx::new(&mut effects, now, rng, store);
+        let mut cx = Cx::new(&mut effects, now, rng, store, next_timer);
         match event {
             Event::Cmd(c) => p.on_cmd(c, &mut cx),
             Event::Msg { from, msg } => p.on_msg(from, msg, &mut cx),
-            Event::Timer(t) => p.on_timer(t, &mut cx),
+            Event::Timer(id) => p.on_timer(id, &mut cx),
             Event::ScopeEvent(s) => p.on_scope_event(s, &mut cx),
             Event::Init => p.on_init(&mut cx),
             Event::Recovery => p.on_recovery(&mut cx),
