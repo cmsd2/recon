@@ -17,18 +17,31 @@
 //! supplies the two translations a layer above actually needs: build a send, and recognise a
 //! delivery. Nothing else about the link is visible.
 //!
-//! # Scope reporting is a second trait, not a variant nobody raises
+//! # Scope boundaries, and why there is no second trait for them
 //!
 //! A session link reports that a session ended or was established. A perfect link cannot: it has no
 //! means of observing either, and `docs/scope-annotated-modules.md` forbids a module declaring a
-//! scope it cannot observe (Definition 2a, Corollary 8.1). So the boundary vocabulary lives in
-//! [`ScopedLink`], which the session link implements and the perfect link does not.
+//! scope it cannot observe (Definition 2a, Corollary 8.1). So [`Link::classify`] returns
+//! [`LinkInd::Boundary`] only for a link that can actually see one, and that is the whole of the
+//! mechanism.
 //!
-//! A layer indifferent to boundaries bounds on [`Link`] and composes over both. A layer whose
-//! liveness depends on being told about a re-establishment bounds on [`ScopedLink`], and composing
-//! it over a link that cannot report is then a compile error rather than a protocol that waits for
-//! ever. That is `docs/conditional-guarantees.md`'s *a layer that cannot bridge must propagate*,
-//! stated in the type system rather than in prose.
+//! There was a `ScopedLink` marker trait here, so that a layer whose liveness depends on being told
+//! about a re-establishment could bound on it, making it a compile error to compose that layer over
+//! a perfect link. It was deleted, because once the four `session_*` broadcast modules had
+//! collapsed into their base modules — the job it was introduced to do — **nothing bounded on it**.
+//! Uniform reliable broadcast, the one layer that should have, could not: its resend is reached
+//! from the arm handling the child's indications, which lives in the `Link` impl, so the tighter
+//! bound would have fallen on every link including the perfect one.
+//!
+//! What keeps that resend honest is this module's own guarantee rather than a bound: a boundary is
+//! never classified for a link that cannot observe one, so over a perfect link the path is
+//! unreachable rather than merely unused. `tests/link_port.rs` pins both halves — that the perfect
+//! link's classification never yields a boundary, and that the session link's yields one for each
+//! variant that reports it.
+//!
+//! Reintroduce it when a layer genuinely cannot be written without the bound. Until then it is an
+//! abstraction ahead of its consumer, which is what `CLAUDE.md` constraint 4 warns against and what
+//! this change's own `design.md` recorded as a risk against this very trait.
 
 use recon_core::{NodeId, Protocol};
 
@@ -85,7 +98,8 @@ pub trait Link<P>: Protocol {
 pub enum LinkInd<P> {
     /// A message arrived.
     Deliver { from: NodeId, msg: P },
-    /// The scope the link's guarantees hold within changed. Only a [`ScopedLink`] ever reports one.
+    /// The scope the link's guarantees hold within changed. Only a link that can observe one
+    /// ever reports this.
     Boundary(Boundary),
 }
 
@@ -103,29 +117,22 @@ pub enum Boundary {
     Established { peer: NodeId, epoch: u64 },
 }
 
-/// A link that reports the boundaries of the scope its guarantees hold within.
+/// A link that keeps nothing durable *the layer above has to know about*.
 ///
-/// Implementing this is a claim that [`Link::classify`] can return [`LinkInd::Boundary`] — that the
-/// link can actually observe a boundary. The session link implements it; the perfect link does not,
-/// because it has no means of observing one. A layer that repairs a scope ending requires a link
-/// that raises one, and says so by bounding here rather than on [`Link`].
+/// Every layer in this crate composes over one, because none of them declares a storage vocabulary
+/// on their child's behalf. It is a conjunction of bounds rather than a capability — hence the
+/// blanket impl, which is the opposite of what [`Link`] does deliberately — and it exists so that
+/// the conjunction is written once instead of at every composing layer.
 ///
-/// It carries no methods of its own. The classification is total on [`Link`] because the layer
-/// above needs one function over every link, so what this trait adds is the claim, not a
-/// capability. That the claim is honest is checked by test rather than by the compiler: the
-/// perfect link's classification never returns a boundary, and the session link's returns one for
-/// each variant that reports it. See `tests/link_port.rs`.
-///
-/// What the compiler does enforce is the bound. A layer that repairs a scope ending cannot be
-/// composed over a link that never reports one — which is
-/// `docs/conditional-guarantees.md`'s *a layer that cannot bridge must propagate*, enforced rather
-/// than documented. The alternative is a stack that compiles and then waits for ever for a
-/// re-establishment nobody will announce:
-///
-/// ```compile_fail
-/// use recon_protocols::link::ScopedLink;
-/// use recon_protocols::perfect_link::PerfectLink;
-/// fn requires_scoped<P, L: ScopedLink<P>>() {}
-/// requires_scoped::<u32, PerfectLink<u32>>();
-/// ```
-pub trait ScopedLink<P>: Link<P> {}
+/// A logged link keeps a great deal durable and does not satisfy this. Composing a broadcast over
+/// one is not possible today for that reason, and the bound is where the limitation lives, so it is
+/// the one place to revisit when it is wanted.
+pub trait VolatileLink<P>:
+    Link<P, Meta = core::convert::Infallible, Entry = core::convert::Infallible>
+{
+}
+
+impl<P, L> VolatileLink<P> for L where
+    L: Link<P, Meta = core::convert::Infallible, Entry = core::convert::Infallible>
+{
+}

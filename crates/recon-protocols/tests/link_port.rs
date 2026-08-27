@@ -2,7 +2,7 @@
 //! failing to satisfy it is rejected when the project is built rather than when a run misbehaves.
 
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
-use recon_protocols::link::{Boundary, Link, LinkInd, ScopedLink};
+use recon_protocols::link::{Boundary, Link, LinkInd};
 use recon_protocols::perfect_link::{self as pl, PerfectLink};
 use recon_protocols::session_link::{self as sl, SessionLink};
 
@@ -46,13 +46,10 @@ fn a_delivery_classifies_the_same_way_through_either_link() {
 // ---------------------------------------- The scoped claim, and that it is honest
 
 #[test]
-fn the_session_link_claims_to_report_boundaries_and_does() {
-    // `ScopedLink` carries no methods, so what makes the claim honest is this: every indication the
-    // session link raises that is not a delivery classifies as a boundary, naming the peer and the
-    // epoch. A link implementing the trait without doing so would satisfy the compiler and lie.
-    fn requires_scoped<P, L: ScopedLink<P>>() {}
-    requires_scoped::<u32, SessionLink<u32>>();
-
+fn the_session_link_reports_boundaries_and_names_them() {
+    // Nothing in the type system says a link that can observe a boundary reports one, so this is
+    // what makes the claim honest: every indication the session link raises that is not a delivery
+    // classifies as a boundary, naming the peer and the epoch.
     assert_eq!(
         <SessionLink<u32> as Link<u32>>::classify(sl::Ind::SessionEnded { peer: B, epoch: 3 }),
         LinkInd::Boundary(Boundary::Ended { peer: B, epoch: 3 })
@@ -72,10 +69,8 @@ fn the_perfect_link_reports_no_boundary_and_does_not_claim_to() {
     // means of seeing that incarnation end — so it must not say it can.
     // `docs/scope-annotated-modules.md` forbids a module declaring a scope it cannot observe.
     //
-    // That `PerfectLink` does not implement `ScopedLink` is enforced by the compiler, and pinned by
-    // a `compile_fail` doctest on `ScopedLink` itself — doctests run only for library targets, so it
-    // has to live there rather than here. What this test adds is the behavioural half: its
-    // classification never yields one.
+    // There is no trait to check this with — `ScopedLink` was deleted for want of a consumer, and
+    // `crate::link` records why — so the property is behavioural and this is where it is pinned.
     let every_indication = [pl::Ind::Deliver { from: A, msg: 1u32 }];
     for ind in every_indication {
         assert!(

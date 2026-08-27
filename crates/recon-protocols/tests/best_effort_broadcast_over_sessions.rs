@@ -1,4 +1,4 @@
-//! Best-effort broadcast over session links: validity while sessions hold, and honesty when they
+//! `BestEffortBroadcast` over a session link: validity while sessions hold, and honesty when they
 //! do not.
 //!
 //! The protocol under test is `BestEffortBroadcast` itself, with a session link as its type

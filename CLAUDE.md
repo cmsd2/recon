@@ -252,11 +252,13 @@ Three things follow for anyone writing a new abstraction:
 
 - Layers above the link name a **port**, not an implementation. `recon_protocols::link::Link` is
   what a layer above may depend on and the whole of what it may: build a send, and classify an
-  indication. A link keeps its own `Cmd` and `Ind`. `ScopedLink` is the further claim that the link
-  can observe a scope boundary — the session link makes it, the perfect link cannot — so a layer
-  that repairs an ending bounds on it and cannot be composed over a link that reports none. Every
-  composing layer takes its child as a type parameter with a default, so `BestEffortBroadcast<P>`
-  still means today's stack. This is why there are no longer four `session_*` broadcast modules.
+  indication. A link keeps its own `Cmd` and `Ind`. A scope boundary reaches the layer above only
+  from a link that can observe one — the session link classifies its endings as boundaries, the
+  perfect link has none to classify — and each layer then states in its own indications whether it
+  bridges or propagates. Every composing layer takes its child as a type parameter with a default,
+  so `BestEffortBroadcast<P>` still means today's stack. This is why there are no longer four
+  `session_*` broadcast modules. A `ScopedLink` bound enforcing the same thing was tried and
+  deleted for want of a consumer; `link.rs` says why, before you reach for it again.
 - `Sim::crash` rebuilds the protocol from its constructor, so a crash genuinely loses volatile
   state and `crash` then `restart` is amnesia, not a pause. `Sim::suspend` is the pause, and
   `Sim::resume` ends it — a *stall*, in which timers, deliveries and scope events are held rather

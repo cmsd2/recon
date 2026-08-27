@@ -70,15 +70,26 @@ This is the whole of how four forks collapse into four parameterised modules. It
 type system what `docs/conditional-guarantees.md` states in prose: *a layer that cannot bridge must
 propagate*, and a layer that repairs a scope ending needs a link that raises one.
 
-**Amendment, from building it.** The bound turned out to be the wrong half of this to lean on.
-`ScopedLink` is where a layer *declares* it needs boundaries, and the compile-fail test confirms the
-declaration is enforced. But the code that acts on a boundary — uniform reliable broadcast's resend
-on re-establishment — cannot itself be bounded on `ScopedLink`: it is called from the arm that
-handles the child's indications, which lives in the `Link` impl, so requiring the tighter bound
-there would require it of every link. What makes the resend safe is the port's own guarantee
-instead: `Link::classify` returns a boundary only for a link that reports one, so over a perfect
-link the path is unreachable rather than merely unused. The declaration is checked by the compiler;
-the reachability is a property of the port. Task 3.2 was reworded to say so.
+**Amendment, from building it: this decision was wrong, and `ScopedLink` was deleted.**
+
+The trait was built, implemented for the session link, and given a compile-fail test. Then the four
+forks collapsed — the job it was introduced to do — and **nothing bounded on it**. The one layer
+that should have, uniform reliable broadcast, could not: its resend on re-establishment is reached
+from the arm that handles the child's indications, which lives in the `Link` impl, so the tighter
+bound would have fallen on every link including the perfect one. The only thing exercising the trait
+was a test written to exercise it.
+
+What actually does the work is the port's own guarantee: `Link::classify` yields a boundary only for
+a link that can observe one, so over a perfect link the path is unreachable rather than merely
+unused. *A layer that cannot bridge must propagate* is then something each layer states in its own
+indications — best-effort and reliable broadcast propagate, uniform reliable broadcast bridges — and
+the tests pin it there.
+
+The claim below that this trait "is the whole of how four forks collapse into four parameterised
+modules" is simply false, and the collapse proved it: the forks collapsed on the parameter alone.
+The Risk further down, that `ScopedLink` might be the wrong axis, was the accurate one. Left in
+place rather than rewritten, because a design document that quietly agrees with the outcome teaches
+nothing.
 
 *Alternative considered — one port whose `Ind` always includes the scope variants, with a
 non-session link never emitting them.* Rejected: it obliges the perfect link to declare a scope it
@@ -130,7 +141,8 @@ first.
   state each guarantee as conditional on what the link supplied provides, and the foreign-link tests
   demonstrate the honest case rather than implying a guarantee the port cannot carry.
 
-- **`ScopedLink` may turn out to be the wrong axis.** Storage is a second axis already (`logged_link`
+- **`ScopedLink` may turn out to be the wrong axis.** *(This is what happened; see the amendment
+  under Decisions. The trait was deleted for want of a consumer.)* Storage is a second axis already (`logged_link`
   versus `perfect_link`), and a third — a link that reports peer incarnations — is anticipated in
   `docs/conditional-guarantees.md`. Adding a trait per axis multiplies bounds. → This change adds
   exactly one axis, for a distinction that already exists in the code as four forked modules. A

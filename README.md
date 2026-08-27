@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 356 tests, all in-process, a few seconds
+cargo test --workspace          # 355 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -49,7 +49,7 @@ planning artifacts under `openspec/`, not to build or test.
 Two-minute tour of what the thing actually does:
 
 ```bash
-cargo test -p recon-protocols --test session_broadcast -- --nocapture
+cargo test -p recon-protocols --test broadcast_over_sessions -- --nocapture
 ```
 
 That suite runs reliable and uniform reliable broadcast through the same schedule — a relay lost
@@ -188,7 +188,7 @@ once and keeps identifiers rather than payloads, so a relay lost to a session en
 retried and its agreement is scoped to the sessions that carried it. Uniform reliable broadcast
 keeps payloads and consults a failure detector, so between resending on re-establishment and
 accusing a peer that never returns there is no third outcome. Both halves are tested, and the
-contrast is the point of `tests/session_broadcast.rs`.
+contrast is the point of `tests/broadcast_over_sessions.rs`.
 
 ### Over stable storage — the fail-recovery model
 
@@ -261,7 +261,7 @@ into a set that can grow again, which every guard written against it will need r
 
 ## Examples
 
-There are none yet. The tests are currently the worked examples — `tests/session_broadcast.rs`
+There are none yet. The tests are currently the worked examples — `tests/broadcast_over_sessions.rs`
 reads as one, and `tests/method.rs` documents how a property is asserted so that it cannot pass
 vacuously. An `examples/` directory belongs here once there is something to run that is not a
 test; until transport exists under constraint 5, everything interesting is in-process.
@@ -383,13 +383,13 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/stubborn_link.rs`, `perfect_link.rs`, `session_link.rs` | the links | 14 / 16 / 11 |
 | `tests/perfect_failure_detector.rs` | completeness and accuracy, where accuracy is lost, and both sides of a stall | 17 |
 | `tests/best_effort_broadcast.rs`, `reliable_broadcast.rs`, `uniform_reliable_broadcast.rs` | the broadcasts over perfect links | 11 / 15 / 17 |
-| `tests/session_best_effort_broadcast.rs`, `session_broadcast.rs` | the same broadcast modules over a **session link**, and where reliable and uniform diverge | 6 / 17 |
-| `tests/majority_ack_uniform_reliable_broadcast.rs`, `session_majority_ack_…rs` | the same guarantees without a failure detector, over each link | 18 / 16 |
+| `tests/best_effort_broadcast_over_sessions.rs`, `broadcast_over_sessions.rs` | the same broadcast modules over a **session link**, and where reliable and uniform diverge | 6 / 17 |
+| `tests/majority_ack_uniform_reliable_broadcast.rs`, `majority_ack_over_sessions.rs` | the same guarantees without a failure detector, over each link | 18 / 16 |
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 
-345 across the suites above, plus nine unit tests inside `recon-core` and two `compile_fail`
-doctests on the link port — 356 in total, all in one process, no ports opened.
+345 across the suites above, plus nine unit tests inside `recon-core` and one `compile_fail`
+doctest on the link port — 355 in total, all in one process, no ports opened.
 
 ## Licence
 

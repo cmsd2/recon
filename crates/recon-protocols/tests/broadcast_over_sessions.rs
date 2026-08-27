@@ -1,4 +1,4 @@
-//! Reliable and uniform reliable broadcast over session links, tested against each other.
+//! `ReliableBroadcast` and `UniformReliableBroadcast` over a session link, against each other.
 //!
 //! The interesting content is the contrast: the same schedule must be able to leave a correct
 //! process without a message under the reliable version, and must never do so under the uniform

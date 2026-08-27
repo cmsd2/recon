@@ -90,7 +90,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
-use crate::link::Link;
+use crate::link::VolatileLink;
 use crate::perfect_link::PerfectLink;
 
 /// Names one broadcast uniquely: who originated it, and their sequence number for it.
@@ -186,7 +186,7 @@ impl<P, L> ReliableBroadcast<P, L> {
 
 impl<P: Clone, L> ReliableBroadcast<P, L>
 where
-    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<Data<P>>,
 {
     /// Run the child, then act on whatever it reported.
     fn with_beb(
@@ -256,7 +256,7 @@ where
 
 impl<P: Clone, L> Protocol for ReliableBroadcast<P, L>
 where
-    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<Data<P>>,
 {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;

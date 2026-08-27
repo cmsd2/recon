@@ -118,7 +118,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
-use crate::link::Link;
+use crate::link::VolatileLink;
 use crate::perfect_failure_detector::{self as pfd, Heartbeat, PerfectFailureDetector};
 use crate::perfect_link::{self as pl, PerfectLink};
 
@@ -273,7 +273,7 @@ impl<P, L> UniformReliableBroadcast<P, L> {
 
 impl<P: Clone, L> UniformReliableBroadcast<P, L>
 where
-    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<Data<P>>,
 {
     /// Run the broadcast child, then act on what it reported.
     fn with_beb(
@@ -316,12 +316,11 @@ where
     /// Run the detector child, then act on what it reported.
     /// Resend everything still outstanding to the peer whose scope has just come back.
     ///
-    /// Only ever reached over a link that reports boundaries: [`Link::classify`] returns a
-    /// boundary only for a [`crate::link::ScopedLink`], so over a perfect link this is unreachable
-    /// rather than merely unused. Bounding it on `ScopedLink` in the type system was the original
-    /// plan and does not work — the arm that calls it lives in the `Link` impl, which would then
-    /// require the tighter bound for every link — so what makes it safe is the port's own
-    /// guarantee rather than a second bound. See `design.md`.
+    /// Only ever reached over a link that reports boundaries: `Link::classify` yields one only for
+    /// a link that can observe one, so over a perfect link this is unreachable rather than merely
+    /// unused. A `ScopedLink` bound was the original plan and does not work — the arm that calls
+    /// this lives in the `Link` impl, so the tighter bound would fall on every link. What keeps it
+    /// honest is the port's own guarantee. See `crate::link` and this change's `design.md`.
     fn resend_to(&mut self, peer: NodeId, cx: &mut ProtoCx<'_, Self>) {
         let outstanding: Vec<Data<P>> = self
             .pending
@@ -418,7 +417,7 @@ where
 
 impl<P: Clone, L> Protocol for UniformReliableBroadcast<P, L>
 where
-    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<Data<P>>,
 {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;

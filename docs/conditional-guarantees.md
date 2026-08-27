@@ -183,12 +183,16 @@ What is worth doing early, because the simulator can already produce the fault:
    originals with the link swapped underneath; the 2026-08 audit found a quoted clause gone stale
    in one fork and not its sibling. Those four are gone, and what replaced them is a type parameter.
 
-   The half of this the type system does enforce is which layers may depend on a boundary.
-   `ScopedLink` is the claim that a link can observe one; the session link makes it and the perfect
-   link does not, because PL2 is scoped to the recipient's incarnation and the link cannot see that
-   incarnation end. A layer that repairs a scope ending bounds on `ScopedLink`, so composing it over
-   a link that reports none is a compile error rather than a stack that waits for ever. That is *a
-   layer that cannot bridge must propagate*, checked rather than asked for.
+   A boundary reaches a layer above only from a link that can observe one: `Link::classify` yields
+   `LinkInd::Boundary` for the session link and never for the perfect link, whose PL2 is scoped to
+   the recipient's incarnation and which cannot see that incarnation end. *A layer that cannot
+   bridge must propagate* is then a property each layer states in its own indications — best-effort
+   and reliable broadcast propagate, uniform reliable broadcast bridges by resending — rather than
+   something a bound enforces.
+
+   A `ScopedLink` marker trait did briefly enforce it, and was deleted: after the forks collapsed,
+   nothing bounded on it, and the one layer that should have could not. `crates/recon-protocols/src/link.rs`
+   records the argument. Worth knowing before reaching for the same idea again.
 
 ## Extending the book's notation to say this
 

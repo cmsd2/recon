@@ -124,7 +124,7 @@ use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
-use crate::link::Link;
+use crate::link::VolatileLink;
 use crate::perfect_link::PerfectLink;
 use crate::uniform_reliable_broadcast::{BroadcastId, Data};
 
@@ -226,7 +226,7 @@ impl<P, L> MajorityAckUniformReliableBroadcast<P, L> {
 
 impl<P: Clone, L> MajorityAckUniformReliableBroadcast<P, L>
 where
-    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<Data<P>>,
 {
     /// Run the broadcast child, then act on what it reported.
     fn with_beb(
@@ -341,7 +341,7 @@ where
 
 impl<P: Clone, L> Protocol for MajorityAckUniformReliableBroadcast<P, L>
 where
-    L: Link<Data<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<Data<P>>,
 {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;

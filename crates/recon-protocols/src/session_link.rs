@@ -130,12 +130,12 @@ impl<P: Clone> Protocol for SessionLink<P> {
     }
 }
 
-/// The session link satisfies the link port, and its scoped half as well.
+/// The session link satisfies the link port, and reports scope boundaries through it.
 ///
-/// Implementing [`crate::link::ScopedLink`] is a claim that this link can observe the boundaries of
-/// the scope its guarantees hold within, and it can: the simulator raises a session ending and an
-/// establishment, and this link is where they enter the stack. That is what a layer above needs in
-/// order to repair a lost suffix, and what the perfect link cannot offer.
+/// It classifies its two boundary indications as boundaries, which is a claim that it can observe
+/// them — and it can: the simulator raises a session ending and an establishment, and this link is
+/// where they enter the stack. That is what a layer above needs in order to repair a lost suffix,
+/// and what the perfect link cannot offer.
 impl<P> crate::link::Link<P> for SessionLink<P>
 where
     P: Clone,
@@ -155,5 +155,3 @@ where
         }
     }
 }
-
-impl<P> crate::link::ScopedLink<P> for SessionLink<P> where P: Clone {}

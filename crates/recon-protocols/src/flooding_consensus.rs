@@ -100,7 +100,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
-use crate::link::Link;
+use crate::link::VolatileLink;
 use crate::perfect_failure_detector::{self as pfd, Heartbeat, PerfectFailureDetector};
 use crate::perfect_link::{self as pl, PerfectLink};
 
@@ -274,11 +274,7 @@ impl<P> FloodingConsensus<P, PerfectLink<Flood<P>>> {
     }
 }
 
-impl<
-    P: Clone + Ord,
-    L: Link<Flood<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
-> FloodingConsensus<P, L>
-{
+impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
     /// Run the broadcast child, then act on what it reported.
     fn with_beb(
         &mut self,
@@ -424,11 +420,7 @@ impl<
     }
 }
 
-impl<
-    P: Clone + Ord,
-    L: Link<Flood<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
-> Protocol for FloodingConsensus<P, L>
-{
+impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> Protocol for FloodingConsensus<P, L> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<L::Msg>;

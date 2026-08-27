@@ -3,13 +3,15 @@
 - [x] 1.1 Replace the `Link` trait now on the branch — which pins the perfect link's request and
       indication types, and so cannot admit the session link — with the port proper, carrying the
       request and indication types as associated types, and verify the project builds
-- [x] 1.2 Define `ScopedLink` as `Link` plus the reporting of scope endings and establishments, and
-      verify a link cannot implement it without raising those boundaries
+- [x] 1.2 ~~Define `ScopedLink` as `Link` plus the reporting of scope endings and establishments~~ —
+      done, then **deleted**. Once the forks had collapsed nothing bounded on it, and the one layer
+      that should have could not (see 3.2). What survives is the behavioural check: a link that
+      cannot observe a boundary never classifies one. `link.rs` records the argument
 - [x] 1.3 Implement `Link` for the perfect link, and verify it declares no scope boundary — a link
       may not name a scope it cannot observe. A blanket impl will not do: it would make every
       protocol a link, including the ones composed over one
-- [x] 1.4 Implement `Link` and `ScopedLink` for the session link, and verify `cargo test --workspace`
-      still passes with nothing composed over the new traits yet
+- [x] 1.4 Implement `Link` for the session link — classifying both of its boundary indications as
+      boundaries — and verify `cargo test --workspace` still passes with nothing composed over it yet
 - [x] 1.5 Add a compile-fail or negative test showing a link that does not satisfy the port is
       rejected when the project is built, so the seam is checked rather than asserted
 
@@ -21,8 +23,9 @@
       best_effort_broadcast` passes unchanged
 - [x] 2.3 Move `delivered_count` to the impl block for the default link, since it is specific to the
       perfect link, and verify the reliable-broadcast tests that call it still pass
-- [x] 2.4 Pass scope boundaries reported by the link upward when `L: ScopedLink`, and verify both an
-      ending and an establishment reach the layer above, distinguishable from one another
+- [x] 2.4 Pass scope boundaries reported by the link upward, and verify both an ending and an
+      establishment reach the layer above, distinguishable from one another. No `ScopedLink` bound:
+      a link that cannot observe a boundary never classifies one, so there is nothing to guard
 - [x] 2.5 Offer the directed send to one member on the base module, and verify only the addressed
       member receives it
 

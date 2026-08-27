@@ -62,7 +62,7 @@ use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::BTreeSet;
 
-use crate::link::{Boundary, Link, LinkInd};
+use crate::link::{Boundary, Link, LinkInd, VolatileLink};
 use crate::perfect_link::PerfectLink;
 
 /// Requests from the layer above.
@@ -126,9 +126,9 @@ fn forward<P, L: Link<P>>(ind: L::Ind) -> Ind<P> {
 /// either side being edited. That is the seam `docs/conditional-guarantees.md` describes, made
 /// checkable.
 ///
-/// The bound is [`Link`] and not [`crate::link::ScopedLink`], because fan-out needs nothing of a
-/// scope boundary. A layer above that does need one bounds tighter; this one composes over every
-/// link there is.
+/// Fan-out needs nothing of a scope boundary, so the bound is the port and nothing more. This
+/// layer composes over every link there is, and passes a boundary upward untouched because it has
+/// no redundancy with which to repair one.
 ///
 /// It defaults to [`PerfectLink`], so the ordinary stack is still written `BestEffortBroadcast<P>`.
 #[derive(Debug)]
@@ -174,7 +174,7 @@ impl<P> BestEffortBroadcast<P, PerfectLink<P>> {
 
 impl<P: Clone, L> Protocol for BestEffortBroadcast<P, L>
 where
-    L: Link<P, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+    L: VolatileLink<P>,
 {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
