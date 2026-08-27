@@ -340,3 +340,144 @@ fn recovery_reaches_more_processes_than_gossip_alone() {
          become this good, the comparison is no longer measuring recovery"
     );
 }
+// ------------------------------------ The bounds, which are the project's and not the book's
+
+/// Hand `p` a gossip carrying `[DATA, origin, payload, seq]`, as if it had arrived.
+fn arrive(
+    p: &mut Lpb,
+    origin: NodeId,
+    seq: u64,
+    payload: u32,
+    r: &mut rand_chacha::ChaCha8Rng,
+    ids: &mut u64,
+) {
+    use recon_core::{Event, MemStore, Time, step_with};
+    let inner = pb::Gossip {
+        id: pb::BroadcastId { origin, seq },
+        ttl: 1,
+        payload: Data { origin, seq, payload },
+    };
+    step_with(
+        p,
+        Event::Msg { from: origin, msg: Wire::Gossip(inner) },
+        Time::ZERO,
+        r,
+        &mut MemStore::default(),
+        ids,
+    );
+}
+
+fn seeded() -> rand_chacha::ChaCha8Rng {
+    use rand::SeedableRng;
+    rand_chacha::ChaCha8Rng::seed_from_u64(0)
+}
+
+#[test]
+fn stored_and_pending_are_both_bounded_by_the_window() {
+    // Page 100 omits collection, so this is the project's design and its cost is part of what the
+    // module claims. Both collections are fed here: everything is stored, and everything sits ahead
+    // of a gap that never closes, which is the worst case for each.
+    let window = 12;
+    let mut cfg = config(2, 3, 1.0);
+    cfg.window = window;
+    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, cfg);
+    let (mut r, mut ids) = (seeded(), 0);
+
+    // Start at 2, so sequence 1 is missing and nothing can ever be delivered.
+    for seq in 2..=1_000u64 {
+        arrive(&mut p, B, seq, seq as u32, &mut r, &mut ids);
+    }
+
+    assert_eq!(p.stored_count(), window, "stored is the window, not the run");
+    assert_eq!(p.pending_count(), window, "and so is pending");
+    assert_eq!(p.next_expected(B), 1, "with nothing delivered, since the gap never closed");
+}
+
+#[test]
+fn the_windows_are_per_sender() {
+    let window = 6;
+    let mut cfg = config(2, 3, 1.0);
+    cfg.window = window;
+    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, cfg);
+    let (mut r, mut ids) = (seeded(), 0);
+
+    for seq in 2..=200u64 {
+        for origin in [B, C, D] {
+            arrive(&mut p, origin, seq, seq as u32, &mut r, &mut ids);
+        }
+    }
+
+    assert_eq!(p.stored_count(), window * 3, "three senders, each with its own window");
+    assert_eq!(p.pending_count(), window * 3);
+}
+
+#[test]
+fn a_request_for_something_evicted_is_answered_as_unavailable() {
+    // `if exists m such that [DATA, s, m, sn] ∈ stored` — and if not, the request is relayed while
+    // it has rounds left and then dropped. No unbounded search, and the requester's timeout is what
+    // eventually moves it past the gap.
+    use recon_core::{Effect, Event, MemStore, Time, step_with};
+
+    let window = 4;
+    let mut cfg = config(2, 3, 1.0);
+    cfg.window = window;
+    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, cfg);
+    let (mut r, mut ids) = (seeded(), 0);
+
+    for seq in 2..=20u64 {
+        arrive(&mut p, B, seq, seq as u32, &mut r, &mut ids);
+    }
+    assert!(!p.has_stored(B, 2), "sequence 2 has long since left the window");
+
+    // Ask for it with no rounds left, so the only possible answer is the message itself.
+    let request = Recovery::Request { requester: C, origin: B, seq: 2, ttl: 0 };
+    let fx = step_with(
+        &mut p,
+        Event::Msg { from: C, msg: Wire::Recovery(request) },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
+
+    assert!(
+        fx.iter().all(|e| !matches!(e, Effect::Send { .. })),
+        "nothing is sent: it is not held, and there are no rounds left to relay: {fx:?}"
+    );
+}
+
+#[test]
+fn a_request_it_cannot_answer_is_relayed_while_it_has_rounds() {
+    // `else if r > 0 then gossip([REQUEST, q, s, sn, r − 1])`, preserving `q` so the answer goes to
+    // the original requester rather than back down the relay chain.
+    use recon_core::{Effect, Event, MemStore, Time, step_with};
+
+    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, config(3, 3, 1.0));
+    let (mut r, mut ids) = (seeded(), 0);
+
+    let request = Recovery::Request { requester: C, origin: B, seq: 5, ttl: 2 };
+    let fx = step_with(
+        &mut p,
+        Event::Msg { from: D, msg: Wire::Recovery(request) },
+        Time::ZERO,
+        &mut r,
+        &mut MemStore::default(),
+        &mut ids,
+    );
+
+    let relayed: Vec<_> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Send {
+                msg: Wire::Recovery(Recovery::Request { requester, ttl, .. }), ..
+            } => Some((*requester, *ttl)),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(relayed.len(), 3, "relayed to the fanout");
+    assert!(
+        relayed.iter().all(|(q, ttl)| *q == C && *ttl == 1),
+        "the requester is preserved and the rounds decrement: {relayed:?}"
+    );
+}
