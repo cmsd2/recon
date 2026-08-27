@@ -16,6 +16,7 @@ pub mod perfect_failure_detector;
 pub mod perfect_link;
 pub mod reliable_broadcast;
 pub mod session_link;
+pub mod stacks;
 pub mod stubborn_broadcast;
 pub mod stubborn_link;
 pub mod uniform_reliable_broadcast;

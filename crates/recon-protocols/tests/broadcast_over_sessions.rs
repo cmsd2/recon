@@ -6,10 +6,13 @@
 
 use core::time::Duration;
 use recon_core::NodeId;
-use recon_protocols::reliable_broadcast::{self as srb, Data as RbData, ReliableBroadcast};
+use recon_protocols::reliable_broadcast::{self as srb, ReliableBroadcast};
 use recon_protocols::session_link::SessionLink;
+use recon_protocols::stacks::{
+    ReliableBroadcastOverSessions, UniformReliableBroadcastOverSessions,
+};
 use recon_protocols::uniform_reliable_broadcast::{
-    self as surb, BroadcastId, Data as UrbData, UniformReliableBroadcast,
+    self as surb, BroadcastId, UniformReliableBroadcast,
 };
 use recon_sim::{Config, Sim};
 
@@ -30,8 +33,8 @@ fn detect_after() -> Duration {
 // The base modules over a session link. There is no separate session implementation any more —
 // that is what the link port removed — so what this suite pins is that the one implementation,
 // given a link that reports scope boundaries, draws the same contrast the two forks did.
-type Rb = ReliableBroadcast<u32, SessionLink<RbData<u32>>>;
-type Urb = UniformReliableBroadcast<u32, SessionLink<UrbData<u32>>>;
+type Rb = ReliableBroadcastOverSessions<u32>;
+type Urb = UniformReliableBroadcastOverSessions<u32>;
 
 fn rb_sim(seed: u64) -> Sim<Rb> {
     let mut s: Sim<Rb> =

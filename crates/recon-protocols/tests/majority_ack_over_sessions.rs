@@ -15,7 +15,7 @@ use recon_protocols::majority_ack_uniform_reliable_broadcast::{
     Cmd, Ind, MajorityAckUniformReliableBroadcast,
 };
 use recon_protocols::session_link::SessionLink;
-use recon_protocols::uniform_reliable_broadcast::Data;
+use recon_protocols::stacks::MajorityAckUniformReliableBroadcastOverSessions as MaurbOverSessions;
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -29,7 +29,7 @@ const BOUND: Duration = Duration::from_millis(20);
 
 // The base module over a session link. The fork it replaces held the same algorithm with the
 // link swapped underneath, which is what the link port made unnecessary.
-type Urb = MajorityAckUniformReliableBroadcast<u32, SessionLink<Data<u32>>>;
+type Urb = MaurbOverSessions<u32>;
 
 fn sim(seed: u64) -> Sim<Urb> {
     let mut s: Sim<Urb> =
@@ -102,7 +102,7 @@ fn the_majority_boundary_is_pinned_at_an_even_membership() {
     // With an odd N, `2k > N` and `2k >= N` are the same predicate. Four processes make half a
     // real quantity, so the off-by-one that would let exactly half suffice is visible.
     const FOUR: [NodeId; 4] = [A, B, C, D];
-    type Four = MajorityAckUniformReliableBroadcast<u32, SessionLink<Data<u32>>>;
+    type Four = MaurbOverSessions<u32>;
     let four = |seed: u64| -> Sim<Four> {
         let mut s: Sim<Four> =
             Sim::new(Config::default().seed(seed).sessions().synchronous(BOUND), &FOUR, |me| {

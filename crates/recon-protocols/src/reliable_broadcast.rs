@@ -113,6 +113,12 @@ pub struct Data<P> {
     pub payload: P,
 }
 
+/// What a link beneath this layer must carry.
+///
+/// A caller supplying their own link needs this and should not have to read the source to find it:
+/// the payload is wrapped as `Data` — the payload with the originator and sequence number Algorithm 3.3 needs, so the link carries `Carried<P>` rather than `P`.
+pub type Carried<P> = Data<P>;
+
 /// Requests from the layer above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {

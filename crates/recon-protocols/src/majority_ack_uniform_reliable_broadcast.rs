@@ -134,6 +134,12 @@ use crate::uniform_reliable_broadcast::{BroadcastId, Data};
 /// [`crate::uniform_reliable_broadcast::Wire`], which needs an enum because a detector also sends.
 pub type Msg<P, L = PerfectLink<Data<P>>> = <BestEffortBroadcast<Data<P>, L> as Protocol>::Msg;
 
+/// What a link beneath this layer must carry.
+///
+/// A caller supplying their own link needs this and should not have to read the source to find it:
+/// the payload is wrapped as the same `Data` as [`crate::uniform_reliable_broadcast`], which this layer shares, so the link carries `Carried<P>` rather than `P`.
+pub type Carried<P> = Data<P>;
+
 /// Requests from the layer above. Broadcasting is the only one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd<P> {

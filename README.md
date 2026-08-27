@@ -164,16 +164,30 @@ the deployable link needs *less* state than the perfect link, not more.
 
 There is **no second set of modules** for this. Every broadcast above takes its link as a type
 parameter bounded on [`link.rs`](crates/recon-protocols/src/link.rs), so the session stack is the
-same modules with a different type argument:
+same modules with a different type argument. [`stacks.rs`](crates/recon-protocols/src/stacks.rs)
+names the ready-made ones, so a caller need not know how a layer wraps its payload:
 
 ```rust
-type Beb = BestEffortBroadcast<u32, SessionLink<u32>>;
-type Urb = UniformReliableBroadcast<u32, SessionLink<Data<u32>>>;
+use recon_protocols::stacks::{
+    BestEffortBroadcastOverSessions, UniformReliableBroadcastOverSessions,
+};
+
+type Beb = BestEffortBroadcastOverSessions<u32>;
+type Urb = UniformReliableBroadcastOverSessions<u32>;
+```
+
+Supplying a link of your own is the same shape, with the layer's `Carried<P>` naming what that link
+must carry:
+
+```rust
+type Beb = BestEffortBroadcast<u32, MyLink<u32>>;
+type Urb = UniformReliableBroadcast<u32, MyLink<uniform_reliable_broadcast::Carried<u32>>>;
 ```
 
 | Abstraction | Module | Status | Space |
 |---|---|---|---|
 | Link port | [`link.rs`](crates/recon-protocols/src/link.rs) | — | — |
+| Ready-made stacks | [`stacks.rs`](crates/recon-protocols/src/stacks.rs) | — | — |
 | Session link | [`session_link.rs`](crates/recon-protocols/src/session_link.rs) | deployable | bounded by membership |
 
 There were four forked `session_*` broadcast modules until the link became a parameter — around

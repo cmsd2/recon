@@ -132,6 +132,12 @@ const _: () = {
     }
 };
 
+/// What a link beneath this layer must carry.
+///
+/// A caller supplying their own link needs this and should not have to read the source to find it:
+/// the payload is wrapped as `Flood` — a round's proposal or a decision, so the link carries `Carried<P>` rather than `P`.
+pub type Carried<P> = Flood<P>;
+
 /// The wire type, multiplexing the two children. Typed, so a mis-route cannot compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(deserialize = "M: Deserialize<'de>"))]

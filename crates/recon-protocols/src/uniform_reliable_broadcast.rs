@@ -152,6 +152,12 @@ const _: () = {
     }
 };
 
+/// What a link beneath this layer must carry.
+///
+/// A caller supplying their own link needs this and should not have to read the source to find it:
+/// the payload is wrapped as `Data` — the payload with the identifier Algorithm 3.4 acknowledges against, so the link carries `Carried<P>` rather than `P`.
+pub type Carried<P> = Data<P>;
+
 /// The wire type, multiplexing the two children.
 ///
 /// The first multiplexing in this stack. It is an enum rather than a keyed registry, so a message

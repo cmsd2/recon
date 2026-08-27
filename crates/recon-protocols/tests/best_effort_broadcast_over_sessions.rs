@@ -10,6 +10,7 @@ use core::time::Duration;
 use recon_core::{Event, MemStore, NodeId, SessionEvent, Time, step_with};
 use recon_protocols::best_effort_broadcast::{BestEffortBroadcast, Cmd, Ind};
 use recon_protocols::session_link::SessionLink;
+use recon_protocols::stacks::BestEffortBroadcastOverSessions;
 use recon_sim::{Config, Sim};
 
 const A: NodeId = NodeId::new(1);
@@ -18,7 +19,7 @@ const C: NodeId = NodeId::new(3);
 const D: NodeId = NodeId::new(4);
 const ALL: [NodeId; 4] = [A, B, C, D];
 
-type Beb = BestEffortBroadcast<u32, SessionLink<u32>>;
+type Beb = BestEffortBroadcastOverSessions<u32>;
 
 fn beb(me: NodeId) -> Beb {
     BestEffortBroadcast::with_link(me, ALL, SessionLink::new())
