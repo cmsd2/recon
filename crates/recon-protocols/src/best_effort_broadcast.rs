@@ -31,7 +31,8 @@ use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::BTreeSet;
 
-use crate::perfect_link::{self as pl, PerfectLink};
+use crate::link::{Boundary, Link, LinkInd};
+use crate::perfect_link::PerfectLink;
 
 /// Requests from the layer above.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,49 +43,51 @@ pub enum Cmd<P> {
 /// Indications to the layer above.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ind<P> {
-    Deliver { from: NodeId, msg: P },
+    Deliver {
+        from: NodeId,
+        msg: P,
+    },
+    /// The scope with `peer` ended at `epoch`. A broadcast in flight to it may have been lost, and
+    /// this layer cannot say which — it has no redundancy to bridge with, so it propagates.
+    ///
+    /// Raised only over a link that reports boundaries; over a perfect link this never occurs.
+    /// Declaring it regardless is the price of one implementation serving both, and it is a price
+    /// paid by the layer above rather than by the link, which is what
+    /// `docs/scope-annotated-modules.md` forbids only of the link.
+    SessionEnded {
+        peer: NodeId,
+        epoch: u64,
+    },
+    /// A scope with `peer` is in force at `epoch`. Anything to be resent can be resent now.
+    SessionEstablished {
+        peer: NodeId,
+        epoch: u64,
+    },
 }
 
-/// Translate the perfect link's delivery into this layer's — the whole of Algorithm 3.1's
-/// second handler.
-fn forward<P>(ind: pl::Ind<P>) -> Ind<P> {
-    let pl::Ind::Deliver { from, msg } = ind;
-    Ind::Deliver { from, msg }
-}
-
-/// What a broadcast needs of the link beneath it, and the whole of what it needs.
-///
-/// Named once so that every layer above states the same requirement, and so that an application
-/// bringing its own link has one thing to satisfy. This is the seam
-/// `docs/conditional-guarantees.md` describes: layers above the link may depend on its `Cmd` and
-/// `Ind` types and nothing else.
-pub trait Link<P>:
-    Protocol<
-        Cmd = pl::Cmd<P>,
-        Ind = pl::Ind<P>,
-        Meta = core::convert::Infallible,
-        Entry = core::convert::Infallible,
-    >
-{
-}
-
-impl<P, L> Link<P> for L where
-    L: Protocol<
-            Cmd = pl::Cmd<P>,
-            Ind = pl::Ind<P>,
-            Meta = core::convert::Infallible,
-            Entry = core::convert::Infallible,
-        >
-{
+/// Translate the link's indication into this layer's — Algorithm 3.1's second handler, plus the
+/// propagation of a boundary this layer cannot bridge.
+fn forward<P, L: Link<P>>(ind: L::Ind) -> Ind<P> {
+    match L::classify(ind) {
+        LinkInd::Deliver { from, msg } => Ind::Deliver { from, msg },
+        LinkInd::Boundary(Boundary::Ended { peer, epoch }) => Ind::SessionEnded { peer, epoch },
+        LinkInd::Boundary(Boundary::Established { peer, epoch }) => {
+            Ind::SessionEstablished { peer, epoch }
+        }
+    }
 }
 
 /// Fan-out to every process over perfect links.
 ///
 /// `L` is the link beneath, and it is a parameter rather than a fixed type. What this layer needs
-/// of it is stated in the bound on the [`Protocol`] impl and nowhere else: that it speaks
-/// [`pl::Cmd`] and [`pl::Ind`]. Anything that does — a session link, a logged link, or an
-/// application's own driver — can carry this broadcast without either side being edited. That is
-/// the seam `docs/conditional-guarantees.md` describes, made checkable.
+/// of it is stated in one bound and nowhere else: [`Link`], the port. Anything satisfying it — a
+/// session link, a logged link, or an application's own driver — can carry this broadcast without
+/// either side being edited. That is the seam `docs/conditional-guarantees.md` describes, made
+/// checkable.
+///
+/// The bound is [`Link`] and not [`crate::link::ScopedLink`], because fan-out needs nothing of a
+/// scope boundary. A layer above that does need one bounds tighter; this one composes over every
+/// link there is.
 ///
 /// It defaults to [`PerfectLink`], so the ordinary stack is still written `BestEffortBroadcast<P>`.
 #[derive(Debug)]
@@ -130,18 +133,14 @@ impl<P> BestEffortBroadcast<P, PerfectLink<P>> {
 
 impl<P: Clone, L> Protocol for BestEffortBroadcast<P, L>
 where
-    L: Protocol<
-            Cmd = pl::Cmd<P>,
-            Ind = pl::Ind<P>,
-            Meta = core::convert::Infallible,
-            Entry = core::convert::Infallible,
-        >,
+    L: Link<P, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
 {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = L::Msg;
-    /// No scope conditions: this protocol's guarantees do not lapse.
-    type Scope = core::convert::Infallible;
+    /// Whatever the link's guarantees are conditional on, since this layer adds no condition of
+    /// its own and cannot bridge the link's.
+    type Scope = L::Scope;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -149,20 +148,20 @@ where
     fn on_cmd(&mut self, Cmd::Broadcast(msg): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
         let peers = &self.peers;
-        cx.with_child(core::convert::identity, forward, |ccx| {
+        cx.with_child(core::convert::identity, forward::<P, L>, |ccx| {
             for &q in peers {
-                link.on_cmd(pl::Cmd::Send { to: q, msg: msg.clone() }, ccx);
+                link.on_cmd(L::send(q, msg.clone()), ccx);
             }
         });
     }
 
     fn on_msg(&mut self, from: NodeId, msg: L::Msg, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
-        cx.with_child(core::convert::identity, forward, |ccx| link.on_msg(from, msg, ccx));
+        cx.with_child(core::convert::identity, forward::<P, L>, |ccx| link.on_msg(from, msg, ccx));
     }
 
     fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         let link = &mut self.link;
-        cx.with_child(core::convert::identity, forward, |ccx| link.on_timer(id, ccx));
+        cx.with_child(core::convert::identity, forward::<P, L>, |ccx| link.on_timer(id, ccx));
     }
 }

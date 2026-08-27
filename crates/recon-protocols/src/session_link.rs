@@ -129,3 +129,31 @@ impl<P: Clone> Protocol for SessionLink<P> {
         }
     }
 }
+
+/// The session link satisfies the link port, and its scoped half as well.
+///
+/// Implementing [`crate::link::ScopedLink`] is a claim that this link can observe the boundaries of
+/// the scope its guarantees hold within, and it can: the simulator raises a session ending and an
+/// establishment, and this link is where they enter the stack. That is what a layer above needs in
+/// order to repair a lost suffix, and what the perfect link cannot offer.
+impl<P> crate::link::Link<P> for SessionLink<P>
+where
+    P: Clone,
+{
+    fn send(to: NodeId, msg: P) -> Cmd<P> {
+        Cmd::Send { to, msg }
+    }
+
+    fn classify(ind: Ind<P>) -> crate::link::LinkInd<P> {
+        use crate::link::{Boundary, LinkInd};
+        match ind {
+            Ind::Deliver { from, msg } => LinkInd::Deliver { from, msg },
+            Ind::SessionEnded { peer, epoch } => LinkInd::Boundary(Boundary::Ended { peer, epoch }),
+            Ind::SessionEstablished { peer, epoch } => {
+                LinkInd::Boundary(Boundary::Established { peer, epoch })
+            }
+        }
+    }
+}
+
+impl<P> crate::link::ScopedLink<P> for SessionLink<P> where P: Clone {}

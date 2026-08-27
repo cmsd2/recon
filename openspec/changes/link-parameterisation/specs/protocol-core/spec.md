@@ -3,8 +3,14 @@
 ### Requirement: A parent composes a child by owning it and re-wrapping its effects
 
 A protocol that is built on another SHALL own that child directly, and SHALL translate each effect
-the child emits into its own terms before that effect leaves the parent. Composition MUST NOT
-depend on names, identifiers, or registries resolved while running.
+the child emits **that carries the child's own vocabulary** — its messages and its indications —
+into its own terms before that effect leaves the parent. Composition MUST NOT depend on names,
+identifiers, or registries resolved while running.
+
+A timer is not among them. It is named by an opaque handle the driver issued, which says nothing
+about which layer registered it, so there is nothing for a parent to translate and no mapping for
+it to supply. Requiring a parent to re-wrap *every* effect is what made a timer's type encode its
+position in the composition.
 
 A parent SHALL state what it requires of its child as a declared port — the child's request and
 indication types — rather than by naming a particular implementation. The child is a parameter of
@@ -22,6 +28,11 @@ A parent MUST NOT depend on anything about its child beyond that port.
 - **WHEN** a child emits an indication
 - **THEN** the parent handles it as an input to its own logic, and emits its own indication only
   where its guarantees require one
+
+#### Scenario: A child's timer request is not re-wrapped
+
+- **WHEN** a child emits a timer request
+- **THEN** the parent passes it outward unchanged, supplying no mapping for it
 
 #### Scenario: A mis-wired composition is rejected before running
 

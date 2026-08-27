@@ -183,7 +183,14 @@ impl<P: Clone> MajorityAckUniformReliableBroadcast<P> {
             cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
-            let beb::Ind::Deliver { from, msg: Data { id, payload } } = ind;
+            // The broadcast beneath reports scope boundaries only over a link that raises them.
+            // This layer is not yet parameterised over its link, so its child is the perfect link
+            // and a boundary cannot arrive. Named rather than dropped: silently absorbing a scope
+            // end is the failure `docs/conditional-guarantees.md` calls cardinal, and when this
+            // layer gains its link parameter the arm becomes real handling.
+            let beb::Ind::Deliver { from, msg: Data { id, payload } } = ind else {
+                unreachable!("a perfect link raises no scope boundary")
+            };
             self.on_beb_deliver(from, id, payload, cx);
         }
         self.beb_inbox = inbox;

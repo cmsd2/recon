@@ -99,7 +99,8 @@ use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast, Link};
+use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
+use crate::link::Link;
 use crate::perfect_failure_detector::{self as pfd, Heartbeat, PerfectFailureDetector};
 use crate::perfect_link::{self as pl, PerfectLink};
 
@@ -273,7 +274,11 @@ impl<P> FloodingConsensus<P, PerfectLink<Flood<P>>> {
     }
 }
 
-impl<P: Clone + Ord, L: Link<Flood<P>>> FloodingConsensus<P, L> {
+impl<
+    P: Clone + Ord,
+    L: Link<Flood<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+> FloodingConsensus<P, L>
+{
     /// Run the broadcast child, then act on what it reported.
     fn with_beb(
         &mut self,
@@ -289,7 +294,14 @@ impl<P: Clone + Ord, L: Link<Flood<P>>> FloodingConsensus<P, L> {
             cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
         }
         for ind in inbox.drain(..) {
-            let beb::Ind::Deliver { from, msg } = ind;
+            // The broadcast beneath reports scope boundaries only over a link that raises them.
+            // This layer is not yet parameterised over its link, so its child is the perfect link
+            // and a boundary cannot arrive. Named rather than dropped: silently absorbing a scope
+            // end is the failure `docs/conditional-guarantees.md` calls cardinal, and when this
+            // layer gains its link parameter the arm becomes real handling.
+            let beb::Ind::Deliver { from, msg } = ind else {
+                unreachable!("this link raises no scope boundary")
+            };
             self.on_beb_deliver(from, msg, cx);
         }
         self.beb_inbox = inbox;
@@ -412,7 +424,11 @@ impl<P: Clone + Ord, L: Link<Flood<P>>> FloodingConsensus<P, L> {
     }
 }
 
-impl<P: Clone + Ord, L: Link<Flood<P>>> Protocol for FloodingConsensus<P, L> {
+impl<
+    P: Clone + Ord,
+    L: Link<Flood<P>, Meta = core::convert::Infallible, Entry = core::convert::Infallible>,
+> Protocol for FloodingConsensus<P, L>
+{
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
     type Msg = Wire<L::Msg>;

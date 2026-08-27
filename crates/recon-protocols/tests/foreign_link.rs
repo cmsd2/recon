@@ -7,6 +7,7 @@
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use recon_protocols::best_effort_broadcast::{BestEffortBroadcast, Cmd, Ind};
+use recon_protocols::link::{Link, LinkInd};
 use recon_protocols::perfect_link as pl;
 use recon_sim::{Config, Sim};
 
@@ -47,6 +48,23 @@ impl<P: Clone> Protocol for DriverLink<P> {
     }
 }
 
+/// Satisfying the port is what makes this link usable, and it is two functions: how to ask for a
+/// send, and what an indication means. Nothing about the broadcast above appears here, and nothing
+/// about this link appears there.
+///
+/// It does not implement `ScopedLink`. It has no session and no epoch, so it cannot observe a
+/// boundary, and a layer needing one cannot be composed over it — which is the honest outcome
+/// rather than a stack that waits for a re-establishment nobody will report.
+impl<P: Clone> Link<P> for DriverLink<P> {
+    fn send(to: NodeId, msg: P) -> pl::Cmd<P> {
+        pl::Cmd::Send { to, msg }
+    }
+
+    fn classify(pl::Ind::Deliver { from, msg }: pl::Ind<P>) -> LinkInd<P> {
+        LinkInd::Deliver { from, msg }
+    }
+}
+
 type Beb = BestEffortBroadcast<u32, DriverLink<u32>>;
 
 #[test]
@@ -58,8 +76,14 @@ fn a_broadcast_runs_over_a_link_the_library_never_wrote() {
     s.run_for(Duration::from_millis(200));
 
     for n in ALL {
-        let got: Vec<u32> =
-            s.trace().indications_at(n).map(|Ind::Deliver { msg, .. }| *msg).collect();
+        let got: Vec<u32> = s
+            .trace()
+            .indications_at(n)
+            .filter_map(|ind| match ind {
+                Ind::Deliver { msg, .. } => Some(*msg),
+                _ => None,
+            })
+            .collect();
         assert_eq!(got, vec![7], "{n} delivered over the foreign link");
     }
 }

@@ -173,3 +173,24 @@ impl<P: Clone> Protocol for PerfectLink<P> {
         self.with_stubborn(cx, |sl, ccx| sl.on_timer(id, ccx));
     }
 }
+
+/// The perfect link satisfies the link port, and only its unscoped half.
+///
+/// It deliberately does not implement [`crate::link::ScopedLink`]: PL2's no-duplication holds
+/// within one incarnation of the recipient, and the link has no means of observing that
+/// incarnation ending. A link that reported a boundary it cannot see would be asserting something
+/// it does not know — which `docs/scope-annotated-modules.md` forbids by Definition 2a. A layer
+/// that needs to be told about a boundary therefore cannot be composed over this link, and the
+/// compiler says so.
+impl<P> crate::link::Link<P> for PerfectLink<P>
+where
+    P: Clone,
+{
+    fn send(to: NodeId, msg: P) -> Cmd<P> {
+        Cmd::Send { to, msg }
+    }
+
+    fn classify(Ind::Deliver { from, msg }: Ind<P>) -> crate::link::LinkInd<P> {
+        crate::link::LinkInd::Deliver { from, msg }
+    }
+}

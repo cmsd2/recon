@@ -8,6 +8,7 @@
 
 pub mod best_effort_broadcast;
 pub mod flooding_consensus;
+pub mod link;
 pub mod logged_link;
 pub mod logged_uniform_reliable_broadcast;
 pub mod majority_ack_uniform_reliable_broadcast;

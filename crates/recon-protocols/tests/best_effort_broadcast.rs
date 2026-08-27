@@ -33,7 +33,15 @@ fn rng() -> ChaCha8Rng {
 
 /// What `node` delivered, in order.
 fn delivered(s: &Sim<BestEffortBroadcast<u32>>, node: NodeId) -> Vec<(NodeId, u32)> {
-    s.trace().indications_at(node).map(|Ind::Deliver { from, msg }| (*from, *msg)).collect()
+    s.trace()
+        .indications_at(node)
+        .filter_map(|ind| match ind {
+            Ind::Deliver { from, msg } => Some((*from, *msg)),
+            // Over a perfect link there are none; a filter rather than a panic, because what this
+            // helper is for is deliveries.
+            _ => None,
+        })
+        .collect()
 }
 
 // -------------------------------------------------- No wire fields: task 6.1

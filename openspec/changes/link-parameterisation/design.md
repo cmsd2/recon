@@ -13,11 +13,12 @@ or anything resolved while running would be the failure this project exists to a
 the four `session_*` forks exist and why a naive port pinning `Ind` to one type cannot admit both.
 It is the central design problem of this change.
 
-**`Protocol::Timer` stays as it is.** A layer's timer type today wraps its children's —
-`Timer::Broadcast(beb::Timer::Link(pl::Timer::Stubborn(..)))` — so a timer's type encodes its
-position in the composition. Making the link a parameter therefore makes every layer above it
-generic in the link's timer type too. This is a decision taken outside this change and is the
-largest single cost in it; see Decisions and Risks.
+**Timers are already out of the way.** An earlier draft of this design was written when
+`Protocol::Timer` still existed, so a layer's timer type wrapped its children's and making the link
+a parameter made every layer above it generic in the link's timer type too. That was the largest
+single cost in the change. The `opaque-timers` change removed `Protocol::Timer` and landed first, so
+the cost is gone: a timer is an opaque handle the driver issued, no layer's timer type mentions any
+other's, and parameterising a link propagates nothing but the link.
 
 ## Goals / Non-Goals
 
@@ -32,8 +33,8 @@ largest single cost in it; see Decisions and Risks.
 
 - Changing any protocol's guarantees. Every guarantee in the removed `session_*` capabilities
   survives; only their duplicate implementations go.
-- Changing `Protocol::Timer`, `Effect`, or the shape of composition in `recon-core` beyond stating
-  what a parent requires of a child.
+- Changing `Effect` or the shape of composition in `recon-core` beyond stating what a parent
+  requires of a child. Timers are settled and not revisited here.
 - Transport. Constraint 5 is untouched; this makes the seam ready for it, no more.
 - Parameterising over anything but the layer directly beneath. A layer still knows its own child's
   port and nothing further down.
@@ -47,8 +48,11 @@ on it. Not an alias for one concrete `Cmd`/`Ind` pair, because that cannot admit
 indication vocabularies differ.
 
 *Alternative considered — pin the types exactly (`Protocol<Cmd = pl::Cmd<P>, Ind = pl::Ind<P>>`).*
-Simpler, and it is what the exploratory branch does today. It works for the perfect link and fails
-for the session link, so it cannot reach the duplication this change exists to remove. Rejected.
+Simpler, and it is what the exploratory work did first: a `Link<P>` supertrait with a blanket impl,
+still on the branch as this is written. It works for the perfect link and fails for the session
+link, whose `Ind` has three variants, so it cannot reach the duplication this change exists to
+remove. Rejected — and the existing trait is therefore replaced rather than extended, which task 1.1
+now says.
 
 *Alternative considered — make the session link's extra indications a separate port.* Two ports
 means two bounds means, again, two implementations of every layer above. Rejected for the same
@@ -85,26 +89,24 @@ argument. The suites are what pin the scoped guarantees — `RB4 [session]`, the
 establishment, the permanent-split analysis — and losing them would lose the evidence that the
 collapse preserved behaviour. They move; they are not deleted.
 
-### Timers thread through, and this change absorbs the cost
+### Timers cost this change nothing, because `opaque-timers` landed first
 
-With `Protocol::Timer` unchanged, a parameterised layer's timer type mentions its child's:
-`beb::Timer<L::Timer>` and so on up the stack. Each layer's `Timer` gains a type parameter with a
-default, mirroring the layer itself.
+An earlier draft of this section planned to give each layer's `Timer` a type parameter with a
+default, mirroring the layer itself, and accepted the resulting noise as the price of the change.
+That is no longer necessary. A timer is named by an opaque handle, so a parameterised layer's
+declaration mentions its child once — as the link parameter — and nowhere else.
 
-*Alternative considered — identify timers by an opaque handle routed to whoever registered them.*
-That removes the ripple entirely: no layer's timer type mentions any other's, and parameterising a
-link stops propagating upward at all. It is the better design and it is a `recon-core` change with
-its own proposal. This change is deliberately written to be independent of it: if that lands first,
-the timer parameters in this change become unnecessary and can be deleted without touching anything
-else here.
+Recorded rather than deleted because the sequencing was the decision that mattered: parameterising
+consensus was attempted before the timer change and abandoned, and succeeded on the first attempt
+afterwards. A change that is hard for a reason unrelated to its subject is worth stopping to fix
+first.
 
 ## Risks / Trade-offs
 
-- **The timer ripple makes signatures noisy, worst at the top of the stack.** Consensus already
-  multiplexes two children, so its message and timer types both gain parameters and its serde
-  bounds follow. → Defaults keep call sites clean, and the noise is confined to declarations. If it
-  proves worse than expected in practice, the opaque-handle change removes it wholesale; sequencing
-  that change first would make this one materially smaller.
+- **Signatures grow noisy at the top of the stack.** Consensus multiplexes two children, so its
+  message type gains a parameter and its serde bounds follow. → Defaults keep call sites clean and
+  the noise stays in declarations. This was much worse before `opaque-timers`, when the timer types
+  gained parameters too; that half is gone.
 
 - **Collapsing four modules risks losing a documented departure.** Each fork carries its own quoted
   pseudocode and departures list, and the merged module must state both the plain and the scoped
@@ -126,8 +128,9 @@ else here.
 
 ## Migration Plan
 
-1. Introduce the port and its scoped extension; implement both for the existing links. Nothing else
-   changes, and the suite passes untouched.
+1. Replace the pinned-type `Link` trait now on the branch with the port proper — associated request
+   and indication types — and add its scoped extension; implement both for the existing links.
+   Nothing else changes, and the suite passes untouched.
 2. Parameterise upward one layer at a time, lowest first, each with a default preserving today's
    type. The suite passes after each step.
 3. Move each `session_*` suite onto its base module with a session link, and check the merged

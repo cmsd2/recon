@@ -33,10 +33,10 @@ again.
 - An application may compose this library's protocols over a link this library never wrote,
   including consensus, with neither side edited.
 
-Explicitly **not** in this change: `Protocol::Timer` keeps its present shape. A layer's timer type
-therefore mentions its child's, so parameterising a link threads the link's timer type upward
-through every layer above it. That ripple is a real cost and is argued in `design.md`; removing it
-is a separate change.
+Explicitly **not** in this change: anything about timers. The `opaque-timers` change landed first
+and removed `Protocol::Timer` altogether, so a layer's timer type no longer mentions its child's.
+Parameterising a link therefore propagates nothing upward but the link itself — which is what made
+this change tractable, and why an earlier draft argued a timer ripple that no longer exists.
 
 ## Capabilities
 

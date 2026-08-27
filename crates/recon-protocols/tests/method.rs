@@ -139,7 +139,10 @@ fn observe(s: &Sim<BestEffortBroadcast<u32>>, broadcasts: &[(NodeId, u32)]) -> O
         delivered: s
             .trace()
             .indications()
-            .map(|(at, Ind::Deliver { from, msg })| (at, *from, *msg))
+            .filter_map(|(at, ind)| match ind {
+                Ind::Deliver { from, msg } => Some((at, *from, *msg)),
+                _ => None,
+            })
             .collect(),
         crashed: BTreeSet::new(),
         sends: s.trace().send_count(),
@@ -325,7 +328,10 @@ fn defective_run(seed: u64) -> Result<(), Violation> {
         delivered: s
             .trace()
             .indications()
-            .map(|(at, Ind::Deliver { from, msg })| (at, *from, *msg))
+            .filter_map(|(at, ind)| match ind {
+                Ind::Deliver { from, msg } => Some((at, *from, *msg)),
+                _ => None,
+            })
             .collect(),
         ..Default::default()
     };

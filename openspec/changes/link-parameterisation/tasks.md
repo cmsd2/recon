@@ -1,23 +1,25 @@
 ## 1. The port
 
-- [ ] 1.1 Define `Link` — the request and indication types a layer above the link may depend on —
-      and verify the project builds with nothing yet using it
-- [ ] 1.2 Define `ScopedLink` as `Link` plus the reporting of scope endings and establishments, and
+- [x] 1.1 Replace the `Link` trait now on the branch — which pins the perfect link's request and
+      indication types, and so cannot admit the session link — with the port proper, carrying the
+      request and indication types as associated types, and verify the project builds
+- [x] 1.2 Define `ScopedLink` as `Link` plus the reporting of scope endings and establishments, and
       verify a link cannot implement it without raising those boundaries
-- [ ] 1.3 Implement `Link` for the perfect link, and verify it declares no scope boundary — a link
-      may not name a scope it cannot observe
-- [ ] 1.4 Implement `Link` and `ScopedLink` for the session link, and verify `cargo test --workspace`
+- [x] 1.3 Implement `Link` for the perfect link, and verify it declares no scope boundary — a link
+      may not name a scope it cannot observe. A blanket impl will not do: it would make every
+      protocol a link, including the ones composed over one
+- [x] 1.4 Implement `Link` and `ScopedLink` for the session link, and verify `cargo test --workspace`
       still passes with nothing composed over the new traits yet
-- [ ] 1.5 Add a compile-fail or negative test showing a link that does not satisfy the port is
+- [x] 1.5 Add a compile-fail or negative test showing a link that does not satisfy the port is
       rejected when the project is built, so the seam is checked rather than asserted
 
 ## 2. Best-effort broadcast over any link
 
-- [ ] 2.1 Parameterise `BestEffortBroadcast<P, L>` over `L: Link<P>`, defaulting to
+- [x] 2.1 Parameterise `BestEffortBroadcast<P, L>` over `L: Link<P>`, defaulting to
       `PerfectLink<P>`, and verify every existing call site compiles untouched
-- [ ] 2.2 Add a constructor taking the link, and verify `cargo test -p recon-protocols --test
+- [x] 2.2 Add a constructor taking the link, and verify `cargo test -p recon-protocols --test
       best_effort_broadcast` passes unchanged
-- [ ] 2.3 Move `delivered_count` to the impl block for the default link, since it is specific to the
+- [x] 2.3 Move `delivered_count` to the impl block for the default link, since it is specific to the
       perfect link, and verify the reliable-broadcast tests that call it still pass
 - [ ] 2.4 Pass scope boundaries reported by the link upward when `L: ScopedLink`, and verify both an
       ending and an establishment reach the layer above, distinguishable from one another
@@ -32,9 +34,11 @@
       verify the establishment prompts a directed resend and the ending prompts nothing
 - [ ] 3.3 Parameterise `MajorityAckUniformReliableBroadcast`, keeping the resend unconditional and
       directed, and verify a test that a filtered resend would deadlock still passes
-- [ ] 3.4 Parameterise `FloodingConsensus`, and verify its existing suite passes unchanged
-- [ ] 3.5 Thread each layer's `Timer` type parameter with a default mirroring the layer's own, and
-      verify `cargo build --workspace --all-targets` is clean
+- [x] 3.4 Parameterise `FloodingConsensus`, and verify its existing suite passes unchanged
+- [x] 3.5 ~~Thread each layer's `Timer` type parameter with a default mirroring the layer's own~~ —
+      **obsolete**. `opaque-timers` removed `Protocol::Timer`, so no layer's timer type mentions its
+      child's and there is nothing to thread. Nothing to do; verified by there being no `type Timer`
+      in the workspace
 
 ## 4. Collapsing the forks
 
@@ -54,11 +58,11 @@
 
 ## 5. Somebody else's link
 
-- [ ] 5.1 Add a test link satisfying `Link` with no retransmission, no deduplication and no timer,
+- [x] 5.1 Add a test link satisfying `Link` with no retransmission, no deduplication and no timer,
       and verify a broadcast delivers over it
-- [ ] 5.2 Verify non-vacuously that the foreign link really is a different stack — its wire carries
+- [x] 5.2 Verify non-vacuously that the foreign link really is a different stack — its wire carries
       the bare payload, not the built-in link's identifier
-- [ ] 5.3 Run consensus over the foreign link and verify every correct process decides, no two
+- [x] 5.3 Run consensus over the foreign link and verify every correct process decides, no two
       decide differently, and what is decided was proposed
 - [ ] 5.4 Verify neither the link nor any protocol was edited to make the previous three pass, by
       confirming the diff for them is confined to test files
