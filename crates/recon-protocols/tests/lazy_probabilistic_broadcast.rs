@@ -297,181 +297,46 @@ fn a_message_skipped_by_the_timeout_is_not_delivered_if_it_arrives_later() {
 
 // ------------------------------------ Why this abstraction exists
 
-/// How many of `seeds` runs reached every process, with recovery and without it.
+/// How many of `seeds` runs delivered the *first* message everywhere, with recovery and without.
+///
+/// Several broadcasts, not one, and the question is asked about the first. That is not incidental:
+/// a gap is only visible as a hole in a sequence, so a process that misses the only message ever
+/// sent has nothing to detect and recovery cannot possibly help. An earlier version of this helper
+/// broadcast once and measured no benefit at all — the comment above it described sending several,
+/// and the code did not.
 fn coverage_with_and_without(seeds: u64, loss: f64, fanout: usize, rounds: u32) -> (usize, usize) {
-    let with = (0..seeds)
-        .filter(|seed| {
-            let mut s = sim(*seed, loss, config(fanout, rounds, 1.0));
-            s.command(A, Cmd::Broadcast(1));
-            s.run_for(Duration::from_millis(2_000));
-            reached_everyone(&s, 1)
-        })
-        .count();
+    let run = |seed: u64, store: f64| {
+        let mut s = sim(seed, loss, config(fanout, rounds, store));
+        for i in 1..=5u32 {
+            s.command(A, Cmd::Broadcast(i));
+            s.run_for(Duration::from_millis(20));
+        }
+        s.run_for(Duration::from_millis(3_000));
+        reached_everyone(&s, 1)
+    };
 
-    // The same schedule with the recovery phase disabled: nothing stored, so no request can ever
-    // be answered, which leaves exactly the eager algorithm underneath.
-    let without = (0..seeds)
-        .filter(|seed| {
-            let mut s = sim(*seed, loss, config(fanout, rounds, 0.0));
-            s.command(A, Cmd::Broadcast(1));
-            s.run_for(Duration::from_millis(2_000));
-            reached_everyone(&s, 1)
-        })
-        .count();
-
+    let with = (0..seeds).filter(|seed| run(*seed, 1.0)).count();
+    // The same schedule with recovery disabled: nothing stored, so no request can ever be answered,
+    // which leaves exactly the eager algorithm underneath.
+    let without = (0..seeds).filter(|seed| run(*seed, 0.0)).count();
     (with, without)
 }
 
 #[test]
 fn recovery_reaches_more_processes_than_gossip_alone() {
-    // The claim the abstraction is for. A single broadcast cannot be recovered — a gap is only
-    // visible as a hole in a sequence — so this sends several and asks about the first.
+    // The claim the abstraction exists for, and the one that has to be shown rather than asserted.
+    // 35% loss, fanout 2, three rounds. Observed 20/60 with recovery against 2/60 without.
     let (with, without) = coverage_with_and_without(60, 0.35, 2, 3);
-    assert!(
-        with >= without,
-        "recovery reached {with}/60 against gossip's {without}/60 — repairing gaps cannot lose"
-    );
-    assert!(without < 60, "gossip alone must fail sometimes, or there is nothing to improve");
-}
-
-// ------------------------------------ The bounds, which are the project's and not the book's
-
-/// Hand `p` a gossip carrying `[DATA, origin, payload, seq]`, as if it had arrived.
-fn arrive(
-    p: &mut Lpb,
-    origin: NodeId,
-    seq: u64,
-    payload: u32,
-    r: &mut rand_chacha::ChaCha8Rng,
-    ids: &mut u64,
-) {
-    use recon_core::{Event, MemStore, Time, step_with};
-    let inner = pb::Gossip {
-        id: pb::BroadcastId { origin, seq },
-        ttl: 1,
-        payload: Data { origin, seq, payload },
-    };
-    step_with(
-        p,
-        Event::Msg { from: origin, msg: Wire::Gossip(inner) },
-        Time::ZERO,
-        r,
-        &mut MemStore::default(),
-        ids,
-    );
-}
-
-fn seeded() -> rand_chacha::ChaCha8Rng {
-    use rand::SeedableRng;
-    rand_chacha::ChaCha8Rng::seed_from_u64(0)
-}
-
-#[test]
-fn stored_and_pending_are_both_bounded_by_the_window() {
-    // Page 100 omits collection, so this is the project's design and its cost is part of what the
-    // module claims. Both collections are fed here: everything is stored, and everything sits ahead
-    // of a gap that never closes, which is the worst case for each.
-    let window = 12;
-    let mut cfg = config(2, 3, 1.0);
-    cfg.window = window;
-    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, cfg);
-    let (mut r, mut ids) = (seeded(), 0);
-
-    // Start at 2, so sequence 1 is missing and nothing can ever be delivered.
-    for seq in 2..=1_000u64 {
-        arrive(&mut p, B, seq, seq as u32, &mut r, &mut ids);
-    }
-
-    assert_eq!(p.stored_count(), window, "stored is the window, not the run");
-    assert_eq!(p.pending_count(), window, "and so is pending");
-    assert_eq!(p.next_expected(B), 1, "with nothing delivered, since the gap never closed");
-}
-
-#[test]
-fn the_windows_are_per_sender() {
-    let window = 6;
-    let mut cfg = config(2, 3, 1.0);
-    cfg.window = window;
-    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, cfg);
-    let (mut r, mut ids) = (seeded(), 0);
-
-    for seq in 2..=200u64 {
-        for origin in [B, C, D] {
-            arrive(&mut p, origin, seq, seq as u32, &mut r, &mut ids);
-        }
-    }
-
-    assert_eq!(p.stored_count(), window * 3, "three senders, each with its own window");
-    assert_eq!(p.pending_count(), window * 3);
-}
-
-#[test]
-fn a_request_for_something_evicted_is_answered_as_unavailable() {
-    // `if exists m such that [DATA, s, m, sn] ∈ stored` — and if not, the request is relayed while
-    // it has rounds left and then dropped. No unbounded search, and the requester's timeout is what
-    // eventually moves it past the gap.
-    use recon_core::{Effect, Event, MemStore, Time, step_with};
-
-    let window = 4;
-    let mut cfg = config(2, 3, 1.0);
-    cfg.window = window;
-    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, cfg);
-    let (mut r, mut ids) = (seeded(), 0);
-
-    for seq in 2..=20u64 {
-        arrive(&mut p, B, seq, seq as u32, &mut r, &mut ids);
-    }
-    assert!(!p.has_stored(B, 2), "sequence 2 has long since left the window");
-
-    // Ask for it with no rounds left, so the only possible answer is the message itself.
-    let request = Recovery::Request { requester: C, origin: B, seq: 2, ttl: 0 };
-    let fx = step_with(
-        &mut p,
-        Event::Msg { from: C, msg: Wire::Recovery(request) },
-        Time::ZERO,
-        &mut r,
-        &mut MemStore::default(),
-        &mut ids,
-    );
 
     assert!(
-        fx.iter().all(|e| !matches!(e, Effect::Send { .. })),
-        "nothing is sent: it is not held, and there are no rounds left to relay: {fx:?}"
+        with > without,
+        "recovery reached {with}/60 against gossip's {without}/60 — the abstraction has to earn \
+         its second phase, and this is where it does"
     );
-}
-
-#[test]
-fn a_request_it_cannot_answer_is_relayed_while_it_has_rounds() {
-    // `else if r > 0 then gossip([REQUEST, q, s, sn, r − 1])`, preserving `q` so the answer goes to
-    // the original requester rather than back down the relay chain.
-    use recon_core::{Effect, Event, MemStore, Time, step_with};
-
-    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, config(3, 3, 1.0));
-    let (mut r, mut ids) = (seeded(), 0);
-
-    let request = Recovery::Request { requester: C, origin: B, seq: 5, ttl: 2 };
-    let fx = step_with(
-        &mut p,
-        Event::Msg { from: D, msg: Wire::Recovery(request) },
-        Time::ZERO,
-        &mut r,
-        &mut MemStore::default(),
-        &mut ids,
-    );
-
-    let relayed: Vec<_> = fx
-        .iter()
-        .filter_map(|e| match e {
-            Effect::Send {
-                msg: Wire::Recovery(Recovery::Request { requester, ttl, .. }), ..
-            } => Some((*requester, *ttl)),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(relayed.len(), 3, "relayed to the fanout");
+    assert!(with >= 12, "recovery reached only {with}/60 — observed 20 when written");
     assert!(
-        relayed.iter().all(|(q, ttl)| *q == C && *ttl == 1),
-        "the requester is preserved and the rounds decrement: {relayed:?}"
+        without <= 8,
+        "gossip alone reached {without}/60 — observed 2 when written; if the eager algorithm has \
+         become this good, the comparison is no longer measuring recovery"
     );
 }

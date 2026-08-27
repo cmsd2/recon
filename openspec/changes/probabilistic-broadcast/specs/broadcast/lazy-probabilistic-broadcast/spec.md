@@ -107,16 +107,27 @@ suite has to show rather than assert. It SHALL be evidenced the same way the und
 probabilistic guarantee is: over many runs, against a stated threshold, with each run reproducible
 from its seed.
 
+The comparison SHALL send **more than one** message and ask about an earlier one. A gap is only
+visible as a hole in a sequence, so a process that misses the only message ever sent has nothing to
+detect and recovery cannot help it. A comparison over a single broadcast measures nothing and will
+report no benefit.
+
 #### Scenario: Recovery raises coverage
 
-- **WHEN** the same seeds, membership and loss rate are run with recovery and with gossip alone
+- **WHEN** the same seeds, membership and loss rate are run with recovery and with gossip alone,
+  over a sequence of broadcasts
 - **THEN** the fraction of runs reaching every correct process is higher with recovery
 
 #### Scenario: The comparison is not vacuous
 
 - **WHEN** the comparison is made
-- **THEN** the configuration is one in which gossip alone demonstrably fails on some runs, so that
+- **THEN** the configuration is one in which gossip alone demonstrably fails on most runs, so that
   there is something for recovery to improve
+
+#### Scenario: A single broadcast is not a comparison
+
+- **WHEN** only one message is ever broadcast
+- **THEN** no gap is detectable, and recovery neither helps nor is measured
 
 ### Requirement: The stored copies and the pending messages are bounded
 
