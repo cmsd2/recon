@@ -48,6 +48,13 @@ and name no implementation. Nothing here needs the session half of it.
 
 ### The α in lazy probabilistic broadcast follows the pseudocode: store when `random > α`
 
+*Note added while implementing.* `docs/postmortem.md` disagrees with itself here. Its re-examination
+concludes the pseudocode's `random([0,1]) > α` is right and the book's prose is loose; its own worked
+sketch further down writes `cx.rng().gen_bool(self.alpha)` — storing *with* probability α — and calls
+it "right way round". Both are true if the field is renamed to mean the store probability, which is
+what this module does: it takes a `store_probability`, and the book's α is one minus it. The
+parameter is named for what it does precisely so that this question cannot be asked again.
+
 So α is the probability of *not* storing, and α = 0 means store everything. The module documents
 that the book's prose says the opposite, and why the pseudocode wins — page 100's own example only
 makes sense under this reading.
@@ -105,14 +112,40 @@ repository does, and it is what `docs/bounded-space.md` calls the failure mode t
 deliberately: these are the first two modules specified as bounded implementations, and the window
 is stated in their guarantees rather than omitted from them.
 
-### Lazy composes over eager, as the book has it
+### Lazy has two children, not one — corrected against the book
 
-`LazyProbabilisticBroadcast` owns an eager instance and wraps its wire type, the same shape every
-composing layer here already uses.
+An earlier draft of this section said lazy "composes over eager". Algorithm 3.10's header says
+otherwise:
 
-*Alternative considered — build lazy directly over best-effort broadcast.* Fewer layers and less
-wrapping. It abandons the reading of Algorithm 3.9 against its page, and 3.9 is the algorithm that
-makes this family interesting. Rejected.
+```text
+Uses:
+    FairLossPointToPointLinks, instance fll;
+    ProbabilisticBroadcast, instance upb.   // an unreliable implementation
+```
+
+Both. Data goes out through `upb` and is gossiped by it; **requests and their answers go directly
+over `fll`**, bypassing the gossip entirely. That is what makes the recovery phase *pull* rather
+than more push, and it is the reason the algorithm is called lazy. A version routing requests
+through `upb` would flood every recovery, which is the cost the second phase exists to avoid.
+
+So this layer multiplexes two children into one wire, the same shape
+`uniform_reliable_broadcast` already uses for its broadcast and its detector.
+
+### Three more corrections the book supplied
+
+Recorded because each was about to be written the other way, and because the section's whole lesson
+is that these questions are settled by the page rather than by reading code.
+
+- **Sequence numbers start at one.** `next := [1]^N`, not `[0]^N`. A zero-based `next` would leave
+  every process waiting for a message its senders never send.
+- **The timeout skips *past* the gap, not to it.** `if sn > next[s] then next[s] := sn + 1` — so the
+  message at `sn` is abandoned along with everything before it. Setting `next[s] := sn` would deliver
+  a message the process has already decided to skip over.
+- **Draining `pending` is a standing condition, not a procedure call.**
+  `upon exists [DATA, s, x, sn] ∈ pending such that sn = next[s]` is re-evaluated whenever `next` or
+  `pending` changes, so closing a gap can release an arbitrarily long run in one go. Written as a
+  loop after every mutation of either, which is the same thing and is what a handler-based
+  implementation has to do.
 
 ### The eager relay stays outside the delivery guard
 

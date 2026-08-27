@@ -43,6 +43,11 @@ that is its own change measured against `docs/conditional-guarantees.md`.
 - `broadcast/probabilistic-broadcast`: best-effort delivery to every correct process *with high
   probability*, by gossip — the guarantee, its dependence on fanout and rounds, and the fact that it
   may legitimately fail to reach everyone on some runs.
+- `links/fair-loss-link`: the link Algorithm 3.9 names — attempted delivery, no retransmission, no
+  state. **Not in this proposal's first draft.** It was added while implementing, when the book's
+  `Uses: FairLossPointToPointLinks` turned out to matter: over a perfect link the gossip's
+  termination is unobservable and its probabilistic guarantee is invisible, because a link that
+  retransmits until delivery reaches everyone every time.
 - `broadcast/lazy-probabilistic-broadcast`: the same delivery guarantee strengthened by recovery —
   a gap in a sender's sequence prompts a retransmission request, so a message missed by the gossip
   is recovered from a peer that stored it, within the retention window.

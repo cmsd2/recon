@@ -60,6 +60,12 @@ having moved past the gap, the process has reported an order that a late deliver
 - **WHEN** a requested message has not arrived after the configured period
 - **THEN** the process delivers the messages it holds beyond the gap
 
+#### Scenario: The message that exposed the gap is skipped with it
+
+- **WHEN** a gap is abandoned after the configured period
+- **THEN** the message whose arrival revealed the gap is abandoned too, not only those before it
+- **AND** delivery resumes from the sequence number after it
+
 #### Scenario: A skipped message stays skipped
 
 - **WHEN** a message arrives after the process has already moved past its position
@@ -135,12 +141,27 @@ any gap it cannot close.
 - **WHEN** a process requests a message old enough to have left every peer's retention window
 - **THEN** no copy is returned, and the requester moves past the gap
 
-### Requirement: The gossip beneath is a parameter
+### Requirement: Data is gossiped and recovery is direct
 
-This capability SHALL compose over a probabilistic broadcast satisfying the port beneath it, and
-SHALL NOT name a particular implementation of it.
+This capability SHALL disseminate data through the probabilistic broadcast beneath it, and SHALL
+send retransmission requests and their answers **directly over the link**, not through that
+broadcast.
 
-#### Scenario: The layer composes over the gossip abstraction, not a named module
+Routing a request through the gossip would flood the membership to repair one process's gap, which
+is the cost the recovery phase exists to avoid. Pushing data and pulling repairs is what separates
+this abstraction from the eager one.
 
-- **WHEN** this layer is written
-- **THEN** it names the abstraction beneath it and no particular implementation of that abstraction
+#### Scenario: A broadcast goes through the gossip
+
+- **WHEN** the layer above broadcasts
+- **THEN** the message is disseminated by the probabilistic broadcast beneath
+
+#### Scenario: A request does not go through the gossip
+
+- **WHEN** a process requests a missing message
+- **THEN** the request travels over the link directly, and is not disseminated by the broadcast
+
+#### Scenario: An answer goes back to the requester alone
+
+- **WHEN** a process holding a requested message answers it
+- **THEN** the answer is addressed to the requester, and to no other process

@@ -45,6 +45,9 @@ Every protocol above the failure detector violates the rule.
 | `stubborn_broadcast` | `peers`, and what is outstanding | **membership** ✅ |
 | `logged_link` | `delivered` — **in stable storage** | messages ever log-delivered ❌❌ |
 | `logged_uniform_reliable_broadcast` | `pending`, `delivered` — **in stable storage** | messages ever seen ❌❌ |
+| `fair_loss_link` | nothing at all | **nothing** ✅ |
+| `probabilistic_broadcast` | `delivered` | **a retention window** ✅ |
+| `lazy_probabilistic_broadcast` | `stored`, `pending`, `next` | **a retention window, and membership** ✅ |
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the
 second problem and no longer do: the durable state was one blob rewritten on every change, so a
@@ -78,6 +81,31 @@ with a 10ms interval, on a network with no loss where every message arrived on i
 Fifty-one transmissions per message, none of them needed, and the rate grows with every message
 ever sent. In a simulator this is a slow test. In a running system it is a link that degrades
 until it stops working.
+
+## The first two bounded from the start
+
+`probabilistic_broadcast` and `lazy_probabilistic_broadcast` are the first modules above the failure
+detector written as implementations rather than transcriptions. Two things about how that went are
+worth recording, because this document has until now described converting a transcription rather
+than avoiding one.
+
+**The book gave no help, and said so.** Page 100: "garbage collection of the stored message copies
+is omitted in the pseudo code for simplicity." So the retention mechanism was a design decision with
+no page to check it against — which is exactly the position this document warns about, met head-on
+rather than deferred.
+
+**The shape matters more than the bound.** The previous implementation of these algorithms
+*did* collect garbage, and it was still the one defect in that code which survived scrutiny: it
+expired by wall-clock age and rebuilt the whole delivered-set on every event, so receiving one
+message cost time linear in everything ever received. A bound that is reclaimed by a periodic sweep
+is not the same as a bounded implementation. These evict on insert, and the test that distinguishes
+the two watches the collection size after every single insert — under eviction it rises to the cap
+and never moves, where a sweep sawtooths.
+
+**Bounding weakened a guarantee, and the specification says so.** `PB2` reads `[window]`: a message
+re-arriving after its identifier has been evicted is delivered again. That is the scoped guarantee
+this document predicts, written down in the module's own table and pinned by a test rather than
+discovered later.
 
 ## Which abstractions would actually be deployed
 

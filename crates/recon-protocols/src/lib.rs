@@ -9,6 +9,7 @@
 pub mod best_effort_broadcast;
 pub mod fair_loss_link;
 pub mod flooding_consensus;
+pub mod lazy_probabilistic_broadcast;
 pub mod link;
 pub mod logged_link;
 pub mod logged_uniform_reliable_broadcast;

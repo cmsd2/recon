@@ -5,22 +5,24 @@
       it — this looks like a defect, has been reported as one, and the quoted indentation is what
       settles it. **Done and verified against the book itself**, which is indexed locally
       (`Reliable and Secure Distributed Programming - Cachin.pdf`), not against a recollection
-- [x] 2.1b Add `fair_loss_link`, the link Algorithm 3.9 actually names, and default the gossip to
-      it. The book says `Uses: FairLossPointToPointLinks`, verified against the indexed text; this
-      change had reached for a perfect link, which retransmits until delivery and so masks the
-      probabilistic guarantee the abstraction exists to provide. Not in the original task list —
-      surfaced by the termination failure and by the observation that gossip over a link that does
-      not lose is gossip with nothing to do. Verify the eager suite passes over it
 
-- [ ] 1.1b Transcribe the lazy algorithm, which the book splits into **Algorithms 3.10 and 3.11** —
-      a gossip half and a recovery half — not the single 3.10 this change first assumed. Retrieving
-      the full text of both is outstanding; see the note at the end of this file
-- [ ] 1.2 Record the α direction in the lazy module: stored when `random([0,1]) > α`, so α is the
+- [x] 1.1b Transcribe the lazy algorithm, which the book splits into **Algorithms 3.10 and 3.11** —
+      a gossip half and a recovery half, not the single 3.10 this change first assumed. Both are now
+      quoted verbatim in the module from the indexed book. Three readings it settled are recorded
+      there: `next := [1]^N`, the timeout skipping `sn` itself, and the pending drain being a
+      standing condition rather than a procedure call
+- [x] 1.2 Record the α direction in the lazy module: stored when `random([0,1]) > α`, so α is the
       probability of *not* storing, and verify the reading against page 100's `α = 0` example, which
       is what breaks the tie against the book's own prose on page 99
 - [x] 1.3 Read `archive/recon-gossip/src/{upb,lpb}.rs` for its data structures only, and verify no
       claim about it enters this work unchecked against the page — three of four bugs once reported
       in it were false positives produced by exactly that method
+- [x] 1.4 Add `fair_loss_link`, the link Algorithm 3.9 actually names, and default the gossip to
+      it. The book says `Uses: FairLossPointToPointLinks`, verified against the indexed text; this
+      change had reached for a perfect link, which retransmits until delivery and so masks the
+      probabilistic guarantee the abstraction exists to provide. Not in the original task list —
+      surfaced by the termination failure and by the observation that gossip over a link that does
+      not lose is gossip with nothing to do. Verify the eager suite passes over it
 
 ## 2. Eager probabilistic broadcast
 
@@ -69,36 +71,42 @@
 
 ## 5. Lazy probabilistic broadcast
 
-- [ ] 5.1 Add the module over the eager one, wrapping its wire type, and verify the existing eager
+- [x] 5.1 Add the module over the eager one, wrapping its wire type, and verify the existing eager
       suite still passes unchanged
-- [ ] 5.2 Add per-sender sequence numbers and gap detection, and verify a sequence number ahead of
+- [x] 5.2 Add per-sender sequence numbers and gap detection, and verify a sequence number ahead of
       the expected one prompts a request for the intervening numbers while an in-order one prompts
       nothing
-- [ ] 5.3 Verify a request is addressed to a subset of peers rather than broadcast to the membership
-- [ ] 5.4 Hold a message that arrives ahead of a gap, and verify it is neither delivered at that
+- [x] 5.3 Verify a request is addressed to a subset of peers rather than broadcast to the membership
+- [x] 5.4 Hold a message that arrives ahead of a gap, and verify it is neither delivered at that
       moment nor discarded, and that closing the gap releases it in sequence order
-- [ ] 5.5 Implement the store that answers requests, with its configurable fraction, and verify a
+- [x] 5.5 Implement the store that answers requests, with its configurable fraction, and verify a
       peer holding a requested message returns it, and that the maximum setting stores everything
-- [ ] 5.6 Add the timeout that moves past an unrepairable gap, and verify delivery resumes rather
+- [x] 5.6 Add the timeout that moves past an unrepairable gap, and verify delivery resumes rather
       than stalling for ever, and that the skipped message is not delivered if it arrives afterwards
 
 ## 6. The lazy module's own bounds and its reason to exist
 
-- [ ] 6.1 Bound the stored copies and the pending messages by the retention window, and verify both
+- [x] 6.1 Bound the stored copies and the pending messages by the retention window, and verify both
       stay bounded when the process handles far more messages than the window holds
-- [ ] 6.2 Verify a request for a message older than every window is answered as unavailable and the
+- [x] 6.2 Verify a request for a message older than every window is answered as unavailable and the
       requester moves past the gap, rather than searching without bound
-- [ ] 6.3 Add the recovery comparison — the same seeds, membership and loss rate with recovery and
+- [x] 6.3 Add the recovery comparison — the same seeds, membership and loss rate with recovery and
       with gossip alone — and verify coverage is higher with recovery
-- [ ] 6.4 Verify that comparison is not vacuous, by confirming the configuration is one in which
+- [x] 6.4 Verify that comparison is not vacuous, by confirming the configuration is one in which
       gossip alone fails on some runs, so there is something for recovery to improve
 
 ## 7. What this dates
 
-- [ ] 7.1 Update `docs/bounded-space.md`, which records that everything above the failure detector is
+- [x] 7.1 Update `docs/bounded-space.md`, which records that everything above the failure detector is
       an unbounded transcription, and verify its audit reflects the first two bounded implementations
-- [ ] 7.2 Add a protocol table row and a suite row to `README.md`, and verify the counts and the
-      claimed statuses against what `cargo test --workspace` prints and what the modules say
-- [ ] 7.3 Check whether `CLAUDE.md` needs the probabilistic-assertion convention stated alongside its
-      non-vacuity rule, and add it only if the convention proves to be more than these two suites
-- [ ] 7.4 Run `./scripts/check.sh` and verify it passes in full
+- [x] 7.2 Add a protocol table row and a suite row to `README.md`, and verify the counts and the
+      claimed statuses against what `cargo test --workspace` prints and what the modules say. The
+      specification tree gains `links/fair-loss-link` only when this change is archived, so that
+      line is left alone until then
+- [x] 7.3 Check whether `CLAUDE.md` needs the probabilistic-assertion convention stated alongside
+      its non-vacuity rule. **Decided against, on the task's own condition:** the convention has
+      exactly the two consumers this change created, which is not yet a convention. `CLAUDE.md`'s
+      existing rule — every property test asserts non-vacuity — already covers what these suites do;
+      what they add is one shape of it. Extract when a third protocol wants it, which is the same
+      judgement that deleted `ScopedLink`
+- [x] 7.4 Run `./scripts/check.sh` and verify it passes in full

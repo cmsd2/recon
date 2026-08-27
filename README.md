@@ -38,7 +38,7 @@ preferences, and the numbering is referred to throughout.
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 355 tests, all in-process, a few seconds
+cargo test --workspace          # 391 tests, all in-process, a few seconds
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, project guards
 ```
 
@@ -156,6 +156,8 @@ The bottom abstraction, fair-loss links, is not a module: it is what the simulat
 | Uniform reliable broadcast | [`uniform_reliable_broadcast.rs`](crates/recon-protocols/src/uniform_reliable_broadcast.rs) | Module 3.3, Alg. 3.4 | transcription | unbounded |
 | Uniform reliable broadcast, majority-ack | [`majority_ack_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/majority_ack_uniform_reliable_broadcast.rs) | Module 3.3, Alg. 3.5 | transcription, **no failure detector** | unbounded |
 | Flooding consensus | [`flooding_consensus.rs`](crates/recon-protocols/src/flooding_consensus.rs) | Module 5.1, Alg. 5.1 | academic, fail-stop | bounded by membership and rounds |
+| Probabilistic broadcast | [`probabilistic_broadcast.rs`](crates/recon-protocols/src/probabilistic_broadcast.rs) | Module 3.7, Alg. 3.9 | **implementation** | bounded by a retention window |
+| Lazy probabilistic broadcast | [`lazy_probabilistic_broadcast.rs`](crates/recon-protocols/src/lazy_probabilistic_broadcast.rs) | Module 3.7, Alg. 3.10–3.11 | **implementation** | bounded by a retention window |
 
 ### Over session links — what a deployment would run
 
@@ -401,9 +403,10 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `majority_ack_over_sessions.rs` | the same guarantees without a failure detector, over each link | 18 / 16 |
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
+| `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total | 21 / 15 |
 
-345 across the suites above, plus nine unit tests inside `recon-core` and one `compile_fail`
-doctest on the link port — 355 in total, all in one process, no ports opened.
+381 across the suites above, plus nine unit tests inside `recon-core` and one `compile_fail`
+doctest on the link port — 391 in total, all in one process, no ports opened.
 
 ## Licence
 
