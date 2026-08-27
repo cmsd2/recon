@@ -99,9 +99,9 @@ use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
+use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast, Link};
 use crate::perfect_failure_detector::{self as pfd, Heartbeat, PerfectFailureDetector};
-use crate::perfect_link as pl;
+use crate::perfect_link::{self as pl, PerfectLink};
 
 /// What this layer puts on the wire: the two messages Algorithm 5.1 sends, and nothing else.
 ///
@@ -133,9 +133,9 @@ const _: () = {
 
 /// The wire type, multiplexing the two children. Typed, so a mis-route cannot compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(bound(deserialize = "P: Ord + Deserialize<'de>"))]
-pub enum Wire<P> {
-    Broadcast(BebMsg<P>),
+#[serde(bound(deserialize = "M: Deserialize<'de>"))]
+pub enum Wire<M> {
+    Broadcast(M),
     Detector(Heartbeat),
 }
 
@@ -152,8 +152,13 @@ pub enum Ind<P> {
 }
 
 /// Regular consensus in the fail-stop model, over best-effort broadcast and a failure detector.
+///
+/// `L` is the link under the broadcast, and is a parameter rather than a fixed type: what this
+/// stack needs is a link speaking [`pl::Cmd`] and [`pl::Ind`], not one particular implementation.
+/// An application with its own driver-backed link runs this consensus over it unedited. It
+/// defaults to [`PerfectLink`], so the ordinary stack is still written `FloodingConsensus<P>`.
 #[derive(Debug)]
-pub struct FloodingConsensus<P> {
+pub struct FloodingConsensus<P, L = PerfectLink<Flood<P>>> {
     /// Every process believed correct. Shrinks on a crash indication and never grows.
     correct: BTreeSet<NodeId>,
     round: u64,
@@ -163,7 +168,7 @@ pub struct FloodingConsensus<P> {
     receivedfrom: BTreeMap<u64, BTreeSet<NodeId>>,
     /// The proposals accumulated in each round.
     proposals: BTreeMap<u64, BTreeSet<P>>,
-    beb: BestEffortBroadcast<Flood<P>>,
+    beb: BestEffortBroadcast<Flood<P>, L>,
     detector: PerfectFailureDetector,
     beb_inbox: Vec<beb::Ind<Flood<P>>>,
     det_inbox: Vec<pfd::Ind>,
@@ -172,7 +177,37 @@ pub struct FloodingConsensus<P> {
     send_inbox: Vec<beb::Ind<Flood<P>>>,
 }
 
-impl<P> FloodingConsensus<P> {
+impl<P, L> FloodingConsensus<P, L> {
+    /// Consensus among `members`, over a link the caller supplies.
+    ///
+    /// The link is anything satisfying [`Link`]; this layer never names an implementation.
+    pub fn with_link(
+        me: NodeId,
+        members: impl IntoIterator<Item = NodeId>,
+        link: L,
+        heartbeat: Duration,
+        detect_after: Duration,
+    ) -> Self {
+        let mut members: BTreeSet<NodeId> = members.into_iter().collect();
+        members.insert(me);
+        let receivedfrom = BTreeMap::from([(0, members.clone())]);
+        FloodingConsensus {
+            correct: members.clone(),
+            round: 1,
+            decision: None,
+            proposed: false,
+            receivedfrom,
+            proposals: BTreeMap::new(),
+            beb: BestEffortBroadcast::with_link(me, members.clone(), link),
+            detector: PerfectFailureDetector::new(me, members, heartbeat, detect_after),
+            beb_inbox: Vec::new(),
+            det_inbox: Vec::new(),
+            send_inbox: Vec::new(),
+        }
+    }
+}
+
+impl<P> FloodingConsensus<P, PerfectLink<Flood<P>>> {
     /// Consensus among `members`, which must include `me`.
     ///
     /// `detect_after` must exceed `heartbeat` plus the network's delivery bound, or the detector
@@ -238,14 +273,14 @@ impl<P> FloodingConsensus<P> {
     }
 }
 
-impl<P: Clone + Ord> FloodingConsensus<P> {
+impl<P: Clone + Ord, L: Link<Flood<P>>> FloodingConsensus<P, L> {
     /// Run the broadcast child, then act on what it reported.
     fn with_beb(
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(
-            &mut BestEffortBroadcast<Flood<P>>,
-            &mut ProtoCx<'_, BestEffortBroadcast<Flood<P>>>,
+            &mut BestEffortBroadcast<Flood<P>, L>,
+            &mut ProtoCx<'_, BestEffortBroadcast<Flood<P>, L>>,
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.beb_inbox);
@@ -377,10 +412,10 @@ impl<P: Clone + Ord> FloodingConsensus<P> {
     }
 }
 
-impl<P: Clone + Ord> Protocol for FloodingConsensus<P> {
+impl<P: Clone + Ord, L: Link<Flood<P>>> Protocol for FloodingConsensus<P, L> {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
-    type Msg = Wire<P>;
+    type Msg = Wire<L::Msg>;
     /// No session beneath, so no scope end can be constructed — as for both children.
     type Scope = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
@@ -407,7 +442,7 @@ impl<P: Clone + Ord> Protocol for FloodingConsensus<P> {
         }
     }
 
-    fn on_msg(&mut self, from: NodeId, msg: Wire<P>, cx: &mut ProtoCx<'_, Self>) {
+    fn on_msg(&mut self, from: NodeId, msg: Self::Msg, cx: &mut ProtoCx<'_, Self>) {
         match msg {
             Wire::Broadcast(m) => self.with_beb(cx, |beb, ccx| beb.on_msg(from, m, ccx)),
             Wire::Detector(h) => self.with_detector(cx, |d, ccx| d.on_msg(from, h, ccx)),

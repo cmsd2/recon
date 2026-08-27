@@ -17,8 +17,14 @@ const ALL: [NodeId; 3] = [A, B, C];
 
 /// Somebody else's link: no retransmission, no deduplication, no timer. It speaks the link port
 /// and nothing more, which is the whole of what a broadcast asks of it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct DriverLink<P>(core::marker::PhantomData<fn() -> P>);
+
+impl<P> Default for DriverLink<P> {
+    fn default() -> Self {
+        DriverLink(core::marker::PhantomData)
+    }
+}
 
 impl<P: Clone> Protocol for DriverLink<P> {
     type Cmd = pl::Cmd<P>;
@@ -72,4 +78,38 @@ fn the_foreign_link_really_is_a_different_stack() {
     let sent: Vec<u32> = s.trace().sends().map(|(_, _, m)| *m).collect();
     assert_eq!(sent.len(), ALL.len(), "one send per peer, and the wire is the bare payload");
     assert!(sent.iter().all(|m| *m == 9));
+}
+
+// ------------------------------- and the consensus protocol, on the same foreign link
+
+/// The scenario in full: somebody else's link, this library's consensus, neither edited.
+#[test]
+fn consensus_runs_over_a_link_the_library_never_wrote() {
+    use recon_protocols::flooding_consensus::{
+        Cmd as FcCmd, Flood, FloodingConsensus, Ind as FcInd,
+    };
+
+    const BOUND: Duration = Duration::from_millis(20);
+    type Fc = FloodingConsensus<u32, DriverLink<Flood<u32>>>;
+
+    let mut s: Sim<Fc> = Sim::new(Config::default().seed(1).synchronous(BOUND), &ALL, |me| {
+        FloodingConsensus::with_link(me, ALL, DriverLink::default(), BOUND * 2, BOUND * 6)
+    });
+    for (n, v) in ALL.iter().zip([7u32, 8, 9]) {
+        s.command(*n, FcCmd::Propose(v));
+    }
+    s.run_for(Duration::from_millis(2000));
+
+    let decisions: Vec<u32> = ALL
+        .iter()
+        .map(|n| {
+            s.trace()
+                .indications_at(*n)
+                .map(|FcInd::Decide(v)| *v)
+                .next()
+                .unwrap_or_else(|| panic!("{n} decided nothing"))
+        })
+        .collect();
+    assert!(decisions.windows(2).all(|w| w[0] == w[1]), "agreement: {decisions:?}");
+    assert!(decisions.iter().all(|d| [7, 8, 9].contains(d)), "and it was proposed");
 }

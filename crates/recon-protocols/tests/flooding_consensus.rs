@@ -5,7 +5,7 @@ use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use recon_core::{Effect, Event, MemStore, NodeId, Time, TimerId, step_with};
-use recon_protocols::flooding_consensus::{Cmd, Flood, FloodingConsensus, Ind, Wire};
+use recon_protocols::flooding_consensus::{BebMsg, Cmd, Flood, FloodingConsensus, Ind, Wire};
 use recon_sim::{Config, Sim, TraceEvent};
 
 const A: NodeId = NodeId::new(1);
@@ -252,6 +252,11 @@ fn a_decided_from_an_accused_sender_is_discarded() {
 }
 
 /// The handle the composition just registered, read out of what it emitted rather than assumed.
+///
+/// A test firing a timer must name the one the protocol is actually waiting on. Identities come
+/// from the driver's source, so they are not predictable from the test's side — which is the
+/// point: a stale expiry is distinguishable from a live one, and a test that guessed would be
+/// asserting against a timer nobody is waiting for.
 fn armed<M, I>(fx: &[Effect<M, I>]) -> TimerId {
     fx.iter()
         .find_map(|e| match e {
@@ -267,7 +272,10 @@ fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
 }
 
 /// The message this broadcast addressed to `to`, if any.
-fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>>], to: NodeId) -> Option<Wire<u32>> {
+fn addressed_to(
+    fx: &[Effect<Wire<BebMsg<u32>>, Ind<u32>>],
+    to: NodeId,
+) -> Option<Wire<BebMsg<u32>>> {
     fx.iter().find_map(|e| match e {
         Effect::Send { to: t, msg } if *t == to => Some(msg.clone()),
         _ => None,
@@ -275,7 +283,7 @@ fn addressed_to(fx: &[Effect<Wire<u32>, Ind<u32>>], to: NodeId) -> Option<Wire<u
 }
 
 /// A proposal broadcast for `round`, if these effects contain one.
-fn round_broadcast(fx: &[Effect<Wire<u32>, Ind<u32>>], round: u64) -> Option<()> {
+fn round_broadcast(fx: &[Effect<Wire<BebMsg<u32>>, Ind<u32>>], round: u64) -> Option<()> {
     fx.iter().find_map(|e| match e {
         Effect::Send { msg: Wire::Broadcast(w), .. } => match &w.payload {
             Flood::Proposal { round: r, .. } if *r == round => Some(()),
