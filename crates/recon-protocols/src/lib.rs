@@ -7,6 +7,7 @@
 //! The bottom abstraction, fair-loss links, is not here: it is what the simulator provides.
 
 pub mod best_effort_broadcast;
+pub mod fair_loss_link;
 pub mod flooding_consensus;
 pub mod link;
 pub mod logged_link;
@@ -14,6 +15,7 @@ pub mod logged_uniform_reliable_broadcast;
 pub mod majority_ack_uniform_reliable_broadcast;
 pub mod perfect_failure_detector;
 pub mod perfect_link;
+pub mod probabilistic_broadcast;
 pub mod reliable_broadcast;
 pub mod session_link;
 pub mod stacks;
@@ -22,6 +24,7 @@ pub mod stubborn_link;
 pub mod uniform_reliable_broadcast;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
+pub use fair_loss_link::FairLossLink;
 pub use flooding_consensus::FloodingConsensus;
 pub use logged_link::LoggedLink;
 pub use logged_uniform_reliable_broadcast::LoggedUniformReliableBroadcast;
