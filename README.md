@@ -331,12 +331,27 @@ that *appends* still cannot be composed, and the signature says so rather than a
 
 ### Next
 
-Eventually perfect failure detection (Module 2.8, `◇P`) — whose `Restore` turns the set of
-believed-correct processes from a monotone shrinking one into a set that can grow again, which every
-guard written against it will need re-reading for, and which would let Ω rest on what the book
-actually specifies rather than on the stronger `P` it currently derives from. That matters more here
-than it did before: in the fail-recovery model a crashed process comes *back*, and a detector whose
-accusations never retract will not trust it again.
+**Eventually perfect failure detection** (Module 2.8, `◇P`), and Ω over it. Its `Restore` turns the
+set of believed-correct processes from a monotone shrinking one into a set that can grow again,
+which lets Ω rest on what Algorithm 2.8 actually specifies rather than on the stronger `P` it
+currently derives from. That matters more here than it did before: in the fail-recovery model a
+crashed process comes *back*, and a detector whose accusations never retract will not trust it
+again — so leadership only ever walks downward, and every restart test above is working around it.
+
+Only Ω moves. Uniform reliable broadcast (Alg. 3.4) and flooding consensus need **strong** accuracy
+and keep `P`; giving them a detector that can be wrong would break their agreement, which is what
+the majority-ack version beside them exists to avoid.
+
+**Then an accrual detector.** Algorithm 2.7 adapts its timeout by adding Δ on every false suspicion
+and never subtracting, which is a ratchet: one bad period leaves detection permanently sluggish, and
+nothing reports that it has. The proposed decreasing detector fixes the ratchet and caps the growth.
+The shape a deployment actually wants goes one further — a **φ-accrual** detector (Hayashibara et
+al., 2004; Cassandra and Akka both use one) keeps a bounded window of inter-arrival times and
+reports a *suspicion level* rather than a verdict, leaving the threshold to the caller. That is the
+point of it: Ω picking a leader can be aggressive, because being wrong costs one epoch, while a
+layer deciding to stop waiting for an acknowledgement must be conservative, because being wrong
+costs safety. One detector, a threshold each, priced by what a mistake costs that caller. A boolean
+detector forces one answer on everybody.
 
 After that, `Stop`. Every logged protocol here inherits an unbounded outstanding set from the
 stubborn children, because nothing ever retires a transmission — see
