@@ -33,6 +33,27 @@ incarnation identity must come from the level that owns it, and this is that arg
 durable, and adding a store for one counter would make it the first `Meta` in the crate's most
 lightweight module. Random suffices for a `u64`.
 
+### The lazy layer's sender is the originator in one incarnation — found during apply
+
+The proposal fixed identity at the eager layer and missed that the lazy layer has the same hole
+one level up: `Data { origin, seq }` and `next[s]` are per originator, and `sn < next[s]` is
+silently ignored, so a restarted lazy originator's first messages are dropped everywhere as already
+delivered — and, once the eager layer stops deduplicating them, dropped by *this* layer instead.
+The real-world workhorse had the bug the change was named for.
+
+`Data` gains `incarnation`; a `Sender { origin, incarnation }` keys `next`, `pending`, `stored`,
+their orders and the gap timers; requests carry the incarnation. The layer draws its own incarnation
+at `Init` exactly as the eager layer does.
+
+*What bounds it.* A receiver keeps state for the **two** most recent incarnations of each
+originator and retires the oldest on hearing a third. One would flip between an incarnation being
+retired and the one replacing it while relayed copies of both are still arriving, losing both; more
+than two would keep state for processes that cannot exist. `2 × membership × window`, and a restart
+costs a purge rather than a leak.
+
+*Alternative — a durable incarnation counter.* Rejected as for the eager layer: nothing here is
+durable, and a `u64` from the seeded generator collides with probability `2⁻⁶⁴`.
+
 ### Two session links under the lazy module, on one wire
 
 `LazyProbabilisticBroadcast<P, L, G = FairLossLink<pb::Carried<Data<P>>>>` — the gossip child's

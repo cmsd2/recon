@@ -255,8 +255,10 @@ gossip protocols, and both now meet the standard. `tests/probabilistic_broadcast
 asserts a broadcast's cost as an identity — `k` sends per receipt with rounds to live, `Σ kⁱ` per
 broadcast when nothing is lost — and that an idle gossip sends **nothing**;
 `tests/lazy_probabilistic_broadcast_over_sessions.rs` asserts that a session ending is a loss the
-recovery phase repairs, at exactly `k` requests per gap. A `BroadcastId` now names its originator's
-incarnation, so a restarted originator's broadcasts are not discarded as duplicates of the old.
+recovery phase repairs, at exactly `k` requests per gap. Identity at both layers names the
+originator's incarnation, so a restarted originator's broadcasts are neither discarded as duplicates
+by the eager layer nor as already-delivered by the lazy one — and a receiver keeps state for at most
+two incarnations of each originator, so a restart costs a purge rather than a leak.
 Multi-Paxos will join the set when it is written; single-instance Paxos will not — it is the book's
 stepping stone, and is kept as one.
 
@@ -474,15 +476,15 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `majority_ack_over_sessions.rs` | the same guarantees without a failure detector, over each link | 18 / 16 |
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
-| `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total; a restarted originator's broadcasts delivered | 22 / 15 |
-| `tests/probabilistic_broadcast_over_sessions.rs`, `lazy_probabilistic_broadcast_over_sessions.rs` | the real-world set's standard: cost as an identity, silence when idle, a session ending propagated once and repaired by recovery | 6 / 4 |
+| `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total; a restarted originator's broadcasts delivered, at both layers | 22 / 18 |
+| `tests/probabilistic_broadcast_over_sessions.rs`, `lazy_probabilistic_broadcast_over_sessions.rs` | the real-world set's standard: cost as an identity, silence when idle, a session ending propagated once and repaired by recovery, a restart survived | 6 / 5 |
 | `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time | 8 / 9 / 19 |
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere | 14 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 
-484 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
-`compile_fail` on the link port, two worked examples of a storage slot — 496 in total, all in one
+488 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
+`compile_fail` on the link port, two worked examples of a storage slot — 500 in total, all in one
 process, no ports opened.
 
 ## Licence

@@ -163,7 +163,7 @@ fn one_request_addresses_the_fanout_not_the_membership() {
     let inner = pb::Gossip {
         id: pb::BroadcastId { origin: B, incarnation: 0, seq: 1 },
         ttl: 1,
-        payload: Data { origin: B, seq: 4, payload: 9u32 },
+        payload: Data { origin: B, incarnation: 0, seq: 4, payload: 9u32 },
     };
     let fx = step_with(
         &mut p,
@@ -355,7 +355,7 @@ fn arrive(
     let inner = pb::Gossip {
         id: pb::BroadcastId { origin, incarnation: 0, seq },
         ttl: 1,
-        payload: Data { origin, seq, payload },
+        payload: Data { origin, incarnation: 0, seq, payload },
     };
     step_with(
         p,
@@ -430,7 +430,7 @@ fn a_request_for_something_evicted_is_answered_as_unavailable() {
     assert!(!p.has_stored(B, 2), "sequence 2 has long since left the window");
 
     // Ask for it with no rounds left, so the only possible answer is the message itself.
-    let request = Recovery::Request { requester: C, origin: B, seq: 2, ttl: 0 };
+    let request = Recovery::Request { requester: C, origin: B, incarnation: 0, seq: 2, ttl: 0 };
     let fx = step_with(
         &mut p,
         Event::Msg { from: C, msg: Wire::Recovery(request) },
@@ -455,7 +455,7 @@ fn a_request_it_cannot_answer_is_relayed_while_it_has_rounds() {
     let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, config(3, 3, 1.0));
     let (mut r, mut ids) = (seeded(), 0);
 
-    let request = Recovery::Request { requester: C, origin: B, seq: 5, ttl: 2 };
+    let request = Recovery::Request { requester: C, origin: B, incarnation: 0, seq: 5, ttl: 2 };
     let fx = step_with(
         &mut p,
         Event::Msg { from: D, msg: Wire::Recovery(request) },
@@ -480,4 +480,114 @@ fn a_request_it_cannot_answer_is_relayed_while_it_has_rounds() {
         relayed.iter().all(|(q, ttl)| *q == C && *ttl == 1),
         "the requester is preserved and the rounds decrement: {relayed:?}"
     );
+}
+
+// ------------------------------------------------- identity is the originator in one incarnation
+
+/// `arrive`, from a named incarnation of `origin`, returning what came out.
+fn arrive_as(
+    p: &mut Lpb,
+    origin: NodeId,
+    incarnation: u64,
+    seq: u64,
+    payload: u32,
+    r: &mut rand_chacha::ChaCha8Rng,
+    ids: &mut u64,
+) -> Vec<u32> {
+    use recon_core::{Effect, Event, MemStore, Time, step_with};
+    let inner = pb::Gossip {
+        id: pb::BroadcastId { origin, incarnation, seq },
+        ttl: 1,
+        payload: Data { origin, incarnation, seq, payload },
+    };
+    step_with(
+        p,
+        Event::Msg { from: origin, msg: Wire::Gossip(inner) },
+        Time::ZERO,
+        r,
+        &mut MemStore::default(),
+        ids,
+    )
+    .into_iter()
+    .filter_map(|e| match e {
+        Effect::Indicate(Ind::Deliver { msg, .. }) => Some(msg),
+        _ => None,
+    })
+    .collect()
+}
+
+#[test]
+fn a_restarted_originators_messages_are_delivered_in_sequence_everywhere() {
+    // `next[s]` is per originator in the book, and `sn < next[s]` is the case the pseudocode does
+    // not write. A restarted originator numbers from one again; without the incarnation in the
+    // sender every receiver would drop 4, 5 and 6 as already delivered — silently.
+    let mut s = sim(41, 0.0, config(ALL.len() - 1, 1, 1.0));
+    for m in [1, 2, 3] {
+        s.command(A, Cmd::Broadcast(m));
+    }
+    s.run_for(Duration::from_millis(300));
+    s.crash(A);
+    s.restart(A);
+    for m in [4, 5, 6] {
+        s.command(A, Cmd::Broadcast(m));
+    }
+    s.run_for(Duration::from_millis(300));
+
+    for n in ALL {
+        assert_eq!(delivered_at(&s, n), vec![1, 2, 3, 4, 5, 6], "{n}");
+    }
+    // Non-vacuity: the sequence numbers really did repeat, and only the incarnation told them apart.
+    let seqs: std::collections::BTreeSet<(u64, u64)> = s
+        .trace()
+        .sends()
+        .filter_map(|(from, _, m)| match m {
+            Wire::Gossip(g) if from == A => Some((g.payload.incarnation, g.payload.seq)),
+            _ => None,
+        })
+        .collect();
+    let incarnations: std::collections::BTreeSet<u64> = seqs.iter().map(|(i, _)| *i).collect();
+    assert_eq!(incarnations.len(), 2, "two incarnations of A named themselves differently");
+    for i in incarnations {
+        assert_eq!(
+            seqs.iter().filter(|(inc, _)| *inc == i).count(),
+            3,
+            "each incarnation numbered its three messages one, two, three"
+        );
+    }
+}
+
+#[test]
+fn a_straggler_from_the_previous_incarnation_still_lands() {
+    // Two incarnations are remembered, not one: relayed copies from the incarnation being retired
+    // can arrive after the new one has begun, and a one-deep memory would flip between them.
+    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, config(2, 3, 1.0));
+    let (mut r, mut ids) = (seeded(), 0);
+
+    assert_eq!(arrive_as(&mut p, B, 1, 1, 11, &mut r, &mut ids), vec![11]);
+    assert_eq!(arrive_as(&mut p, B, 1, 2, 12, &mut r, &mut ids), vec![12]);
+    assert_eq!(arrive_as(&mut p, B, 2, 1, 21, &mut r, &mut ids), vec![21], "the new incarnation");
+    assert_eq!(arrive_as(&mut p, B, 1, 3, 13, &mut r, &mut ids), vec![13], "the straggler");
+    assert_eq!(arrive_as(&mut p, B, 2, 2, 22, &mut r, &mut ids), vec![22], "undisturbed");
+    assert_eq!(p.incarnations_of(B), 2);
+}
+
+#[test]
+fn a_third_incarnation_retires_the_oldest() {
+    let mut p: Lpb = LazyProbabilisticBroadcast::new(A, ALL, config(2, 3, 1.0));
+    let (mut r, mut ids) = (seeded(), 0);
+    for inc in [1, 2] {
+        assert_eq!(arrive_as(&mut p, B, inc, 1, inc as u32, &mut r, &mut ids), vec![inc as u32]);
+    }
+    assert!(p.has_stored(B, 1), "the latest incarnation's message is stored");
+
+    assert_eq!(arrive_as(&mut p, B, 3, 1, 3, &mut r, &mut ids), vec![3]);
+    assert_eq!(p.incarnations_of(B), 2, "two remembered, not three");
+
+    // Incarnation 1 is gone: its `next` was 2, and a message numbered 2 from it is now from a
+    // sender never heard from — ahead of a gap at 1, held and requested, not delivered.
+    let out = arrive_as(&mut p, B, 1, 2, 12, &mut r, &mut ids);
+    assert!(out.is_empty(), "a retired incarnation's message was delivered: {out:?}");
+    assert_eq!(p.pending_count(), 1, "held ahead of the gap the retirement opened");
+    // The bound is the claim: three incarnations' worth of state would be a leak per restart.
+    assert!(p.stored_count() <= 2 * 3, "stored holds at most two incarnations' windows");
 }

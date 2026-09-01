@@ -65,3 +65,29 @@ process with no gap and no request SHALL send nothing.
 
 - **WHEN** every gap is closed or skipped and every broadcast has finished relaying
 - **THEN** no further message is sent
+
+### Requirement: Identity is scoped to the originator's incarnation
+
+The sender of a message SHALL be the originator in a particular incarnation, and the sequence
+expected next, the messages held ahead of a gap and the copies stored SHALL be kept per sender. A
+receiver SHALL keep state for at most two incarnations of one originator, retiring the oldest when a
+third is heard from.
+
+#### Scenario: A restarted originator's messages are delivered
+
+- **WHEN** an originator crashes, restarts, and broadcasts again, so that its sequence numbers
+  repeat ones every receiver has already delivered
+- **THEN** the new messages are delivered in sequence, and are not dropped as already delivered
+
+#### Scenario: A straggler from the previous incarnation still lands
+
+- **WHEN** a message from an originator's previous incarnation arrives after its new incarnation
+  has been heard from
+- **THEN** it is delivered against the previous incarnation's sequence, and the new incarnation's
+  state is undisturbed
+
+#### Scenario: A third incarnation retires the oldest
+
+- **WHEN** a receiver hears from a third incarnation of one originator
+- **THEN** the oldest incarnation's sequence, pending and stored state is gone, and a message from
+  it is treated as from a sender never heard from

@@ -56,3 +56,14 @@
       clock, so a test sequences by *event* rather than by a duration guessed shorter than the
       latency. The two new suites use it to put sends in flight before ending a session; six older
       suites still use `run_for(1 ms) // in flight`, which this is the replacement for
+
+## 7. The lazy layer's own identity — found during apply
+
+- [x] 7.1 `Data` gains `incarnation`; `Sender { origin, incarnation }` keys `next`, `pending`,
+      `stored`, their orders and the gap timers; requests carry the incarnation; the layer draws its
+      own at `Init`. State the departure and the bound in the module
+- [x] 7.2 Verify a restarted lazy originator's messages are delivered in sequence everywhere, over
+      the fair-loss link and over sessions
+- [x] 7.3 Verify a straggler from the previous incarnation is still delivered against its own
+      sequence, and that a third incarnation retires the oldest — driven directly, since the
+      simulator cannot hand a process a message from an incarnation that no longer exists

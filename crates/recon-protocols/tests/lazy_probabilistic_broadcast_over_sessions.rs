@@ -225,3 +225,32 @@ fn both_links_see_the_session_and_its_ending_is_reported_once() {
     assert_eq!(ended, 1, "A was told the session with B ended {ended} times");
     assert_eq!(established, 2, "A was told of {established} establishments — first, and again");
 }
+
+// ------------------------------------------------- identity survives the originator: task 7.2
+
+#[test]
+fn a_restarted_originators_messages_are_delivered_in_sequence_over_sessions() {
+    // A restart ends every session the originator held and its sequence numbers start again. Both
+    // are exactly what a deployment does. Every receiver must deliver all six, in order.
+    let mut s = sim(5, direct(ROOMY));
+    for m in [1, 2, 3] {
+        s.command(A, Cmd::Broadcast(m));
+    }
+    s.run_for(Duration::from_millis(300));
+    s.crash(A);
+    s.restart(A);
+    // A send in the instant a session ended goes nowhere — a transport does not reopen a connection
+    // in the same instant it closed one. Wait for the sessions to be back, by that event.
+    while ALL.iter().any(|n| *n != A && !s.has_session(A, *n)) {
+        s.run_for(Duration::from_millis(10));
+    }
+    for m in [4, 5, 6] {
+        s.command(A, Cmd::Broadcast(m));
+    }
+    s.run_for(Duration::from_millis(500));
+
+    for n in ALL {
+        assert_eq!(delivered_at(&s, n), vec![1, 2, 3, 4, 5, 6], "{n}");
+    }
+    assert!(s.trace().session_ends() >= ALL.len() - 1, "the crash ended A's sessions");
+}

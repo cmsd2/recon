@@ -111,6 +111,27 @@
 //! simplicity." Both `stored` and `pending` are bounded here by a per-sender window and evicted on
 //! insert, for the reasons [`crate::probabilistic_broadcast`] gives at length. A request for
 //! something evicted is answered as unavailable, and the requester's timeout moves it past the gap.
+//!
+//! # Identity is scoped to the originator's incarnation — departure
+//!
+//! The book's `s` is a process, and `next[s]`, `pending` and `stored` are keyed by it. `lsn` is
+//! volatile, so a process that crashes and comes back numbers its messages from one again — and
+//! every receiver, holding `next[s] = 4`, would drop its first three as already delivered, silently,
+//! through the `sn < next[s]` case the pseudocode does not even write. Under the book's crash-stop
+//! model that case never arises; in the real-world set it is the first thing a restart does.
+//!
+//! So the sender of a [`Data`] is a [`Sender`] — the originator **and its incarnation**, a value
+//! drawn from the seeded generator at `Init` exactly as [`crate::probabilistic_broadcast`] draws
+//! its own — and every per-sender structure is keyed by that. A restarted originator is a new
+//! sender with `next = 1`, and its messages are delivered.
+//!
+//! What bounds it: a receiver remembers the **two most recent incarnations** of each originator, and
+//! admitting a third retires the oldest — its `next`, its pending and stored messages, its timers.
+//! Two rather than one because relayed copies from the incarnation just retired can still be
+//! arriving while the new one's begin, and a one-deep memory would flip between them, losing both.
+//! Two rather than more because a process has one live incarnation and at most one being retired;
+//! a message from an incarnation older than that is a straggler this abstraction may lose. State is
+//! therefore bounded by `2 × membership × window`, and a restart costs one purge, not a leak.
 
 use core::time::Duration;
 use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
@@ -126,17 +147,36 @@ use crate::probabilistic_broadcast::{self as pb, ProbabilisticBroadcast};
 pub struct Data<P> {
     /// `s` — who originated it.
     pub origin: NodeId,
+    /// Which incarnation of `origin`. See the module note on identity.
+    pub incarnation: u64,
     /// `sn` — that sender's sequence number for it.
     pub seq: u64,
     pub payload: P,
 }
+
+impl<P> Data<P> {
+    /// The book's `s`, as this module keys on it: the originator in a particular incarnation.
+    pub fn sender(&self) -> Sender {
+        Sender { origin: self.origin, incarnation: self.incarnation }
+    }
+}
+
+/// An originator in one incarnation — what `next`, `pending` and `stored` are keyed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Sender {
+    pub origin: NodeId,
+    pub incarnation: u64,
+}
+
+/// How many incarnations of one originator a receiver keeps state for. See the module note.
+const INCARNATIONS_REMEMBERED: usize = 2;
 
 /// What travels over the link directly, outside the gossip: `[REQUEST, …]` and its answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Recovery<P> {
     /// `[REQUEST, q, s, sn, r]` — `q` is the process that wants it, carried so that whoever holds
     /// it answers the requester rather than the relayer.
-    Request { requester: NodeId, origin: NodeId, seq: u64, ttl: u32 },
+    Request { requester: NodeId, origin: NodeId, incarnation: u64, seq: u64, ttl: u32 },
     /// `[DATA, s, m, sn]` sent back to a requester.
     Data(Data<P>),
 }
@@ -210,19 +250,24 @@ pub struct LazyProbabilisticBroadcast<
     me: NodeId,
     peers: BTreeSet<NodeId>,
     config: Config,
+    /// This incarnation's name, drawn at `Init`. Zero until then.
+    incarnation: u64,
     /// `lsn` — this process's own sequence counter.
     lsn: u64,
+    /// The incarnations of each originator this process keeps state for, oldest first. At most
+    /// [`INCARNATIONS_REMEMBERED`]; admitting another retires the oldest.
+    incarnations: BTreeMap<NodeId, VecDeque<u64>>,
     /// `next[s]` — the next sequence number expected from `s`. Absent means one, per `[1]^N`.
-    next: BTreeMap<NodeId, u64>,
+    next: BTreeMap<Sender, u64>,
     /// `pending` — received, but ahead of a gap.
-    pending: BTreeMap<(NodeId, u64), P>,
+    pending: BTreeMap<(Sender, u64), P>,
     /// `stored` — kept so this process can answer a request.
-    stored: BTreeMap<(NodeId, u64), P>,
+    stored: BTreeMap<(Sender, u64), P>,
     /// Insertion order per sender, so both collections evict in constant time.
-    pending_order: BTreeMap<NodeId, VecDeque<u64>>,
-    stored_order: BTreeMap<NodeId, VecDeque<u64>>,
+    pending_order: BTreeMap<Sender, VecDeque<u64>>,
+    stored_order: BTreeMap<Sender, VecDeque<u64>>,
     /// Which gap each outstanding timer is waiting on.
-    timers: BTreeMap<TimerId, (NodeId, u64)>,
+    timers: BTreeMap<TimerId, (Sender, u64)>,
     upb: Child<Gossiper<P, G>>,
     link: Child<L>,
 }
@@ -280,7 +325,9 @@ where
             me,
             peers: peers.clone(),
             config,
+            incarnation: 0,
             lsn: 0,
+            incarnations: BTreeMap::new(),
             next: BTreeMap::new(),
             pending: BTreeMap::new(),
             stored: BTreeMap::new(),
@@ -303,8 +350,26 @@ where
     }
 
     /// `next[s]`, which is one until this process has delivered anything from `s`.
+    pub fn next_expected_of(&self, sender: Sender) -> u64 {
+        self.next.get(&sender).copied().unwrap_or(1)
+    }
+
+    /// `next[s]` for the incarnation of `from` most recently heard from, or one if none has been.
     pub fn next_expected(&self, from: NodeId) -> u64 {
-        self.next.get(&from).copied().unwrap_or(1)
+        self.latest(from).map(|s| self.next_expected_of(s)).unwrap_or(1)
+    }
+
+    /// The incarnation of `from` most recently admitted, if any.
+    pub fn latest(&self, from: NodeId) -> Option<Sender> {
+        self.incarnations
+            .get(&from)
+            .and_then(|v| v.back())
+            .map(|incarnation| Sender { origin: from, incarnation: *incarnation })
+    }
+
+    /// How many incarnations of `from` this process keeps state for.
+    pub fn incarnations_of(&self, from: NodeId) -> usize {
+        self.incarnations.get(&from).map(|v| v.len()).unwrap_or(0)
     }
 
     /// How many messages this process is holding ahead of a gap.
@@ -317,9 +382,10 @@ where
         self.stored.len()
     }
 
-    /// Whether this process could answer a request for `(origin, seq)`.
+    /// Whether this process could answer a request for `seq` from the incarnation of `origin`
+    /// most recently heard from.
     pub fn has_stored(&self, origin: NodeId, seq: u64) -> bool {
-        self.stored.contains_key(&(origin, seq))
+        self.latest(origin).is_some_and(|s| self.stored.contains_key(&(s, seq)))
     }
 }
 
@@ -375,6 +441,9 @@ where
     fn on_upb_deliver(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
         use rand::Rng;
 
+        let sender = data.sender();
+        self.admit(sender);
+
         // `if random([0, 1]) > α then stored := stored ∪ {…}`, with α restated as its complement.
         // Before the sequence checks, so a message this process cannot deliver yet is still one it
         // can answer a request for.
@@ -382,43 +451,65 @@ where
             self.store(data.clone());
         }
 
-        let next = self.next_expected(data.origin);
+        let next = self.next_expected_of(sender);
         if data.seq == next {
-            self.next.insert(data.origin, next + 1);
+            self.next.insert(sender, next + 1);
             cx.indicate(Ind::Deliver { from: data.origin, msg: data.payload });
-            self.drain_pending(data.origin, cx);
+            self.drain_pending(sender, cx);
         } else if data.seq > next {
             // `forall missing ∈ [next[s], …, sn − 1] do if no m′ … ∈ pending then gossip(REQUEST)`.
             // The guard is `pending`, and nothing else: the book re-requests a gap on every
             // out-of-order arrival that does not already have it pending. That looks like a defect
             // and was once reported as one; it is the page.
             for missing in next..data.seq {
-                if !self.pending.contains_key(&(data.origin, missing)) {
-                    self.request(data.origin, missing, cx);
+                if !self.pending.contains_key(&(sender, missing)) {
+                    self.request(sender, missing, cx);
                 }
             }
-            let (origin, seq) = (data.origin, data.seq);
+            let seq = data.seq;
             self.hold(data);
             // `starttimer(Δ, s, sn)` — one timer per gap, remembered by its handle so the expiry
             // can be matched back to the gap it was waiting on.
             let id = cx.set_timer(self.config.gap_timeout);
-            self.timers.insert(id, (origin, seq));
+            self.timers.insert(id, (sender, seq));
+        }
+    }
+
+    /// Note an incarnation of an originator, retiring the oldest if this makes one too many. See
+    /// the module note on identity for why two, and what retiring costs.
+    fn admit(&mut self, sender: Sender) {
+        let known = self.incarnations.entry(sender.origin).or_default();
+        if known.contains(&sender.incarnation) {
+            return;
+        }
+        known.push_back(sender.incarnation);
+        if known.len() > INCARNATIONS_REMEMBERED
+            && let Some(retired) = known.pop_front()
+        {
+            let retired = Sender { origin: sender.origin, incarnation: retired };
+            self.next.remove(&retired);
+            self.pending.retain(|(s, _), _| *s != retired);
+            self.stored.retain(|(s, _), _| *s != retired);
+            self.pending_order.remove(&retired);
+            self.stored_order.remove(&retired);
+            self.timers.retain(|_, (s, _)| *s != retired);
         }
     }
 
     /// `upon event ⟨ fll, Deliver | p, [REQUEST | DATA, …] ⟩` — Algorithm 3.11.
     fn on_recovery(&mut self, r: Recovery<P>, cx: &mut ProtoCx<'_, Self>) {
         match r {
-            Recovery::Request { requester, origin, seq, ttl } => {
-                if let Some(payload) = self.stored.get(&(origin, seq)).cloned() {
+            Recovery::Request { requester, origin, incarnation, seq, ttl } => {
+                let sender = Sender { origin, incarnation };
+                if let Some(payload) = self.stored.get(&(sender, seq)).cloned() {
                     // `trigger ⟨ fll, Send | q, [DATA, s, m, sn] ⟩` — to the requester, not the
                     // relayer, which is why `q` travels in the request.
-                    let answer = Recovery::Data(Data { origin, seq, payload });
+                    let answer = Recovery::Data(Data { origin, incarnation, seq, payload });
                     self.send_to(requester, answer, cx);
                 } else if ttl > 0 {
                     // `else if r > 0 then gossip([REQUEST, q, s, sn, r − 1])` — `q` is preserved.
                     self.gossip_request(
-                        Recovery::Request { requester, origin, seq, ttl: ttl - 1 },
+                        Recovery::Request { requester, origin, incarnation, seq, ttl: ttl - 1 },
                         cx,
                     );
                 }
@@ -427,9 +518,10 @@ where
             // A recovered message joins `pending` and is released by the standing condition, which
             // is what lets it close a gap without a second code path for delivery.
             Recovery::Data(data) => {
-                let origin = data.origin;
+                let sender = data.sender();
+                self.admit(sender);
                 self.hold(data);
-                self.drain_pending(origin, cx);
+                self.drain_pending(sender, cx);
             }
         }
     }
@@ -438,22 +530,23 @@ where
     ///
     /// A loop rather than a single step: closing one gap can release an arbitrarily long run, and
     /// the book's `upon` is re-evaluated after every change.
-    fn drain_pending(&mut self, from: NodeId, cx: &mut ProtoCx<'_, Self>) {
-        while let Some(payload) = self.pending.remove(&(from, self.next_expected(from))) {
-            let seq = self.next_expected(from);
+    fn drain_pending(&mut self, from: Sender, cx: &mut ProtoCx<'_, Self>) {
+        while let Some(payload) = self.pending.remove(&(from, self.next_expected_of(from))) {
+            let seq = self.next_expected_of(from);
             self.next.insert(from, seq + 1);
             if let Some(order) = self.pending_order.get_mut(&from) {
                 order.retain(|s| *s != seq);
             }
-            cx.indicate(Ind::Deliver { from, msg: payload });
+            cx.indicate(Ind::Deliver { from: from.origin, msg: payload });
         }
     }
 
     /// `gossip([REQUEST, self, s, missing, R − 1])` — over the link, not through the gossip child.
-    fn request(&mut self, origin: NodeId, seq: u64, cx: &mut ProtoCx<'_, Self>) {
+    fn request(&mut self, from: Sender, seq: u64, cx: &mut ProtoCx<'_, Self>) {
         let r = Recovery::Request {
             requester: self.me,
-            origin,
+            origin: from.origin,
+            incarnation: from.incarnation,
             seq,
             ttl: self.config.request_rounds.saturating_sub(1),
         };
@@ -490,28 +583,28 @@ where
 
     /// `pending := pending ∪ {[DATA, s, m, sn]}`, bounded by the window.
     fn hold(&mut self, data: Data<P>) {
-        let key = (data.origin, data.seq);
-        if self.pending.insert(key, data.payload).is_none() {
-            let order = self.pending_order.entry(data.origin).or_default();
+        let sender = data.sender();
+        if self.pending.insert((sender, data.seq), data.payload).is_none() {
+            let order = self.pending_order.entry(sender).or_default();
             order.push_back(data.seq);
             if order.len() > self.config.window
                 && let Some(evicted) = order.pop_front()
             {
-                self.pending.remove(&(data.origin, evicted));
+                self.pending.remove(&(sender, evicted));
             }
         }
     }
 
     /// `stored := stored ∪ {[DATA, s, m, sn]}`, bounded by the window.
     fn store(&mut self, data: Data<P>) {
-        let key = (data.origin, data.seq);
-        if self.stored.insert(key, data.payload).is_none() {
-            let order = self.stored_order.entry(data.origin).or_default();
+        let sender = data.sender();
+        if self.stored.insert((sender, data.seq), data.payload).is_none() {
+            let order = self.stored_order.entry(sender).or_default();
             order.push_back(data.seq);
             if order.len() > self.config.window
                 && let Some(evicted) = order.pop_front()
             {
-                self.stored.remove(&(data.origin, evicted));
+                self.stored.remove(&(sender, evicted));
             }
         }
     }
@@ -539,7 +632,7 @@ where
     /// what puts this process's own messages through the same sequence check as everyone else's.
     fn on_cmd(&mut self, Cmd::Broadcast(payload): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.lsn += 1;
-        let data = Data { origin: self.me, seq: self.lsn, payload };
+        let data = Data { origin: self.me, incarnation: self.incarnation, seq: self.lsn, payload };
         self.through_upb(cx, |upb, ccx| upb.on_cmd(pb::Cmd::Broadcast(data), ccx));
     }
 
@@ -556,10 +649,10 @@ where
     /// waiting on, not to it. Whatever is now deliverable is released by the standing condition,
     /// which is why the drain follows.
     fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
-        if let Some((origin, seq)) = self.timers.remove(&id) {
-            if seq > self.next_expected(origin) {
-                self.next.insert(origin, seq + 1);
-                self.drain_pending(origin, cx);
+        if let Some((sender, seq)) = self.timers.remove(&id) {
+            if seq > self.next_expected_of(sender) {
+                self.next.insert(sender, seq + 1);
+                self.drain_pending(sender, cx);
             }
             return;
         }
@@ -576,7 +669,9 @@ where
         self.through_link(cx, |link, ccx| link.on_scope_event(scope, ccx));
     }
 
+    /// Name this incarnation, then start the children. Runs on every restart, which is the point.
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.incarnation = cx.rng().next_u64();
         self.through_upb(cx, |upb, ccx| upb.on_init(ccx));
         self.through_link(cx, |link, ccx| link.on_init(ccx));
     }
