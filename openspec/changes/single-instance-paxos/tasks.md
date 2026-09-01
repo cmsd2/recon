@@ -51,20 +51,20 @@
 
 ## 4. Read/write epoch consensus, tested before anything composes over it
 
-- [ ] 4.1 Add the module per Algorithm 5.6 — read from a majority, write to a majority, decide — and
+- [x] 4.1 Add the module per Algorithm 5.6 — read from a majority, write to a majority, decide — and
       verify a single epoch with a correct leader and no faults decides the proposed value
-- [ ] 4.2 Verify no decision is reached when fewer than a majority have accepted, by withholding
+- [x] 4.2 Verify no decision is reached when fewer than a majority have accepted, by withholding
       acceptances from all but a minority
-- [ ] 4.3 Verify a value decided in one epoch is among what a later epoch reads from a majority,
+- [x] 4.3 Verify a value decided in one epoch is among what a later epoch reads from a majority,
       which is the intersection argument the whole algorithm rests on
-- [ ] 4.4 Implement the abort handshake and verify an abandoned instance reports the value and
+- [x] 4.4 Implement the abort handshake and verify an abandoned instance reports the value and
       timestamp it accepted
-- [ ] 4.5 Verify an abandoned instance is **silent**: deliver a message to an instance that has been
+- [x] 4.5 Verify an abandoned instance is **silent**: deliver a message to an instance that has been
       abandoned and assert it sends nothing and decides nothing. Getting this wrong is a safety bug
       rather than a liveness one
-- [ ] 4.6 Verify only the epoch's leader initiates a read or a write, and that a follower asked to
+- [x] 4.6 Verify only the epoch's leader initiates a read or a write, and that a follower asked to
       propose initiates nothing
-- [ ] 4.7 Verify nothing is decided that was not proposed, and that a process decides at most once
+- [x] 4.7 Verify nothing is decided that was not proposed, and that a process decides at most once
       per epoch
 
 ## 5. Leader-driven consensus — Paxos
