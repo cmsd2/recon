@@ -333,57 +333,197 @@ that *appends* still cannot be composed, and the signature says so rather than a
 
 ### Next
 
-**Eventually perfect failure detection** (Module 2.8, `◇P`), and Ω over it. Its `Restore` turns the
-set of believed-correct processes from a monotone shrinking one into a set that can grow again,
-which lets Ω rest on what Algorithm 2.8 actually specifies rather than on the stronger `P` it
-currently derives from. That matters more here than it did before: in the fail-recovery model a
-crashed process comes *back*, and a detector whose accusations never retract will not trust it
-again — so leadership only ever walks downward, and every restart test above is working around it.
+Two tracks. The **protocol** track continues the book's sequence; the **evidence** track builds what
+would let a failure be found rather than anticipated. They are independent until the last item,
+where they meet.
 
-Only Ω moves. Uniform reliable broadcast (Alg. 3.4) and flooding consensus need **strong** accuracy
-and keep `P`; giving them a detector that can be wrong would break their agreement, which is what
-the majority-ack version beside them exists to avoid.
+```
+protocol track                        evidence track
+──────────────                        ──────────────
+1. accrual detector                   A. non-transitive partitions
+2. defensive re-announcement          B. per-node clocks, and skew
+3. Stop                               C. invocations in the trace
+4. a replicated-log port              D. indeterminate outcomes
+5. multi-Paxos ┐                      E. shrinking
+   ZAB         ├── over it ───┐       F. logging and tracing
+   VR, Raft…   ┘              │       G. a concurrent workload
+                              └───────┴──▶  H. a checker, written once
+                                             against the port
+```
 
-**Then an accrual detector.** Algorithm 2.7 adapts its timeout by adding Δ on every false suspicion
-and never subtracting, which is a ratchet: one bad period leaves detection permanently sluggish, and
-nothing reports that it has. The proposed decreasing detector fixes the ratchet and caps the growth.
-The shape a deployment actually wants goes one further — a **φ-accrual** detector (Hayashibara et
-al., 2004; Cassandra and Akka both use one) keeps a bounded window of inter-arrival times and
-reports a *suspicion level* rather than a verdict, leaving the threshold to the caller. That is the
-point of it: Ω picking a leader can be aggressive, because being wrong costs one epoch, while a
-layer deciding to stop waiting for an acknowledgement must be conservative, because being wrong
-costs safety. One detector, a threshold each, priced by what a mistake costs that caller. A boolean
-detector forces one answer on everybody.
+`H` is the only item needing both tracks, and it is last for a reason given under it.
 
-**Then defensive re-announcement of standing facts.** The current leader, the current epoch, the
-membership: things that are *state*, not events, and that a process joining late or recovering has no
-way to ask for. `epoch_change` already carries one repair for this — a process tells a leader where
-it has reached, because an edge-triggered `⟨Ω, Trust⟩` never tells a leader that never changed its
-mind — and that repair is narrow, reactive and was found by a test failing rather than by design. The
-general form is that a holder of a standing fact re-announces it periodically, so a process that
-missed the edge converges without anyone having to have anticipated how it missed it. It costs
-standing traffic against a stack that is otherwise silent when idle, so it wants measuring rather
-than assuming, and it belongs to the real-world set rather than to the transcriptions.
+**The evidence track is shared infrastructure, and that is what makes it worth its cost.** A
+history model, a nemesis, a shrinker and a checker are built once and then serve multi-Paxos, ZAB,
+viewstamped replication and anything else that replicates a log — the same way `link.rs` serves
+every broadcast and `detector.rs` now serves Ω. None of it is scaffolding for one protocol.
 
-**And logging and tracing, which this project has been doing by hand.** Every diagnosis in these
-notes was reached by writing a throwaway test that printed a trace and reading it: the epoch that
-climbed to 647,309, the send rate that grew 12.6k → 76.6k per window, the leader that was trusted by
-everyone and announced nothing. That works because the simulator holds the whole run in memory, and
-it stops working the moment anything runs outside one. What is missing is a way for a protocol to
-*say* what it is doing — `tracing` spans and structured events at the decision points a reader would
-want under a real failure: an epoch entered, a suspicion raised or withdrawn, a quorum reached, a
-write made durable, a scope ended.
+#### What "Jepsen tests" means here, and what it does not
 
-Two constraints shape it. A protocol is a synchronous state machine that reaches for nothing
-ambient, so a subscriber cannot be a global the way `tracing` usually installs one — it arrives
-through `Cx` like time and randomness do, or the constraint is broken. And the sim's trace is
-already the project's standard of evidence, so the two must not become rival accounts of the same
-run: the trace records what happened *to* a protocol, and this would record what the protocol
-*decided*, which is the half that currently has to be inferred.
+Not the tool. Jepsen is Clojure, drives a real cluster over SSH, and cannot reproduce a failure from
+a seed — all three are things constraints 1, 2 and 3 rule out for now. What is worth having is its
+**discipline**: record a history of client operations as intervals, inject faults while it runs, and
+then *check the history against a model* rather than against a property somebody thought to assert.
 
-After that, `Stop`. Every logged protocol here inherits an unbounded outstanding set from the
-stubborn children, because nothing ever retires a transmission — see
-[`docs/bounded-space.md`](docs/bounded-space.md).
+Measured against that, most of the machinery is already here. The simulator is a better nemesis host
+than a real cluster — seeded, reproducible, and with faults a real cluster cannot express, such as
+`crash_on_next_write`, which kills a process *inside* the write and lets the seed decide whether it
+landed. What is missing is the history and the checker, and items `C` to `H` are that.
+
+#### 1. An accrual detector
+
+Algorithm 2.7 adapts its timeout by adding Δ on every false suspicion and never subtracting, which
+is a ratchet: one bad period leaves detection permanently sluggish, and nothing reports that it has.
+`eventually_perfect_failure_detector` fixes the ratchet and caps the growth. The shape a deployment
+actually wants goes one further — a **φ-accrual** detector (Hayashibara et al., 2004; Cassandra and
+Akka both use one) keeps a bounded window of inter-arrival times and reports a *suspicion level*
+rather than a verdict, leaving the threshold to the caller. That is the point of it: Ω picking a
+leader can be aggressive, because being wrong costs one epoch, while a layer deciding to stop waiting
+for an acknowledgement must be conservative, because being wrong costs safety. One detector, a
+threshold each, priced by what a mistake costs that caller. A boolean detector forces one answer on
+everybody. It needs the detector port `decreasing-eventually-perfect-detector` built.
+
+#### 2. Defensive re-announcement of standing facts
+
+The current leader, the current epoch, the membership: things that are *state*, not events, and that
+a process joining late or recovering has no way to ask for. `epoch_change` already carries one repair
+for this — a process tells a leader where it has reached, because an edge-triggered `⟨Ω, Trust⟩`
+never tells a leader that never changed its mind — and that repair is narrow, reactive, and was found
+by a test failing rather than by design. The general form is that a holder of a standing fact
+re-announces it periodically, so a process that missed the edge converges without anyone having had
+to anticipate how it missed it. It costs standing traffic against a stack that is otherwise silent
+when idle, so it wants measuring rather than assuming, and it belongs to the real-world set.
+
+#### 3. `Stop`
+
+Every logged protocol here inherits an unbounded outstanding set from the stubborn children, because
+nothing ever retires a transmission — see [`docs/bounded-space.md`](docs/bounded-space.md).
+
+#### 4–5. A replicated-log port, and the protocols that implement it
+
+The first object in this repository with a *concurrent* interface: a log that many clients append to
+and read from, with operations overlapping in time. Everything up to here decides one value once,
+which is why `H` cannot come earlier — see under it.
+
+The port matters more than any one protocol behind it. Multi-Paxos, ZAB, viewstamped replication and
+Raft solve the same problem by different routes, and this repository's habit is to build such a pair
+and hold both to the same properties: uniform reliable broadcast against its majority-ack twin,
+flooding consensus against Paxos. Doing that here means the *suite* belongs to the port and the
+implementations are type arguments, exactly as the broadcasts take a link and Ω now takes a detector.
+
+That is also what pays for the evidence track. A checker written against the port checks every
+protocol behind it; a nemesis schedule that breaks one can be replayed against the others. The
+comparison is the point — where they differ is in what they assume, and a shared suite is what makes
+the difference visible rather than asserted.
+
+#### A. Non-transitive partitions
+
+`Sim::partition` takes groups, so a partition is symmetric **and transitive**: the network is always
+a set of islands. Real ones are not.
+
+```
+    A ←──────→ B        A reaches B
+               │        B reaches C
+               ↕        A does NOT reach C
+               C
+```
+
+`B` sees everyone; `A` and `C` each see a different world and neither is wrong. Quorum intersection
+survives it, but *leader election* does not obviously: this whole stack rests on Ω converging, and Ω
+converges by every process computing `maxrank` of the same set. This is the cheapest new fault to
+add and the likeliest to find something.
+
+#### B. Per-node clocks, and skew
+
+`Sim` holds one global `now`, so there is no way to express two processes disagreeing about the time.
+The failure detector is *entirely* about time, and the accrual detector above derives its threshold
+from measured intervals — so this is the fault that stack is most exposed to and least tested
+against. It is a real change to the simulator rather than a knob.
+
+#### C. Invocations in the trace
+
+The foundational one, and small. `Sim::command` schedules an operation and never records it, and
+`TraceEvent` has `Indicated` but nothing for the invocation. So the trace holds completions without
+the instants that began them:
+
+```
+Jepsen history               this trace
+──────────────               ──────────
+{:invoke :read  …}           (nothing)
+{:ok     :read 3}            Indicated { at, node, ind }
+     ▲         ▲
+     └─────────┴─ an interval        an instant
+```
+
+Linearizability is *defined* over the interval `[invoke, complete]` — an operation may take effect
+anywhere inside it — so no checker is possible without this, whatever else is built. It pays for
+itself immediately regardless: no test can currently ask how long an operation took, or whether two
+of them overlapped.
+
+#### D. Indeterminate outcomes
+
+Jepsen's third result is `:info` — *this may or may not have happened* — and it is the one that
+matters most, because it is what a client experiences when its connection drops mid-write. A
+`Propose` whose process crashes before any `Decide` is exactly that, and this repository currently
+models it as *nothing happened*, which is a claim the code is not entitled to make: the value may
+well be sitting in a quorum's `pending`. A checker fed that history would be reasoning from a false
+premise. Needs an operation identity spanning invocation and outcome, so it follows `C`.
+
+#### E. Shrinking
+
+The thing this project can do that Jepsen cannot. Jepsen hands you a ten-thousand-operation history
+and a failure and you read it; it cannot reliably reproduce, so it cannot minimise. A seeded
+deterministic simulator can bisect the fault schedule, the operations and the run length until what
+is left is a counterexample somebody can read.
+
+Every diagnosis in these notes was reached by hand-writing a throwaway probe and printing a trace:
+the epoch that climbed to 647,309, the send rate that grew 12.6k → 76.6k per window, the leader
+trusted by everyone that announced nothing. A shrinker would have handed those over. It needs
+nothing that does not already exist, and it improves every suite already written.
+
+#### F. Logging and tracing
+
+What a protocol *says* it is doing, as against what the trace records happening *to* it — `tracing`
+spans and structured events at the decision points a reader would want under a real failure: an epoch
+entered, a suspicion raised or withdrawn, a quorum reached, a write made durable, a scope ended.
+Paired with `E`, that is the debugging story: a minimal schedule, and a narrated run of it.
+
+Two constraints shape it. A protocol reaches for nothing ambient, so a subscriber cannot be a global
+the way `tracing` usually installs one — it arrives through `Cx` like time and randomness do, or the
+constraint is broken. And the sim's trace is already the standard of evidence, so the two must not
+become rival accounts of one run.
+
+#### G. A concurrent workload
+
+A generator that issues overlapping operations against many processes at once, rather than the fixed
+scripts every suite writes by hand today. Needs `C`, because an operation without an invocation has
+no interval to overlap with.
+
+#### H. A checker, written once against the port
+
+Last, and the ordering is the point: **a checker over a history that is trivially linearizable
+proves nothing.** Single-shot consensus decides one value once, and its agreement, validity and
+termination are three lines of direct assertion — better than a general checker, not worse. The
+question becomes hard only when operations overlap and read each other's writes, which is `4`.
+
+Two models, and which one a protocol claims is part of what it is. A replicated log claims a **total
+order**: every process sees the same sequence of entries, which is checkable directly from the
+histories without searching. A register above it claims **linearizability**, which is the harder
+question and needs the interval from `C` — an operation may take effect anywhere inside it. Written
+against the port, both checks apply to every implementation behind it.
+
+One caution particular to this project. A checker is exactly the kind of test
+[`tests/method.rs`](crates/recon-protocols/tests/method.rs) exists to reject: it passes trivially on
+a history with no concurrency, and Jepsen has no answer to that. Adopting one means extending the
+non-vacuity discipline to it — assert the history *contained* overlapping operations, and assert the
+checker can fail, by feeding it a mutated history and confirming it is rejected. A checker that has
+never rejected anything is a checker nobody has tested.
+
+#### Further out
+
+Running the real thing, against a real cluster, over a real network — which is constraint 5's
+territory and not before it. The value of doing `A` to `H` first is that by then a failure Jepsen
+finds can be *reproduced* in the simulator from a seed, which is the half Jepsen itself cannot do.
 
 ## Examples
 
