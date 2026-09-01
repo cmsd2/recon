@@ -417,7 +417,8 @@ openspec/specs/
 ├── simulation/                        determinism, faults, sessions, the trace
 ├── links/                             the port, fair-loss, stubborn, perfect,
 │                                      session, logged
-├── failure-detection/                 perfect failure detector, eventual
+├── failure-detection/                 perfect and eventually perfect failure
+│                                      detectors, the detector port, eventual
 │                                      leader detector
 ├── broadcast/                         best-effort, reliable, uniform reliable,
 │                                      majority-ack, the logged ones, and the
