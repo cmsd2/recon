@@ -106,6 +106,15 @@
 //! - `store` is a rewrite of the same value on a repeat, which is idempotent, but it is still a
 //!   write. `WRITE` is applied only when it changes something, so the write count stays one per
 //!   acceptance and a test can check that rather than take it on trust.
+//! - **A follower answers `READ` once and `WRITE` once.** The book answers every delivery. Over a
+//!   stubborn link the answer is itself retransmitted until this instance ends, so a second answer
+//!   to a redelivered `READ` is a second stubborn transmission carrying the same content — and
+//!   since redeliveries never stop, neither would the transmissions. Measured before this guard: the
+//!   send rate grew linearly in time, 12.6k → 76.6k per 400 ms across five windows, with nothing
+//!   faulty. One answer is enough for the same reason retransmission exists at all: a leader that
+//!   crashed and came back re-proposes, and what reaches its new incarnation is the follower's
+//!   *original* reply, still going. A follower that crashes forgets it answered and answers again,
+//!   which is correct — its link forgot the transmission too.
 //!
 //! # Departure: messages carry the epoch they belong to
 //!
@@ -130,7 +139,7 @@
 //! EPC5 [always]  Abort behaviour — an abandoned instance reports its state and then is silent
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -220,7 +229,7 @@ pub enum Ind<V> {
 
 /// Abortable consensus within one epoch, whose acceptances survive a restart.
 #[derive(Debug)]
-pub struct LoggedEpochConsensus<V> {
+pub struct LoggedEpochConsensus<V: Clone> {
     me: NodeId,
     peers: BTreeSet<NodeId>,
     /// `ets` — this instance's epoch timestamp.
@@ -241,16 +250,18 @@ pub struct LoggedEpochConsensus<V> {
     announced: bool,
     /// Whether the decision has been reported upward, so a repeated `DECIDED` decides once.
     decided: bool,
+    /// Whether this follower has answered the leader's `READ`. One stubborn reply is enough.
+    state_sent: bool,
+    /// Whether this follower has answered the leader's `WRITE`. Likewise.
+    accept_sent: bool,
     /// `halt`. Every handler returns immediately once this is set.
     aborted: bool,
     /// Names the next stubborn transmission. Volatile, and so is what it keys.
     next_send: u64,
     /// Names the next stubborn broadcast. Volatile, and so is what it keys.
     next_broadcast: u64,
-    sbeb: StubbornBroadcast<Tagged<Announce<V>>>,
-    sl: StubbornLink<Tagged<Reply<V>>>,
-    sbeb_inbox: Vec<sbeb::Ind<Tagged<Announce<V>>>>,
-    sl_inbox: Vec<sl::Ind<Tagged<Reply<V>>>>,
+    sbeb: Child<StubbornBroadcast<Tagged<Announce<V>>>>,
+    sl: Child<StubbornLink<Tagged<Reply<V>>>>,
 }
 
 impl<V: Clone> LoggedEpochConsensus<V> {
@@ -282,13 +293,13 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             written: false,
             announced: false,
             decided: false,
+            state_sent: false,
+            accept_sent: false,
             aborted: false,
             next_send: 0,
             next_broadcast: 0,
-            sbeb: StubbornBroadcast::new(me, peers.clone(), retransmit),
-            sl: StubbornLink::new(retransmit),
-            sbeb_inbox: Vec::new(),
-            sl_inbox: Vec::new(),
+            sbeb: Child::new(StubbornBroadcast::new(me, peers.clone(), retransmit)),
+            sl: Child::new(StubbornLink::new(retransmit)),
         }
     }
 
@@ -351,6 +362,10 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             // `upon event ⟨ sbeb, Deliver | ℓ, [READ] ⟩`. Idempotent: the reply says what this
             // process has accepted, which a repeat does not change.
             Announce::Read => {
+                if self.state_sent {
+                    return;
+                }
+                self.state_sent = true;
                 let reply = Reply::StateIs {
                     valts: self.durable.state.valts,
                     val: self.durable.state.val.clone(),
@@ -363,11 +378,14 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             // **The write precedes the acceptance, here in this handler.** The ACCEPT is a promise
             // to a quorum, and a promise with no record behind it is how `EPC4` fails silently.
             Announce::Write { val } => {
-                let accepted_already = self.durable.state.valts == self.ets;
-                if !accepted_already {
+                if self.accept_sent {
+                    return;
+                }
+                if self.durable.state.valts != self.ets {
                     self.durable.state = State { valts: self.ets, val: Some(val) };
                     cx.storage().set(self.durable.clone());
                 }
+                self.accept_sent = true;
                 self.send_to(from, Reply::Accept, cx);
             }
             // `upon event ⟨ sbeb, Deliver | ℓ, [DECIDED, v] ⟩ do epochdecision := v;
@@ -442,15 +460,11 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             &mut ProtoCx<'_, StubbornBroadcast<Tagged<Announce<V>>>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.sbeb_inbox);
-        {
-            let b = &mut self.sbeb;
-            cx.with_child_consuming(Wire::Announce, &mut inbox, |ccx| f(b, ccx));
-        }
-        for sbeb::Ind::Deliver { from, msg } in inbox.drain(..) {
+        let mut inds = self.sbeb.run(cx, Wire::Announce, f);
+        for sbeb::Ind::Deliver { from, msg } in inds.drain(..) {
             self.on_announce(from, msg.msg, cx);
         }
-        self.sbeb_inbox = inbox;
+        self.sbeb.reclaim(inds);
     }
 
     fn through_sl(
@@ -461,15 +475,11 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             &mut ProtoCx<'_, StubbornLink<Tagged<Reply<V>>>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.sl_inbox);
-        {
-            let l = &mut self.sl;
-            cx.with_child_consuming(Wire::Reply, &mut inbox, |ccx| f(l, ccx));
-        }
-        for sl::Ind::Deliver { from, msg } in inbox.drain(..) {
+        let mut inds = self.sl.run(cx, Wire::Reply, f);
+        for sl::Ind::Deliver { from, msg } in inds.drain(..) {
             self.on_reply(from, msg.msg, cx);
         }
-        self.sl_inbox = inbox;
+        self.sl.reclaim(inds);
     }
 }
 

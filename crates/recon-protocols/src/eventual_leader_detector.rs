@@ -54,7 +54,7 @@
 //!                  process. Before then it may trust a crashed process, or disagree.
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::BTreeSet;
 
 use crate::perfect_failure_detector::{self as pfd, Heartbeat, PerfectFailureDetector};
@@ -84,8 +84,7 @@ pub struct EventualLeaderDetector {
     suspected: BTreeSet<NodeId>,
     /// `leader`. `None` is the book's `⊥`, before anything has been trusted.
     leader: Option<NodeId>,
-    detector: PerfectFailureDetector,
-    inbox: Vec<pfd::Ind>,
+    detector: Child<PerfectFailureDetector>,
 }
 
 impl EventualLeaderDetector {
@@ -106,8 +105,7 @@ impl EventualLeaderDetector {
             peers: peers.clone(),
             suspected: BTreeSet::new(),
             leader: None,
-            detector: PerfectFailureDetector::new(me, peers, heartbeat, detect_after),
-            inbox: Vec::new(),
+            detector: Child::new(PerfectFailureDetector::new(me, peers, heartbeat, detect_after)),
         }
     }
 
@@ -142,18 +140,14 @@ impl EventualLeaderDetector {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut PerfectFailureDetector, &mut ProtoCx<'_, PerfectFailureDetector>),
     ) {
-        let mut inbox = core::mem::take(&mut self.inbox);
-        {
-            let detector = &mut self.detector;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(detector, ccx));
-        }
-        let changed = !inbox.is_empty();
-        for pfd::Ind::Crash { node } in inbox.drain(..) {
+        let mut inds = self.detector.run(cx, core::convert::identity, f);
+        let changed = !inds.is_empty();
+        for pfd::Ind::Crash { node } in inds.drain(..) {
             // `upon event ⟨ ◇P, Suspect | p ⟩`. There is no `Restore` arm: a perfect detector never
             // retracts, so `suspected` only grows and the set is monotone.
             self.suspected.insert(node);
         }
-        self.inbox = inbox;
+        self.detector.reclaim(inds);
         if changed {
             self.reconsider(cx);
         }

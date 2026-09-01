@@ -120,7 +120,7 @@
 //! Unlike [`crate::uniform_reliable_broadcast`], no timing assumption is among them: removing the
 //! detector removed the synchrony it needed, not just a dependency.
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
@@ -159,7 +159,10 @@ pub enum Ind<P> {
 
 /// Broadcast with uniform agreement, resting on a correct majority and on nothing else.
 #[derive(Debug)]
-pub struct MajorityAckUniformReliableBroadcast<P, L = PerfectLink<Data<P>>> {
+pub struct MajorityAckUniformReliableBroadcast<
+    P: Clone,
+    L: VolatileLink<Data<P>> = PerfectLink<Data<P>>,
+> {
     me: NodeId,
     seq: u64,
     /// How many processes there are. The denominator of the majority, and fixed.
@@ -169,14 +172,10 @@ pub struct MajorityAckUniformReliableBroadcast<P, L = PerfectLink<Data<P>>> {
     /// Which processes have been seen to relay each message.
     ack: BTreeMap<BroadcastId, BTreeSet<NodeId>>,
     delivered: BTreeSet<BroadcastId>,
-    beb: BestEffortBroadcast<Data<P>, L>,
-    beb_inbox: Vec<beb::Ind<Data<P>>>,
-    /// A relay re-enters the child while its own inbox is in use, so it needs a buffer of its
-    /// own. By construction it stays empty; the assertion in `relay` records why.
-    relay_inbox: Vec<beb::Ind<Data<P>>>,
+    beb: Child<BestEffortBroadcast<Data<P>, L>>,
 }
 
-impl<P> MajorityAckUniformReliableBroadcast<P, PerfectLink<Data<P>>> {
+impl<P: Clone> MajorityAckUniformReliableBroadcast<P, PerfectLink<Data<P>>> {
     /// Broadcast among `members`, which must include `me`.
     ///
     /// The guarantees hold while more than half of `members` are correct. There is no timing
@@ -190,7 +189,7 @@ impl<P> MajorityAckUniformReliableBroadcast<P, PerfectLink<Data<P>>> {
     }
 }
 
-impl<P, L> MajorityAckUniformReliableBroadcast<P, L> {
+impl<P: Clone, L: VolatileLink<Data<P>>> MajorityAckUniformReliableBroadcast<P, L> {
     /// Broadcast among `members`, over the link supplied.
     pub fn with_link(me: NodeId, members: impl IntoIterator<Item = NodeId>, link: L) -> Self {
         let mut members: BTreeSet<NodeId> = members.into_iter().collect();
@@ -203,9 +202,7 @@ impl<P, L> MajorityAckUniformReliableBroadcast<P, L> {
             pending: BTreeMap::new(),
             ack: BTreeMap::new(),
             delivered: BTreeSet::new(),
-            beb: BestEffortBroadcast::with_link(me, members, link),
-            beb_inbox: Vec::new(),
-            relay_inbox: Vec::new(),
+            beb: Child::new(BestEffortBroadcast::with_link(me, members, link)),
         }
     }
 
@@ -243,12 +240,8 @@ where
             &mut ProtoCx<'_, BestEffortBroadcast<Data<P>, L>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.beb_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, core::convert::identity, f);
+        for ind in inds.drain(..) {
             match ind {
                 beb::Ind::Deliver { from, msg: Data { id, payload } } => {
                     self.on_beb_deliver(from, id, payload, cx)
@@ -263,7 +256,7 @@ where
                 }
             }
         }
-        self.beb_inbox = inbox;
+        self.beb.reclaim(inds);
         self.check_deliverable(cx);
     }
 
@@ -301,18 +294,15 @@ where
 
     /// Re-broadcast, so the message survives its originator's crash.
     fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
-        let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {
-                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
-            });
-        }
+        // Re-enters the child while its inbox is out on loan, so `run` hands back a fresh one.
+        let inds = self.beb.run(cx, core::convert::identity, |beb, ccx| {
+            beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
+        });
         debug_assert!(
-            relay_inbox.is_empty(),
+            inds.is_empty(),
             "relaying must not deliver synchronously; if it does, on_beb_deliver can recurse"
         );
-        self.relay_inbox = relay_inbox;
+        self.beb.reclaim(inds);
     }
 
     /// `upon exists (s, m) ∈ pending such that candeliver(m) ∧ m ∉ delivered`.

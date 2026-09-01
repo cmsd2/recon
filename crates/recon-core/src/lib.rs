@@ -9,6 +9,7 @@
 //! child's effects into its own terms via [`Cx::with_child`]. There is no registry, no string
 //! key, and no lookup performed while running — a mis-wired stack fails to compile.
 
+pub mod child;
 pub mod cx;
 pub mod effect;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod session;
 pub mod store;
 pub mod time;
 
+pub use child::Child;
 pub use cx::{Cx, EffectSink};
 pub use effect::{Effect, TimerId, WriteKind};
 pub use node::NodeId;

@@ -11,20 +11,10 @@ use recon_core::NodeId;
 use recon_protocols::eventual_leader_detector::{EventualLeaderDetector, Ind};
 use recon_sim::{Config, Sim};
 
-const A: NodeId = NodeId::new(1);
-const B: NodeId = NodeId::new(2);
-const C: NodeId = NodeId::new(3);
-const D: NodeId = NodeId::new(4);
+mod common;
+use common::*;
+
 const ALL: [NodeId; 4] = [A, B, C, D];
-
-const BOUND: Duration = Duration::from_millis(20);
-
-fn heartbeat() -> Duration {
-    BOUND * 2
-}
-fn timeout() -> Duration {
-    heartbeat() * 3
-}
 
 fn omega(me: NodeId) -> EventualLeaderDetector {
     EventualLeaderDetector::new(me, ALL, heartbeat(), timeout())
@@ -177,4 +167,15 @@ fn a_correct_process_can_be_abandoned_while_the_assumption_is_withdrawn() {
     });
 
     assert!(abandoned, "a correct process must be abandonable, or the detector cannot be wrong");
+}
+
+// ------------------------------------------------- bounded by membership, not by time
+
+#[test]
+fn the_send_rate_does_not_grow_with_time() {
+    // The module claims a membership bound. Heartbeats are the only traffic, and a heartbeat
+    // schedule is a function of the membership and the interval — so the rate must be flat.
+    let mut s = sync_sim(20);
+    s.run_for(timeout() * 2);
+    assert_send_rate_flat!(s, timeout() * 2, 4);
 }

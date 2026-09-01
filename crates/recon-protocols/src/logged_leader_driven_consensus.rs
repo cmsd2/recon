@@ -139,10 +139,11 @@
 //! *value* never changes: a process announces the same decision every time, which
 //! [`LoggedLeaderDrivenConsensus::decision`] is the durable statement of.
 
-use recon_core::{NodeId, ProtoCx, Protocol, Slot, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, Slot, TimerId, slot};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use crate::Timing;
 use crate::logged_epoch_change::{self as lec, LoggedEpochChange};
 use crate::logged_epoch_consensus::{self as lep, LoggedEpochConsensus, State};
 
@@ -197,10 +198,10 @@ impl<V> Default for Durable<V> {
 }
 
 /// Paxos in the fail-recovery model.
-pub struct LoggedLeaderDrivenConsensus<V> {
+pub struct LoggedLeaderDrivenConsensus<V: Clone> {
     me: NodeId,
     peers: BTreeSet<NodeId>,
-    retransmit: core::time::Duration,
+    timing: Timing,
     /// `ℓ0` — the initial leader, re-derived from the membership rather than stored.
     l0: NodeId,
     /// `val`.
@@ -217,38 +218,24 @@ pub struct LoggedLeaderDrivenConsensus<V> {
     /// `(newts, newℓ)` — the epoch the change child has told this process to enter.
     newts: u64,
     newleader: NodeId,
-    lec: LoggedEpochChange,
+    lec: Child<LoggedEpochChange>,
     /// `lep.ets`. One instance, replaced on each epoch change, sharing one slot.
-    lep: LoggedEpochConsensus<V>,
-    lec_inbox: Vec<lec::Ind>,
-    lep_inbox: Vec<lep::Ind<V>>,
+    lep: Child<LoggedEpochConsensus<V>>,
 }
 
 /// Where `lec`'s record sits inside this one.
 fn lec_slot<V: Clone>() -> Slot<Durable<V>, lec::Started> {
-    Slot {
-        read: |d| d.lec.as_ref(),
-        write: |d, c| Durable { lec: Some(c), ..d.cloned().unwrap_or_default() },
-    }
+    slot!(Durable<V>, lec)
 }
 
 /// Where the live `lep` instance's record sits inside this one.
 fn lep_slot<V: Clone>() -> Slot<Durable<V>, lep::Durable<V>> {
-    Slot {
-        read: |d| d.lep.as_ref(),
-        write: |d, c| Durable { lep: Some(c), ..d.cloned().unwrap_or_default() },
-    }
+    slot!(Durable<V>, lep)
 }
 
 impl<V: Clone + PartialEq> LoggedLeaderDrivenConsensus<V> {
     /// Paxos among `peers`, over stable storage.
-    pub fn new(
-        me: NodeId,
-        peers: impl IntoIterator<Item = NodeId>,
-        retransmit: core::time::Duration,
-        heartbeat: core::time::Duration,
-        detect_after: core::time::Duration,
-    ) -> Self {
+    pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, timing: Timing) -> Self {
         let mut peers: BTreeSet<NodeId> = peers.into_iter().collect();
         peers.insert(me);
         // "Obtain the initial leader ℓ0 from the logged epoch-change instance lec" — `maxrank(Π)`,
@@ -258,7 +245,7 @@ impl<V: Clone + PartialEq> LoggedLeaderDrivenConsensus<V> {
         LoggedLeaderDrivenConsensus {
             me,
             peers: peers.clone(),
-            retransmit,
+            timing,
             l0,
             val: None,
             proposed: false,
@@ -270,10 +257,15 @@ impl<V: Clone + PartialEq> LoggedLeaderDrivenConsensus<V> {
             // quite give: `(0, ⊥)` would abort the initial epoch before it did anything.
             newts: 0,
             newleader: l0,
-            lec: LoggedEpochChange::new(me, peers.clone(), retransmit, heartbeat, detect_after),
-            lep: LoggedEpochConsensus::new(me, peers, 0, l0, State::default(), retransmit),
-            lec_inbox: Vec::new(),
-            lep_inbox: Vec::new(),
+            lec: Child::new(LoggedEpochChange::new(me, peers.clone(), timing)),
+            lep: Child::new(LoggedEpochConsensus::new(
+                me,
+                peers,
+                0,
+                l0,
+                State::default(),
+                timing.retransmit,
+            )),
         }
     }
 
@@ -353,14 +345,14 @@ impl<V: Clone + PartialEq> LoggedLeaderDrivenConsensus<V> {
         self.aborted = false;
         self.proposed = false;
         self.store(cx);
-        self.lep = LoggedEpochConsensus::new(
+        self.lep.replace(LoggedEpochConsensus::new(
             self.me,
             self.peers.clone(),
             self.ets,
             self.leader,
             state,
-            self.retransmit,
-        );
+            self.timing.retransmit,
+        ));
         self.through_lep(cx, |e, ccx| e.on_init(ccx));
         self.maybe_propose(cx);
     }
@@ -384,19 +376,13 @@ impl<V: Clone + PartialEq> LoggedLeaderDrivenConsensus<V> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut LoggedEpochChange, &mut ProtoCx<'_, LoggedEpochChange>),
     ) {
-        let mut inbox = core::mem::take(&mut self.lec_inbox);
-        {
-            let lec = &mut self.lec;
-            cx.with_durable_child_consuming(Wire::Change, &mut inbox, lec_slot(), |ccx| {
-                f(lec, ccx)
-            });
-        }
-        for lec::Ind::StartEpoch { ts, leader } in inbox.drain(..) {
+        let mut inds = self.lec.run_durable(cx, Wire::Change, lec_slot(), f);
+        for lec::Ind::StartEpoch { ts, leader } in inds.drain(..) {
             self.newts = ts;
             self.newleader = leader;
             self.maybe_abort(cx);
         }
-        self.lec_inbox = inbox;
+        self.lec.reclaim(inds);
     }
 
     fn through_lep(
@@ -404,20 +390,14 @@ impl<V: Clone + PartialEq> LoggedLeaderDrivenConsensus<V> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut LoggedEpochConsensus<V>, &mut ProtoCx<'_, LoggedEpochConsensus<V>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.lep_inbox);
-        {
-            let lep = &mut self.lep;
-            cx.with_durable_child_consuming(Wire::Consensus, &mut inbox, lep_slot(), |ccx| {
-                f(lep, ccx)
-            });
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.lep.run_durable(cx, Wire::Consensus, lep_slot(), f);
+        for ind in inds.drain(..) {
             match ind {
                 lep::Ind::Decide(v) => self.on_epoch_decision(v, cx),
                 lep::Ind::Aborted(state) => self.on_aborted(state, cx),
             }
         }
-        self.lep_inbox = inbox;
+        self.lep.reclaim(inds);
     }
 }
 
@@ -480,14 +460,14 @@ impl<V: Clone + PartialEq> Protocol for LoggedLeaderDrivenConsensus<V> {
 
         // `retrieve(epochdecision) of instance lep.ets`. The instance is rebuilt at the epoch just
         // read back, and reads its own slot.
-        self.lep = LoggedEpochConsensus::new(
+        self.lep.replace(LoggedEpochConsensus::new(
             self.me,
             self.peers.clone(),
             self.ets,
             self.leader,
             State::default(),
-            self.retransmit,
-        );
+            self.timing.retransmit,
+        ));
         self.through_lep(cx, |lep, ccx| lep.on_recovery(ccx));
 
         // `if epochdecision ≠ ⊥ ∧ decision = ⊥ then decision := epochdecision; store(decision);

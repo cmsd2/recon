@@ -84,7 +84,7 @@
 //!   is delivered again. That is the stated guarantee, not a violation of it, and it is why the
 //!   table above says `[window]` where the book says nothing.
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -162,7 +162,7 @@ impl Config {
 /// link, or an application's own. It bounds on [`Link`] rather than anything narrower because
 /// gossip needs nothing of a scope boundary beyond passing it upward.
 #[derive(Debug)]
-pub struct ProbabilisticBroadcast<P, L = FairLossLink<Gossip<P>>> {
+pub struct ProbabilisticBroadcast<P: Clone, L: VolatileLink<Carried<P>> = FairLossLink<Gossip<P>>> {
     me: NodeId,
     /// Π — every process, including this one. The sender delivers to itself directly, as Algorithm
     /// 3.9 has it, so `picktargets` draws from everyone else.
@@ -173,11 +173,11 @@ pub struct ProbabilisticBroadcast<P, L = FairLossLink<Gossip<P>>> {
     /// be evicted in constant time. Bounded by `config.window` per sender.
     delivered: BTreeSet<BroadcastId>,
     order: BTreeMap<NodeId, VecDeque<u64>>,
-    link: L,
+    link: Child<L>,
     _payload: core::marker::PhantomData<fn() -> P>,
 }
 
-impl<P> ProbabilisticBroadcast<P, FairLossLink<Gossip<P>>> {
+impl<P: Clone> ProbabilisticBroadcast<P, FairLossLink<Gossip<P>>> {
     /// Gossip among `peers`, over the fair-loss link Algorithm 3.9 names.
     ///
     /// The book says `Uses: FairLossPointToPointLinks` and this default honours it. A perfect link
@@ -190,7 +190,7 @@ impl<P> ProbabilisticBroadcast<P, FairLossLink<Gossip<P>>> {
     }
 }
 
-impl<P, L> ProbabilisticBroadcast<P, L> {
+impl<P: Clone, L: VolatileLink<Carried<P>>> ProbabilisticBroadcast<P, L> {
     /// Gossip among `peers`, over the link supplied.
     pub fn with_link(
         me: NodeId,
@@ -207,7 +207,7 @@ impl<P, L> ProbabilisticBroadcast<P, L> {
             config,
             delivered: BTreeSet::new(),
             order: BTreeMap::new(),
-            link,
+            link: Child::new(link),
             _payload: core::marker::PhantomData,
         }
     }
@@ -238,12 +238,8 @@ where
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut L, &mut ProtoCx<'_, L>),
     ) {
-        let mut inbox: Vec<L::Ind> = Vec::new();
-        {
-            let link = &mut self.link;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.link.run(cx, core::convert::identity, f);
+        for ind in inds.drain(..) {
             match L::classify(ind) {
                 LinkInd::Deliver { msg, .. } => self.on_arrival(msg, cx),
                 LinkInd::Boundary(Boundary::Ended { peer, epoch }) => {
@@ -254,6 +250,7 @@ where
                 }
             }
         }
+        self.link.reclaim(inds);
     }
 
     /// `upon event ⟨ fll, Deliver | p, [GOSSIP, s, m, r] ⟩`.
@@ -277,12 +274,11 @@ where
     fn gossip(&mut self, msg: Gossip<P>, cx: &mut ProtoCx<'_, Self>) {
         for target in self.picktargets(cx) {
             let out = msg.clone();
-            let link = &mut self.link;
-            let mut ignored: Vec<L::Ind> = Vec::new();
-            cx.with_child_consuming(core::convert::identity, &mut ignored, |ccx| {
+            let inds = self.link.run(cx, core::convert::identity, |link, ccx| {
                 link.on_cmd(L::send(target, out), ccx)
             });
-            debug_assert!(ignored.is_empty(), "a send must not deliver synchronously");
+            debug_assert!(inds.is_empty(), "a send must not deliver synchronously");
+            self.link.reclaim(inds);
         }
     }
 

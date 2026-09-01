@@ -112,7 +112,7 @@
 //! is the cost of adding to it, not its size.
 
 use core::time::Duration;
-use recon_core::{NodeId, Position, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, Position, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -183,25 +183,23 @@ impl<P: Ord> Log<P> {
 
 /// Perfect-link guarantees over log-delivery, so that they hold across a restart.
 #[derive(Debug)]
-pub struct LoggedLink<P: Ord> {
+pub struct LoggedLink<P: Clone + Ord> {
     me: NodeId,
     /// Durable, and restored on recovery: it keys a set that outlives this incarnation.
     seq: u64,
     /// The durable set. Volatile here, written down on every change, and retrieved on recovery.
     delivered: Log<P>,
-    link: StubbornLink<Wire<P>>,
-    inbox: Vec<sl::Ind<Wire<P>>>,
+    link: Child<StubbornLink<Wire<P>>>,
 }
 
-impl<P: Ord> LoggedLink<P> {
+impl<P: Clone + Ord> LoggedLink<P> {
     /// Log-deliver for `me`, retransmitting every `retransmit`.
     pub fn new(me: NodeId, retransmit: Duration) -> Self {
         LoggedLink {
             me,
             seq: 0,
             delivered: Log::default(),
-            link: StubbornLink::new(retransmit),
-            inbox: Vec::new(),
+            link: Child::new(StubbornLink::new(retransmit)),
         }
     }
 
@@ -217,15 +215,11 @@ impl<P: Clone + Ord> LoggedLink<P> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut StubbornLink<Wire<P>>, &mut ProtoCx<'_, StubbornLink<Wire<P>>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.inbox);
-        {
-            let link = &mut self.link;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));
-        }
-        for sl::Ind::Deliver { from, msg } in inbox.drain(..) {
+        let mut inds = self.link.run(cx, core::convert::identity, f);
+        for sl::Ind::Deliver { from, msg } in inds.drain(..) {
             self.on_arrival(from, msg, cx);
         }
-        self.inbox = inbox;
+        self.link.reclaim(inds);
     }
 
     /// `upon event ⟨ sl, Deliver | p, m ⟩`.

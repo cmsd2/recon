@@ -85,7 +85,7 @@
 //! needs a detector at all.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -146,19 +146,14 @@ pub type Wire<P, L = PerfectLink<Data<P>>> = <BestEffortBroadcast<Data<P>, L> as
 
 /// Broadcast with agreement, over best-effort broadcast.
 #[derive(Debug)]
-pub struct ReliableBroadcast<P, L = PerfectLink<Data<P>>> {
+pub struct ReliableBroadcast<P: Clone, L: VolatileLink<Data<P>> = PerfectLink<Data<P>>> {
     me: NodeId,
     seq: u64,
     delivered: BTreeSet<BroadcastId>,
-    beb: BestEffortBroadcast<Data<P>, L>,
-    /// Indications the child raised, awaiting this layer's attention. Reused across events.
-    inbox: Vec<beb::Ind<Data<P>>>,
-    /// A second buffer for the relay, which by construction produces no indications. Kept
-    /// separate so the assertion below is meaningful rather than accidental.
-    relay_inbox: Vec<beb::Ind<Data<P>>>,
+    beb: Child<BestEffortBroadcast<Data<P>, L>>,
 }
 
-impl<P> ReliableBroadcast<P, PerfectLink<Data<P>>> {
+impl<P: Clone> ReliableBroadcast<P, PerfectLink<Data<P>>> {
     /// Reliable broadcast for process `me` among `peers`, over links retransmitting every
     /// `interval`.
     pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, interval: Duration) -> Self {
@@ -166,16 +161,14 @@ impl<P> ReliableBroadcast<P, PerfectLink<Data<P>>> {
     }
 }
 
-impl<P, L> ReliableBroadcast<P, L> {
+impl<P: Clone, L: VolatileLink<Data<P>>> ReliableBroadcast<P, L> {
     /// Reliable broadcast for process `me` among `peers`, over the link supplied.
     pub fn with_link(me: NodeId, peers: impl IntoIterator<Item = NodeId>, link: L) -> Self {
         ReliableBroadcast {
             me,
             seq: 0,
             delivered: BTreeSet::new(),
-            beb: BestEffortBroadcast::with_link(me, peers, link),
-            inbox: Vec::new(),
-            relay_inbox: Vec::new(),
+            beb: Child::new(BestEffortBroadcast::with_link(me, peers, link)),
         }
     }
 
@@ -203,12 +196,8 @@ where
             &mut ProtoCx<'_, BestEffortBroadcast<Data<P>, L>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, core::convert::identity, f);
+        for ind in inds.drain(..) {
             match ind {
                 beb::Ind::Deliver { msg: Data { id, payload }, .. } => {
                     self.on_beb_deliver(id, payload, cx)
@@ -225,7 +214,7 @@ where
                 }
             }
         }
-        self.inbox = inbox;
+        self.beb.reclaim(inds);
     }
 
     /// Algorithm 3.3's second handler: deliver once, then relay once.
@@ -240,23 +229,19 @@ where
 
     /// Re-broadcast a message so that it survives the originator's crash.
     ///
-    /// This re-enters the child, which is why it uses its own buffer. Best-effort broadcast turns
-    /// a request into sends and timers only — a message to this process travels through the links
-    /// like any other and arrives later — so no indication can be raised here. The assertion
-    /// records that reasoning rather than trusting it.
+    /// This re-enters the child while its inbox is out on loan, so `run` hands back a fresh one.
+    /// Best-effort broadcast turns a request into sends and timers only — a message to this process
+    /// travels through the links like any other and arrives later — so no indication can be raised
+    /// here. The assertion records that reasoning rather than trusting it.
     fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
-        let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut relay_inbox, |ccx| {
-                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
-            });
-        }
+        let inds = self.beb.run(cx, core::convert::identity, |beb, ccx| {
+            beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
+        });
         debug_assert!(
-            relay_inbox.is_empty(),
+            inds.is_empty(),
             "relaying must not deliver synchronously; if it does, on_beb_deliver can recurse"
         );
-        self.relay_inbox = relay_inbox;
+        self.beb.reclaim(inds);
     }
 }
 

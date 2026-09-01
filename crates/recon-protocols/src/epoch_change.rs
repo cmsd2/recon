@@ -90,10 +90,11 @@
 //! EC2 [eventual]   Consistency — eventually every correct process starts the same last epoch
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use crate::Timing;
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
 use crate::eventual_leader_detector::{self as eld, EventualLeaderDetector};
 use crate::perfect_failure_detector::Heartbeat;
@@ -161,22 +162,15 @@ pub struct EpochChange {
     lastts: u64,
     /// `ts` — this process's own next candidate, always in its own residue class mod `N`.
     ts: u64,
-    omega: EventualLeaderDetector,
-    beb: BestEffortBroadcast<EpochMsg>,
-    omega_inbox: Vec<eld::Ind>,
-    beb_inbox: Vec<beb::Ind<EpochMsg>>,
+    omega: Child<EventualLeaderDetector>,
+    beb: Child<BestEffortBroadcast<EpochMsg>>,
 }
 
 impl EpochChange {
     /// Epoch-change among `peers`, over a leader detector with the given heartbeat and timeout and
     /// a best-effort broadcast whose links retransmit every `retransmit`.
-    pub fn new(
-        me: NodeId,
-        peers: impl IntoIterator<Item = NodeId>,
-        retransmit: core::time::Duration,
-        heartbeat: core::time::Duration,
-        detect_after: core::time::Duration,
-    ) -> Self {
+    pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, timing: Timing) -> Self {
+        let Timing { retransmit, heartbeat, detect_after } = timing;
         let mut peers: BTreeSet<NodeId> = peers.into_iter().collect();
         peers.insert(me);
         // `ℓ0` — the book's initial leader, fixed and known to all. `maxrank(Π)` is what Ω will
@@ -189,10 +183,13 @@ impl EpochChange {
             trusted: l0,
             lastts: 0,
             ts: rank(&peers, me),
-            omega: EventualLeaderDetector::new(me, peers.clone(), heartbeat, detect_after),
-            beb: BestEffortBroadcast::new(me, peers, retransmit),
-            omega_inbox: Vec::new(),
-            beb_inbox: Vec::new(),
+            omega: Child::new(EventualLeaderDetector::new(
+                me,
+                peers.clone(),
+                heartbeat,
+                detect_after,
+            )),
+            beb: Child::new(BestEffortBroadcast::new(me, peers, retransmit)),
         }
     }
 
@@ -257,15 +254,11 @@ impl EpochChange {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut EventualLeaderDetector, &mut ProtoCx<'_, EventualLeaderDetector>),
     ) {
-        let mut inbox = core::mem::take(&mut self.omega_inbox);
-        {
-            let omega = &mut self.omega;
-            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(omega, ccx));
-        }
-        for eld::Ind::Trust { leader } in inbox.drain(..) {
+        let mut inds = self.omega.run(cx, Wire::Detector, f);
+        for eld::Ind::Trust { leader } in inds.drain(..) {
             self.on_trust(leader, cx);
         }
-        self.omega_inbox = inbox;
+        self.omega.reclaim(inds);
     }
 
     fn through_beb(
@@ -276,19 +269,15 @@ impl EpochChange {
             &mut ProtoCx<'_, BestEffortBroadcast<EpochMsg>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.beb_inbox);
-        {
-            let b = &mut self.beb;
-            cx.with_child_consuming(Wire::Epoch, &mut inbox, |ccx| f(b, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, Wire::Epoch, f);
+        for ind in inds.drain(..) {
             match ind {
                 beb::Ind::Deliver { from, msg } => self.on_epoch_msg(from, msg, cx),
                 // The broadcast is over a perfect link, which reports no scope boundary.
                 beb::Ind::SessionEnded { .. } | beb::Ind::SessionEstablished { .. } => {}
             }
         }
-        self.beb_inbox = inbox;
+        self.beb.reclaim(inds);
     }
 }
 

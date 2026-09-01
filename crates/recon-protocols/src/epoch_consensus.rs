@@ -86,7 +86,7 @@
 //! EPC5 [always]  Abort behaviour — an abandoned instance reports its state and then is silent
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -164,7 +164,7 @@ pub type BebMsg<V> = pl::Wire<Tagged<V>>;
 
 /// Abortable consensus within one epoch.
 #[derive(Debug)]
-pub struct EpochConsensus<V> {
+pub struct EpochConsensus<V: Clone> {
     me: NodeId,
     peers: BTreeSet<NodeId>,
     /// `ets` — this instance's epoch timestamp.
@@ -185,8 +185,7 @@ pub struct EpochConsensus<V> {
     announced: bool,
     /// `halt`. Every handler returns immediately once this is set.
     aborted: bool,
-    beb: BestEffortBroadcast<Tagged<V>>,
-    inbox: Vec<beb::Ind<Tagged<V>>>,
+    beb: Child<BestEffortBroadcast<Tagged<V>>>,
 }
 
 impl<V: Clone> EpochConsensus<V> {
@@ -213,8 +212,7 @@ impl<V: Clone> EpochConsensus<V> {
             written: false,
             announced: false,
             aborted: false,
-            beb: BestEffortBroadcast::new(me, peers, retransmit),
-            inbox: Vec::new(),
+            beb: Child::new(BestEffortBroadcast::new(me, peers, retransmit)),
         }
     }
 
@@ -338,12 +336,8 @@ impl<V: Clone> EpochConsensus<V> {
             &mut ProtoCx<'_, BestEffortBroadcast<Tagged<V>>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.inbox);
-        {
-            let b = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(b, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, core::convert::identity, f);
+        for ind in inds.drain(..) {
             match ind {
                 // `such that ts = ets` — traffic for another instance is not this one's business,
                 // and reading it would invent an acceptance at the wrong timestamp. Unreachable
@@ -355,7 +349,7 @@ impl<V: Clone> EpochConsensus<V> {
                 beb::Ind::SessionEnded { .. } | beb::Ind::SessionEstablished { .. } => {}
             }
         }
-        self.inbox = inbox;
+        self.beb.reclaim(inds);
     }
 }
 

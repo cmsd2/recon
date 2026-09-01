@@ -40,7 +40,7 @@
 //!   unbounded for that reason and says so.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::stubborn_link::{self as sl, SendId, StubbornLink};
@@ -71,17 +71,16 @@ pub enum Ind<P> {
 
 /// Fan-out that never gives up.
 #[derive(Debug)]
-pub struct StubbornBroadcast<P> {
+pub struct StubbornBroadcast<P: Clone> {
     peers: BTreeSet<NodeId>,
     seq: u64,
     /// What each live broadcast became: one stubborn transmission per peer. Bounded by
     /// membership times what is outstanding, and this is what `Stop` needs in order to work.
     outstanding: BTreeMap<BroadcastId, Vec<SendId>>,
-    link: StubbornLink<P>,
-    inbox: Vec<sl::Ind<P>>,
+    link: Child<StubbornLink<P>>,
 }
 
-impl<P> StubbornBroadcast<P> {
+impl<P: Clone> StubbornBroadcast<P> {
     /// Broadcast among `members`, which must include `me`, retransmitting every `interval`.
     pub fn new(me: NodeId, members: impl IntoIterator<Item = NodeId>, interval: Duration) -> Self {
         let mut peers: BTreeSet<NodeId> = members.into_iter().collect();
@@ -90,8 +89,7 @@ impl<P> StubbornBroadcast<P> {
             peers,
             seq: 0,
             outstanding: BTreeMap::new(),
-            link: StubbornLink::new(interval),
-            inbox: Vec::new(),
+            link: Child::new(StubbornLink::new(interval)),
         }
     }
 
@@ -112,16 +110,12 @@ impl<P: Clone> StubbornBroadcast<P> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut StubbornLink<P>, &mut ProtoCx<'_, StubbornLink<P>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.inbox);
-        {
-            let link = &mut self.link;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(link, ccx));
-        }
-        for sl::Ind::Deliver { from, msg } in inbox.drain(..) {
+        let mut inds = self.link.run(cx, core::convert::identity, f);
+        for sl::Ind::Deliver { from, msg } in inds.drain(..) {
             // Straight through. No deduplication, deliberately.
             cx.indicate(Ind::Deliver { from, msg });
         }
-        self.inbox = inbox;
+        self.link.reclaim(inds);
     }
 }
 

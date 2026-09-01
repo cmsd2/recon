@@ -113,7 +113,7 @@
 //! something evicted is answered as unavailable, and the requester's timeout moves it past the gap.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -186,8 +186,16 @@ pub struct Config {
     pub window: usize,
 }
 
+/// The gossip this layer rides on: Algorithm 3.9 over the fair-loss link it names, carrying
+/// [`Data`].
+pub type Gossiper<P> = ProbabilisticBroadcast<Data<P>, FairLossLink<pb::Carried<Data<P>>>>;
+
 /// Gossip with recovery.
-pub struct LazyProbabilisticBroadcast<P, L = FairLossLink<Recovery<P>>> {
+pub struct LazyProbabilisticBroadcast<P, L = FairLossLink<Recovery<P>>>
+where
+    P: Clone + serde::Serialize + serde::de::DeserializeOwned,
+    L: VolatileLink<Recovery<P>>,
+{
     me: NodeId,
     peers: BTreeSet<NodeId>,
     config: Config,
@@ -204,18 +212,25 @@ pub struct LazyProbabilisticBroadcast<P, L = FairLossLink<Recovery<P>>> {
     stored_order: BTreeMap<NodeId, VecDeque<u64>>,
     /// Which gap each outstanding timer is waiting on.
     timers: BTreeMap<TimerId, (NodeId, u64)>,
-    upb: ProbabilisticBroadcast<Data<P>, FairLossLink<pb::Carried<Data<P>>>>,
-    link: L,
+    upb: Child<Gossiper<P>>,
+    link: Child<L>,
 }
 
-impl<P> LazyProbabilisticBroadcast<P, FairLossLink<Recovery<P>>> {
+impl<P> LazyProbabilisticBroadcast<P, FairLossLink<Recovery<P>>>
+where
+    P: Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
     /// Lazy probabilistic broadcast among `peers`, over the fair-loss links the book names.
     pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, config: Config) -> Self {
         Self::with_link(me, peers, FairLossLink::new(), config)
     }
 }
 
-impl<P, L> LazyProbabilisticBroadcast<P, L> {
+impl<P, L> LazyProbabilisticBroadcast<P, L>
+where
+    P: Clone + serde::Serialize + serde::de::DeserializeOwned,
+    L: VolatileLink<Recovery<P>>,
+{
     /// Lazy probabilistic broadcast, over the link supplied for its recovery traffic.
     pub fn with_link(
         me: NodeId,
@@ -236,8 +251,13 @@ impl<P, L> LazyProbabilisticBroadcast<P, L> {
             pending_order: BTreeMap::new(),
             stored_order: BTreeMap::new(),
             timers: BTreeMap::new(),
-            upb: ProbabilisticBroadcast::with_link(me, peers, FairLossLink::new(), config.gossip),
-            link,
+            upb: Child::new(ProbabilisticBroadcast::with_link(
+                me,
+                peers,
+                FairLossLink::new(),
+                config.gossip,
+            )),
+            link: Child::new(link),
         }
     }
 
@@ -271,17 +291,10 @@ where
     fn through_upb(
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
-        f: impl FnOnce(
-            &mut ProbabilisticBroadcast<Data<P>, FairLossLink<pb::Carried<Data<P>>>>,
-            &mut ProtoCx<'_, ProbabilisticBroadcast<Data<P>, FairLossLink<pb::Carried<Data<P>>>>>,
-        ),
+        f: impl FnOnce(&mut Gossiper<P>, &mut ProtoCx<'_, Gossiper<P>>),
     ) {
-        let mut inbox: Vec<pb::Ind<Data<P>>> = Vec::new();
-        {
-            let upb = &mut self.upb;
-            cx.with_child_consuming(Wire::Gossip, &mut inbox, |ccx| f(upb, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.upb.run(cx, Wire::Gossip, f);
+        for ind in inds.drain(..) {
             match ind {
                 pb::Ind::Deliver { msg, .. } => self.on_upb_deliver(msg, cx),
                 // The gossip is composed over a fair-loss link, which reports no boundary. The
@@ -294,6 +307,7 @@ where
                 }
             }
         }
+        self.upb.reclaim(inds);
     }
 
     /// Run the link, then act on the recovery traffic it reported.
@@ -302,12 +316,8 @@ where
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut L, &mut ProtoCx<'_, L>),
     ) {
-        let mut inbox: Vec<L::Ind> = Vec::new();
-        {
-            let link = &mut self.link;
-            cx.with_child_consuming(Wire::Recovery, &mut inbox, |ccx| f(link, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.link.run(cx, Wire::Recovery, f);
+        for ind in inds.drain(..) {
             match L::classify(ind) {
                 LinkInd::Deliver { msg, .. } => self.on_recovery(msg, cx),
                 LinkInd::Boundary(Boundary::Ended { peer, epoch }) => {
@@ -318,6 +328,7 @@ where
                 }
             }
         }
+        self.link.reclaim(inds);
     }
 
     /// `upon event ⟨ upb, Deliver | p, [DATA, s, m, sn] ⟩` — Algorithm 3.10.
@@ -418,12 +429,9 @@ where
 
     /// `trigger ⟨ fll, Send | t, msg ⟩`.
     fn send_to(&mut self, to: NodeId, r: Recovery<P>, cx: &mut ProtoCx<'_, Self>) {
-        let link = &mut self.link;
-        let mut ignored: Vec<L::Ind> = Vec::new();
-        cx.with_child_consuming(Wire::Recovery, &mut ignored, |ccx| {
-            link.on_cmd(L::send(to, r), ccx)
-        });
-        debug_assert!(ignored.is_empty(), "a send must not deliver synchronously");
+        let inds = self.link.run(cx, Wire::Recovery, |link, ccx| link.on_cmd(L::send(to, r), ccx));
+        debug_assert!(inds.is_empty(), "a send must not deliver synchronously");
+        self.link.reclaim(inds);
     }
 
     /// `picktargets(k)` — the same uniform draw without replacement the gossip uses.

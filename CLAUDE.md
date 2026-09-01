@@ -162,9 +162,13 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
   arbitrary value, and a run must be replayable. `Duration` is fine and is used directly for spans.
 - **Composition picks one of two forms**, and which one is decided by a single question: does the
   layer transform its child's indications, or pass them on? Forwarding layers use
-  `Cx::with_child`; transforming layers use `Cx::with_child_consuming`, which collects the child's
-  indications for the parent to handle after the child call returns. Neither takes a timer mapper:
-  a timer has nothing in it belonging to one layer.
+  `Cx::with_child`; transforming layers hold the child as a `recon_core::Child<P>` and call
+  `child.run(cx, wrap, f)`, which performs `Cx::with_child_consuming` and hands back the child's
+  indications for the parent to handle — then `child.reclaim(inds)` returns the buffer. A parent
+  handles indications with `&mut self`, which is why the inbox comes back by value rather than as
+  a borrow. Neither form takes a timer mapper: a timer has nothing in it belonging to one layer.
+  Constraint 4 said to write this by hand two or three times before extracting it; `Child` was
+  extracted at sixteen.
 - **A durable child is composed through a `Slot`.** Both forms above hand the child a `NoStore`,
   which is right whenever the child keeps nothing. A parent that keeps durable state *and* composes
   a child that does uses `Cx::with_durable_child_consuming`, passing a `recon_core::Slot` naming
@@ -211,6 +215,30 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
   staller and its peers. The audits found analyses that covered exactly one side, and the bug
   was on the other.
 
+## The real-world set
+
+Most modules here are the book's algorithms, transcribed faithfully and tested against their stated
+guarantees. A **small number** are maintained as useful in the real world, and those carry a second
+obligation. Membership, as of 2026-09:
+
+- **In**: the gossip pair, `probabilistic_broadcast` and `lazy_probabilistic_broadcast`. Multi-Paxos,
+  when it is written.
+- **Out**: single-instance Paxos and everything beneath it that exists to build it — epoch-change,
+  epoch consensus, the logged variants. They are the book's stepping stones and are kept faithful
+  to the page, not tuned. Stubborn links are academic; nothing in the real-world set runs over one.
+
+What "in" obliges, beyond the usual correctness suite:
+
+- **Over session links**, not stubborn ones. A deployment's transport already retransmits; the
+  deployable form of an algorithm is the one that runs over `session_link` and handles the scope
+  events it raises.
+- **Checked for resource use.** Minimal messages for the work done — a test that counts them
+  against what the algorithm needs, not just that it terminates — and no growth of state or of send
+  rate with how long the run has been going (`tests/common::assert_send_rate_flat!`).
+
+A module is moved into the set by a change with a proposal, because the second obligation usually
+means a departure from the book, and departures belong in a specification.
+
 ## Transcriptions vs implementations — read `docs/bounded-space.md`
 
 Two kinds of protocol live here, and which one a module is must be **stated in the module**, not
@@ -237,8 +265,12 @@ Three practices follow:
 - **State the space bound in the module documentation**, beside its departures from the book:
   bounded by membership, bounded by a window, or unbounded and therefore a transcription.
 - **An implementation carries a test that its state does not grow with messages handled** — run a
-  growing count, assert the bound holds. Same shape as the non-vacuity guards: assert the property
-  that would otherwise stop holding in silence.
+  growing count, assert the bound holds — **and one that its send rate does not grow with time**:
+  `tests/common::assert_send_rate_flat!` runs successive windows after the work is done and requires
+  the last no higher than the first. The second exists because the first was not enough: seven
+  modules with bounded state shipped with a send rate growing linearly in time, and nothing noticed
+  until it was measured. Same shape as the non-vacuity guards: assert the property that would
+  otherwise stop holding in silence.
 - **Converting a transcription is a change with a proposal**, not a cleanup commit. Bounding
   usually weakens a guarantee to a scope — "no duplication *within the retention window*" — and
   that belongs in a specification.

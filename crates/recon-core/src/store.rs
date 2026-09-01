@@ -130,6 +130,35 @@ impl<Parent, Child> core::fmt::Debug for Slot<Parent, Child> {
     }
 }
 
+/// A [`Slot`] for an `Option` field of a `Clone + Default` parent record — the common case.
+///
+/// `slot!(Parent, field)` writes the two projections every such slot writes the same way: read the
+/// field, and write the parent with the field replaced, starting from the parent's default if there
+/// is no parent record yet.
+///
+/// ```
+/// # use recon_core::{Slot, slot};
+/// #[derive(Clone, Default, PartialEq, Debug)]
+/// struct Parent { mine: u64, childs: Option<u32> }
+///
+/// const CHILD: Slot<Parent, u32> = slot!(Parent, childs);
+/// assert_eq!((CHILD.write)(None, 7), Parent { mine: 0, childs: Some(7) });
+/// assert_eq!((CHILD.read)(&Parent { mine: 1, childs: Some(3) }), Some(&3));
+/// ```
+#[macro_export]
+macro_rules! slot {
+    ($parent:ty, $field:ident) => {
+        $crate::Slot::<$parent, _> {
+            read: |p| p.$field.as_ref(),
+            write: |p, c| {
+                let mut whole: $parent = p.cloned().unwrap_or_default();
+                whole.$field = Some(c);
+                whole
+            },
+        }
+    };
+}
+
 /// A child's view of one slot of its parent's store.
 ///
 /// Reads project; writes read the parent's record, replace the child's part, and write the whole

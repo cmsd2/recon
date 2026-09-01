@@ -188,6 +188,12 @@ where
         self.nodes.get(&node).map(|n| &n.protocol)
     }
 
+    /// [`Sim::protocol`] for a process the test knows is running. Panics naming the process
+    /// otherwise, which is more use in a failure than `unwrap`'s line number.
+    pub fn at(&self, node: NodeId) -> &P {
+        self.protocol(node).unwrap_or_else(|| panic!("{node} is not running"))
+    }
+
     /// Borrow what a process has written down. `None` if it has written nothing.
     pub fn storage(&self, node: NodeId) -> Option<&MemStore<P::Meta, P::Entry>> {
         self.storage.get(&node)

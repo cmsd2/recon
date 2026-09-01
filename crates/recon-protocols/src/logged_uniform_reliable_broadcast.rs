@@ -89,7 +89,7 @@
 //! broadcast, which is what buys nothing here.
 
 use core::time::Duration;
-use recon_core::{NodeId, Position, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, Position, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -152,7 +152,7 @@ pub enum Ind<P: Ord> {
 
 /// Uniform agreement over log-delivery, in the fail-recovery model.
 #[derive(Debug)]
-pub struct LoggedUniformReliableBroadcast<P: Ord> {
+pub struct LoggedUniformReliableBroadcast<P: Clone + Ord> {
     me: NodeId,
     seq: u64,
     members: usize,
@@ -164,12 +164,10 @@ pub struct LoggedUniformReliableBroadcast<P: Ord> {
     /// own volatile state — a crash takes both, so nothing outlives the counter that keys it.
     /// Not the durable [`BroadcastId`]: nothing here is ever stopped, so the two never meet.
     beb_seq: u64,
-    beb: StubbornBroadcast<Data<P>>,
-    inbox: Vec<sbeb::Ind<Data<P>>>,
-    send_inbox: Vec<sbeb::Ind<Data<P>>>,
+    beb: Child<StubbornBroadcast<Data<P>>>,
 }
 
-impl<P: Ord> LoggedUniformReliableBroadcast<P> {
+impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
     /// Broadcast among `members`, which must include `me`, retransmitting every `interval`.
     pub fn new(me: NodeId, members: impl IntoIterator<Item = NodeId>, interval: Duration) -> Self {
         let mut members: BTreeSet<NodeId> = members.into_iter().collect();
@@ -182,9 +180,7 @@ impl<P: Ord> LoggedUniformReliableBroadcast<P> {
             log: Logged::default(),
             ack: BTreeMap::new(),
             beb_seq: 0,
-            beb: StubbornBroadcast::new(me, members, interval),
-            inbox: Vec::new(),
-            send_inbox: Vec::new(),
+            beb: Child::new(StubbornBroadcast::new(me, members, interval)),
         }
     }
 
@@ -210,29 +206,22 @@ impl<P: Clone + Ord> LoggedUniformReliableBroadcast<P> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut StubbornBroadcast<Data<P>>, &mut ProtoCx<'_, StubbornBroadcast<Data<P>>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| f(beb, ccx));
-        }
-        for sbeb::Ind::Deliver { from, msg } in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, core::convert::identity, f);
+        for sbeb::Ind::Deliver { from, msg } in inds.drain(..) {
             self.on_arrival(from, msg, cx);
         }
-        self.inbox = inbox;
+        self.beb.reclaim(inds);
     }
 
     fn rebroadcast(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
-        let mut send_inbox = core::mem::take(&mut self.send_inbox);
         self.beb_seq += 1;
         let id = sbeb::BroadcastId(self.beb_seq);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(core::convert::identity, &mut send_inbox, |ccx| {
-                beb.on_cmd(sbeb::Cmd::Broadcast { id, msg: data }, ccx)
-            });
-        }
-        debug_assert!(send_inbox.is_empty(), "broadcasting must not deliver synchronously");
-        self.send_inbox = send_inbox;
+        // Re-enters the child while its inbox is out on loan, so `run` hands back a fresh one.
+        let inds = self.beb.run(cx, core::convert::identity, |beb, ccx| {
+            beb.on_cmd(sbeb::Cmd::Broadcast { id, msg: data }, ccx)
+        });
+        debug_assert!(inds.is_empty(), "broadcasting must not deliver synchronously");
+        self.beb.reclaim(inds);
     }
 
     /// `upon event ⟨ sbeb, Deliver | p, [DATA, s, m] ⟩`.

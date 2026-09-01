@@ -12,19 +12,10 @@ use recon_protocols::logged_epoch_consensus::{
 };
 use recon_sim::{Config, Sim, TraceEvent};
 
-const A: NodeId = NodeId::new(1);
-const B: NodeId = NodeId::new(2);
-const C: NodeId = NodeId::new(3);
-const D: NodeId = NodeId::new(4);
-const E: NodeId = NodeId::new(5);
-const ALL: [NodeId; 5] = [A, B, C, D, E];
+mod common;
+use common::*;
 
 const EPOCH: u64 = 7;
-const BOUND: Duration = Duration::from_millis(20);
-
-fn retransmit() -> Duration {
-    Duration::from_millis(10)
-}
 
 type Lep = LoggedEpochConsensus<u32>;
 
@@ -104,7 +95,7 @@ fn the_acceptance_is_written_before_it_is_sent() {
             "{n} sent ACCEPT after only {recorded} write(s) — the init write at {wrote} and \
              nothing recording what it accepted"
         );
-        assert_eq!(s.protocol(n).unwrap().state().valts, EPOCH, "{n}");
+        assert_eq!(s.at(n).state().valts, EPOCH, "{n}");
     }
 }
 
@@ -129,7 +120,7 @@ fn the_decision_is_written_before_it_is_reported() {
             writes_before, 3,
             "{n} reported a decision with {writes_before} writes behind it"
         );
-        assert_eq!(s.protocol(n).unwrap().epoch_decision(), Some(&9), "{n}");
+        assert_eq!(s.at(n).epoch_decision(), Some(&9), "{n}");
     }
 }
 
@@ -160,13 +151,13 @@ fn a_recovered_process_answers_a_read_with_what_it_accepted() {
     let mut s = sim(4);
     s.command(E, Cmd::Propose(9));
     settle(&mut s);
-    assert_eq!(s.protocol(C).unwrap().state().val, Some(9), "C accepted before the crash");
+    assert_eq!(s.at(C).state().val, Some(9), "C accepted before the crash");
 
     s.crash(C);
     s.restart(C);
     s.run_for(Duration::from_millis(50));
 
-    let p = s.protocol(C).expect("C is running again");
+    let p = s.at(C);
     assert_eq!(p.state().valts, EPOCH, "C lost the timestamp it accepted at");
     assert_eq!(p.state().val, Some(9), "C lost the value it accepted");
     assert_eq!(s.trace().recoveries_with_state(), 1, "C recovered from a record");
@@ -194,17 +185,13 @@ fn a_process_that_accepted_nothing_recovers_the_empty_state() {
     // later leader would adopt a value out of thin air.
     let mut s = sim(5);
     s.run_for(Duration::from_millis(5));
-    assert_eq!(
-        s.protocol(D).unwrap().state().val,
-        None,
-        "nothing was proposed, so D accepted nothing"
-    );
+    assert_eq!(s.at(D).state().val, None, "nothing was proposed, so D accepted nothing");
 
     s.crash(D);
     s.restart(D);
     s.run_for(Duration::from_millis(5));
 
-    let p = s.protocol(D).expect("D is running again");
+    let p = s.at(D);
     assert_eq!(p.state().valts, 0, "D came back claiming a timestamp");
     assert_eq!(p.state().val, None, "D came back claiming a value");
     assert_eq!(p.epoch_decision(), None, "D came back claiming a decision");
@@ -235,7 +222,7 @@ fn dying_inside_the_write_never_leaves_an_acceptance_announced_without_a_record(
         );
 
         s.restart(D);
-        let p = s.protocol(D).expect("D is running again");
+        let p = s.at(D);
         if p.state().val == Some(9) {
             landed += 1;
         } else {
@@ -246,7 +233,7 @@ fn dying_inside_the_write_never_leaves_an_acceptance_announced_without_a_record(
         // Either way the leader is still retransmitting, so D ends up accepting, and this time with
         // a record behind it. The guarantee holds across the fault rather than in spite of it.
         settle(&mut s);
-        assert_eq!(s.protocol(D).unwrap().state().val, Some(9), "seed {seed}");
+        assert_eq!(s.at(D).state().val, Some(9), "seed {seed}");
         let accept = first_index(&s, |e| is_accept_from(e, D));
         assert!(accept.is_some(), "seed {seed}: D never accepted at all");
     }
@@ -378,4 +365,54 @@ fn traffic_for_another_epoch_is_dropped() {
     );
     assert_eq!(p.state().valts, EPOCH);
     assert_eq!(p.state().val, Some(3));
+}
+
+// ------------------------------------------------- bounded by membership, not by time
+
+#[test]
+fn the_send_rate_does_not_grow_after_the_epoch_has_decided() {
+    // Measured before the guards: 12.6k, 28.6k, 44.6k, 60.6k, 76.6k sends in successive 400 ms
+    // windows — every redelivered `READ` and `WRITE` answered on a fresh stubborn transmission,
+    // for ever. Answering once makes the set the stubborn children retransmit a fixed one.
+    let mut s = sim(20);
+    s.command(E, Cmd::Propose(9));
+    settle(&mut s);
+    assert_eq!(decided_by(&s, A), vec![9], "decided first, so the rate measured is the idle one");
+    assert_send_rate_flat!(s, Duration::from_millis(400), 4);
+}
+
+#[test]
+fn a_redelivered_read_or_write_is_not_answered_again() {
+    // The mechanism behind the rate, asserted directly: one `STATE` and one `ACCEPT` from each
+    // follower to the leader, however many times the announcements come round.
+    let mut s = sim(21);
+    s.command(E, Cmd::Propose(9));
+    settle(&mut s);
+
+    let redelivered = s
+        .trace()
+        .deliveries()
+        .filter(|(_, to, m)| {
+            *to == A && matches!(m, Wire::Announce(t) if matches!(t.msg, Announce::Read))
+        })
+        .count();
+    assert!(
+        redelivered > 3,
+        "the READ reached A only {redelivered} times, so nothing was repeated"
+    );
+
+    // Distinct replies, not transmissions: the stubborn link retransmits the one reply many times,
+    // which is what it is for. What must not happen is a *second* reply.
+    let distinct = |kind: fn(&Reply<u32>) -> bool| {
+        s.trace()
+            .sends()
+            .filter_map(|(from, to, m)| match m {
+                Wire::Reply(t) if from == A && to == E && kind(&t.msg) => Some(format!("{t:?}")),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<String>>()
+            .len()
+    };
+    assert_eq!(distinct(|r| matches!(r, Reply::StateIs { .. })), 1, "A answered READ twice");
+    assert_eq!(distinct(|r| matches!(r, Reply::Accept)), 1, "A answered WRITE twice");
 }

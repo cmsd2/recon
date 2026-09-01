@@ -7,32 +7,21 @@
 
 use core::time::Duration;
 use recon_core::NodeId;
-use recon_protocols::logged_leader_driven_consensus::{Cmd, Ind, LoggedLeaderDrivenConsensus};
+use recon_core::Time;
+use recon_protocols::logged_epoch_consensus::{self as lep, Announce};
+use recon_protocols::logged_leader_driven_consensus::{
+    Cmd, Ind, LoggedLeaderDrivenConsensus, Wire,
+};
 use recon_sim::{Config, Sim, TraceEvent};
+use std::collections::BTreeMap;
 
-const A: NodeId = NodeId::new(1);
-const B: NodeId = NodeId::new(2);
-const C: NodeId = NodeId::new(3);
-const D: NodeId = NodeId::new(4);
-const E: NodeId = NodeId::new(5);
-const ALL: [NodeId; 5] = [A, B, C, D, E];
-
-const BOUND: Duration = Duration::from_millis(20);
-
-fn retransmit() -> Duration {
-    Duration::from_millis(10)
-}
-fn heartbeat() -> Duration {
-    BOUND * 2
-}
-fn timeout() -> Duration {
-    heartbeat() * 3
-}
+mod common;
+use common::*;
 
 type Luc = LoggedLeaderDrivenConsensus<u32>;
 
 fn luc(me: NodeId) -> Luc {
-    LoggedLeaderDrivenConsensus::new(me, ALL, retransmit(), heartbeat(), timeout())
+    LoggedLeaderDrivenConsensus::new(me, ALL, timing())
 }
 
 fn sim(seed: u64) -> Sim<Luc> {
@@ -66,9 +55,34 @@ fn all_announced(s: &Sim<Luc>) -> Vec<u32> {
     ALL.iter().flat_map(|n| announced(s, *n)).collect()
 }
 
-/// How many distinct processes led an epoch some process is in.
-fn leaders_seen(s: &Sim<Luc>) -> std::collections::BTreeSet<NodeId> {
-    ALL.iter().filter_map(|n| s.protocol(*n).map(|p| p.leader())).collect()
+/// Whether a second leader began while the first's epoch was still unfinished somewhere — see the
+/// volatile suite's helper of the same name for the reading. Here the leader-only messages are the
+/// `sbeb` announcements.
+fn leadership_was_disputed(s: &Sim<Luc>) -> bool {
+    let mut began: BTreeMap<(NodeId, u64), Time> = BTreeMap::new();
+    let mut finished: BTreeMap<(u64, NodeId), Time> = BTreeMap::new();
+    for e in s.trace().events() {
+        match e {
+            TraceEvent::Sent { at, from, msg: Wire::Consensus(lep::Wire::Announce(t)), .. }
+                if matches!(t.msg, Announce::Read) =>
+            {
+                began.entry((*from, t.ets)).or_insert(*at);
+            }
+            TraceEvent::Delivered {
+                at, to, msg: Wire::Consensus(lep::Wire::Announce(t)), ..
+            } if matches!(t.msg, Announce::Decided { .. }) => {
+                finished.entry((t.ets, *to)).or_insert(*at);
+            }
+            _ => {}
+        }
+    }
+    began.iter().any(|((later, _), t_later)| {
+        began.iter().any(|((earlier, e_earlier), t_earlier)| {
+            earlier != later
+                && t_earlier < t_later
+                && ALL.iter().any(|p| finished.get(&(*e_earlier, *p)).is_none_or(|t| t > t_later))
+        })
+    })
 }
 
 fn crashes(s: &Sim<Luc>) -> usize {
@@ -127,7 +141,7 @@ fn a_process_that_decided_still_holds_that_decision_after_a_crash_and_recovery()
     let mut s = sim(3);
     s.command(E, Cmd::Propose(9));
     s.run_for(timeout() * 4);
-    assert_eq!(s.protocol(C).unwrap().decision(), Some(&9), "C decided before the crash");
+    assert_eq!(s.at(C).decision(), Some(&9), "C decided before the crash");
     let before = announced(&s, C).len();
 
     s.crash(C);
@@ -135,7 +149,7 @@ fn a_process_that_decided_still_holds_that_decision_after_a_crash_and_recovery()
     s.restart(C);
     s.run_for(timeout());
 
-    let p = s.protocol(C).expect("C is running again");
+    let p = s.at(C);
     assert_eq!(p.decision(), Some(&9), "C came back without its decision");
 
     // `⟨ luc, Decide | decision ⟩` is specified as "variable `decision` in stable storage contains
@@ -156,13 +170,13 @@ fn a_process_that_had_decided_nothing_comes_back_having_decided_nothing() {
     // true is that it says ⊥, and that recovery does not announce a decision from nowhere.
     let mut s = sim(4);
     s.run_for(heartbeat());
-    assert_eq!(s.protocol(A).unwrap().decision(), None, "nothing was proposed");
+    assert_eq!(s.at(A).decision(), None, "nothing was proposed");
 
     s.crash(A);
     s.restart(A);
     s.run_for(heartbeat());
 
-    assert_eq!(s.protocol(A).unwrap().decision(), None, "A invented a decision on recovery");
+    assert_eq!(s.at(A).decision(), None, "A invented a decision on recovery");
     assert!(announced(&s, A).is_empty(), "A announced one: {:?}", announced(&s, A));
 }
 
@@ -221,13 +235,13 @@ fn that_run_really_contained_all_three() {
         assert_eq!(crashes(&s), 2, "seed {seed}: two crashes");
         assert_eq!(restarts(&s), 2, "seed {seed}: two recoveries");
         assert!(s.trace().recoveries_with_state() > 0, "seed {seed}: recovered from a record");
-        if leaders_seen(&s).len() > 1 {
+        if leadership_was_disputed(&s) {
             with_disputed_leadership += 1;
         }
     }
     assert!(
         with_disputed_leadership >= 3,
-        "only {with_disputed_leadership}/25 runs had processes following different leaders, so the \
+        "only {with_disputed_leadership}/25 runs had two processes acting as leader at once, so the \
          agreement test above is mostly exercising the quiet case"
     );
 }
@@ -294,7 +308,7 @@ fn the_parent_and_both_children_keep_their_own_part_of_one_record() {
     s.run_for(timeout() * 4);
 
     // Epoch and leader are the parent's, and both are non-trivial: an epoch was entered.
-    let p = s.protocol(C).unwrap();
+    let p = s.at(C);
     assert!(p.epoch() > 0, "no epoch was entered, so the record under test is the initial one");
     assert_eq!(p.leader(), E);
     assert_eq!(p.decision(), Some(&9), "the parent's own part");
@@ -305,7 +319,7 @@ fn the_parent_and_both_children_keep_their_own_part_of_one_record() {
     s.restart(C);
     s.run_for(heartbeat());
 
-    let p = s.protocol(C).expect("C is running again");
+    let p = s.at(C);
     assert!(p.epoch() > 0, "the parent lost its epoch");
     assert_eq!(p.leader(), E, "the parent lost its leader");
     assert_eq!(p.decision(), Some(&9), "the parent lost its decision");
@@ -328,4 +342,75 @@ fn every_write_is_one_rewritten_record_and_never_an_append() {
         "something appended, and nothing in this stack has an inhabited Entry"
     );
     assert_eq!(s.trace().appends(), 0);
+}
+
+// ------------------------------------------------- bounded by membership, not by time
+
+#[test]
+fn the_send_rate_does_not_grow_after_the_decision() {
+    // Measured before the children's guards: 27.8k → 91.8k per 400 ms across five windows. The
+    // final epoch never aborts, so nothing but the guards bounds this.
+    let mut s = sim(20);
+    s.command(E, Cmd::Propose(9));
+    s.run_for(timeout() * 4);
+    assert_eq!(s.at(A).decision(), Some(&9), "decided first, so the rate measured is the idle one");
+    assert_send_rate_flat!(s, timeout() * 2, 4);
+}
+
+// ------------------------------------------------- dying inside the write
+
+#[test]
+fn dying_inside_the_decision_write_never_leaves_a_decision_announced_without_a_record() {
+    // Armed once C has accepted and not yet decided, so the write it dies in is one of the two
+    // that make the decision durable — the child's `epochdecision` or this layer's `decision`.
+    // Either may or may not have landed. What is not allowed is C announcing `Decide` from the
+    // handler that died; and what must follow is that C decides 9 regardless, because the
+    // announcement is still being retransmitted and the record, if it landed, is read back.
+    let mut landed = 0;
+    let mut lost = 0;
+    let mut armed_runs = 0;
+    for seed in 0..40u64 {
+        let mut s = sim(seed);
+        s.command(E, Cmd::Propose(9));
+        // Step until C has accepted but not decided.
+        let mut armed = false;
+        for _ in 0..200 {
+            s.run_for(Duration::from_millis(1));
+            let p = s.at(C);
+            if p.state().val == Some(9) && p.decision().is_none() {
+                s.crash_on_next_write(C);
+                armed = true;
+                break;
+            }
+            if p.decision().is_some() {
+                break;
+            }
+        }
+        if !armed {
+            continue; // the seed decided C's write and decision in one step; nothing to arm
+        }
+        armed_runs += 1;
+        let before = announced(&s, C).len();
+        s.run_for(timeout() * 2);
+        assert_eq!(s.trace().deaths_in_writes(), 1, "seed {seed}: C died in a write");
+        assert_eq!(
+            announced(&s, C).len(),
+            before,
+            "seed {seed}: C announced from the doomed handler"
+        );
+
+        s.restart(C);
+        // Recovery reads both records. If the child's `epochdecision` landed, the recovery branch
+        // of Algorithm 5.10 announces it now — that is the "landed" outcome made visible.
+        if s.at(C).decision() == Some(&9) {
+            landed += 1;
+        } else {
+            lost += 1;
+        }
+        s.run_for(timeout() * 6);
+        assert_eq!(s.at(C).decision(), Some(&9), "seed {seed}: C never decided after recovering");
+        assert!(announced(&s, C).iter().all(|v| *v == 9), "seed {seed}: {:?}", announced(&s, C));
+    }
+    assert!(armed_runs >= 10, "only {armed_runs} runs could be armed, so this proves little");
+    assert!(landed > 0 && lost > 0, "both outcomes must occur: {landed} landed, {lost} lost");
 }

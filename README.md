@@ -95,9 +95,12 @@ peers to have made a promise it has no record of. A protocol that keeps nothing 
 with no scopes writes `type Scope = Infallible`, and a scope end for it cannot be constructed.
 
 Composition is static: a parent owns its children as concrete typed fields and re-wraps their
-effects. `Cx::with_child` forwards a child's indications; `Cx::with_child_consuming` collects them
-for a parent that transforms them. Which one a layer uses is decided by one question — does it
-transform its child's indications, or pass them on?
+effects. `Cx::with_child` forwards a child's indications; a parent that transforms them holds the
+child as a `recon_core::Child<P>` and calls `run`, which collects the child's indications and hands
+them back for the parent to handle. Which one a layer uses is decided by one question — does it
+transform its child's indications, or pass them on? A parent that keeps durable state and composes a
+child that does names the child's part of its record with a `Slot` (`slot!(Parent, field)`) and
+calls `run_durable`.
 
 Files: [`protocol.rs`](crates/recon-core/src/protocol.rs) ·
 [`effect.rs`](crates/recon-core/src/effect.rs) · [`cx.rs`](crates/recon-core/src/cx.rs) ·
@@ -239,6 +242,16 @@ built over it rather than over the perfect link.
 `logged_link` buys one thing, and its suite shows it directly: no-duplication holds **across a
 restart**, where the perfect link — whose record is volatile — delivers the same message a second
 time on the same schedule.
+
+### The real-world set
+
+Most of what is here is the book's algorithm kept faithful enough to read against the page, and
+that is what it is for. A **small number** are maintained as things that would actually ship, and
+they are held to a second standard besides correctness: they run over the **session link** rather
+than the stubborn one, and their resource use is checked — minimal messages for the work, and no
+growth in state or in send rate with how long they have been running. Today that set is the two
+gossip protocols. Multi-Paxos will join it when it is written; single-instance Paxos will not — it
+is the book's stepping stone, and is kept as one.
 
 ### Detectors versus quorums
 
@@ -426,10 +439,10 @@ cargo test --workspace -- --nocapture                 # with output
 2. Write the module with the pseudocode quoted above the implementation, and state in its
    documentation whether it is a transcription or an implementation, what bounds its space, and
    every departure from the page.
-3. Compose statically. The parent owns the child as a concrete typed field and re-wraps its
-   effects; it does not re-encode them. Extract a private helper per composing protocol rather
-   than reaching for a macro — a helper leaves the borrow structure visible where a derive would
-   hide it.
+3. Compose statically. The parent owns the child as a `Child<P>` field and re-wraps its effects;
+   it does not re-encode them. `child.run(cx, wrap, f)` returns the child's indications, the parent
+   handles them, `child.reclaim(inds)` gives the buffer back. Timings for the leader-driven family
+   travel as a `Timing`, not as positional durations.
 4. Test it against its stated guarantees, and **assert non-vacuity**: an absence-of-violation
    property is satisfied by a protocol that does nothing.
    [`tests/method.rs`](crates/recon-protocols/tests/method.rs) demonstrates that failure and
@@ -455,13 +468,13 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 | `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total | 21 / 15 |
-| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in | 7 / 8 / 18 |
-| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half confirming leadership really was disputed | 13 |
-| `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, and what a restart must find | 8 / 10 |
-| [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three | 10 |
+| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time | 8 / 9 / 19 |
+| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere | 14 |
+| `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
+| [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 
-461 across the suites above, plus nine unit tests inside `recon-core` and two doctests — one
-`compile_fail` on the link port, one worked example of a storage slot — 472 in total, all in one
+472 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
+`compile_fail` on the link port, two worked examples of a storage slot — 484 in total, all in one
 process, no ports opened.
 
 ## Licence

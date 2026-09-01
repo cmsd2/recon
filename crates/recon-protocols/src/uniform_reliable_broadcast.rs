@@ -113,7 +113,7 @@
 //! scoped, this is the clearest statement of what a failure detector buys.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -193,7 +193,7 @@ pub enum Ind<P> {
 
 /// Broadcast with uniform agreement, over best-effort broadcast and a failure detector.
 #[derive(Debug)]
-pub struct UniformReliableBroadcast<P, L = PerfectLink<Data<P>>> {
+pub struct UniformReliableBroadcast<P: Clone, L: VolatileLink<Data<P>> = PerfectLink<Data<P>>> {
     me: NodeId,
     seq: u64,
     /// Every process believed correct. Shrinks on a crash indication and never grows.
@@ -203,16 +203,11 @@ pub struct UniformReliableBroadcast<P, L = PerfectLink<Data<P>>> {
     /// Which processes have been seen to acknowledge each message.
     ack: BTreeMap<BroadcastId, BTreeSet<NodeId>>,
     delivered: BTreeSet<BroadcastId>,
-    beb: BestEffortBroadcast<Data<P>, L>,
-    detector: PerfectFailureDetector,
-    beb_inbox: Vec<beb::Ind<Data<P>>>,
-    det_inbox: Vec<pfd::Ind>,
-    /// A relay re-enters the child while its own inbox is in use, so it needs a buffer of its
-    /// own. By construction it stays empty; the assertion in `relay` records why.
-    relay_inbox: Vec<beb::Ind<Data<P>>>,
+    beb: Child<BestEffortBroadcast<Data<P>, L>>,
+    detector: Child<PerfectFailureDetector>,
 }
 
-impl<P> UniformReliableBroadcast<P, PerfectLink<Data<P>>> {
+impl<P: Clone> UniformReliableBroadcast<P, PerfectLink<Data<P>>> {
     /// Broadcast among `members`, which must include `me`.
     ///
     /// `heartbeat` and `detect_after` configure the failure detector; `detect_after` must exceed
@@ -230,7 +225,7 @@ impl<P> UniformReliableBroadcast<P, PerfectLink<Data<P>>> {
     }
 }
 
-impl<P, L> UniformReliableBroadcast<P, L> {
+impl<P: Clone, L: VolatileLink<Data<P>>> UniformReliableBroadcast<P, L> {
     /// Broadcast among `members`, over the link supplied.
     pub fn with_link(
         me: NodeId,
@@ -248,11 +243,8 @@ impl<P, L> UniformReliableBroadcast<P, L> {
             pending: BTreeMap::new(),
             ack: BTreeMap::new(),
             delivered: BTreeSet::new(),
-            beb: BestEffortBroadcast::with_link(me, members.clone(), link),
-            detector: PerfectFailureDetector::new(me, members, heartbeat, detect_after),
-            beb_inbox: Vec::new(),
-            det_inbox: Vec::new(),
-            relay_inbox: Vec::new(),
+            beb: Child::new(BestEffortBroadcast::with_link(me, members.clone(), link)),
+            detector: Child::new(PerfectFailureDetector::new(me, members, heartbeat, detect_after)),
         }
     }
 
@@ -290,12 +282,8 @@ where
             &mut ProtoCx<'_, BestEffortBroadcast<Data<P>, L>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.beb_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, Wire::Broadcast, f);
+        for ind in inds.drain(..) {
             match ind {
                 beb::Ind::Deliver { from, msg: Data { id, payload } } => {
                     self.on_beb_deliver(from, id, payload, cx)
@@ -315,7 +303,7 @@ where
                 }
             }
         }
-        self.beb_inbox = inbox;
+        self.beb.reclaim(inds);
         self.check_deliverable(cx);
     }
 
@@ -344,17 +332,12 @@ where
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut PerfectFailureDetector, &mut ProtoCx<'_, PerfectFailureDetector>),
     ) {
-        let mut inbox = core::mem::take(&mut self.det_inbox);
-        {
-            let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
-        }
-        for ind in inbox.drain(..) {
-            let pfd::Ind::Crash { node } = ind;
+        let mut inds = self.detector.run(cx, Wire::Detector, f);
+        for pfd::Ind::Crash { node } in inds.drain(..) {
             // A process never returns to `correct`; the detector's reports are permanent.
             self.correct.remove(&node);
         }
-        self.det_inbox = inbox;
+        self.detector.reclaim(inds);
         self.check_deliverable(cx);
     }
 
@@ -377,18 +360,15 @@ where
 
     /// Re-broadcast, so the message survives its originator's crash.
     fn relay(&mut self, data: Data<P>, cx: &mut ProtoCx<'_, Self>) {
-        let mut relay_inbox = core::mem::take(&mut self.relay_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, &mut relay_inbox, |ccx| {
-                beb.on_cmd(beb::Cmd::Broadcast(data), ccx)
-            });
-        }
+        // Re-enters the child while its inbox is out on loan, so `run` hands back a fresh one.
+        let inds = self
+            .beb
+            .run(cx, Wire::Broadcast, |beb, ccx| beb.on_cmd(beb::Cmd::Broadcast(data), ccx));
         debug_assert!(
-            relay_inbox.is_empty(),
+            inds.is_empty(),
             "relaying must not deliver synchronously; if it does, on_beb_deliver can recurse"
         );
-        self.relay_inbox = relay_inbox;
+        self.beb.reclaim(inds);
     }
 
     /// `upon exists (s, m) ∈ pending such that candeliver(m) ∧ m ∉ delivered`.

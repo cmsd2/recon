@@ -82,10 +82,11 @@
 //! detector that never settles, leaves this waiting — which is what FLP requires of it and what
 //! `flooding_consensus` pretends away by assuming a perfect detector.
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use crate::Timing;
 use crate::epoch_change::{self as ec, EpochChange};
 use crate::epoch_consensus::{self as ep, EpochConsensus, State};
 
@@ -117,10 +118,10 @@ pub enum Ind<V> {
 }
 
 /// Paxos: uniform consensus over an epoch-change and a sequence of abortable epoch consensuses.
-pub struct LeaderDrivenConsensus<V> {
+pub struct LeaderDrivenConsensus<V: Clone> {
     me: NodeId,
     peers: BTreeSet<NodeId>,
-    retransmit: core::time::Duration,
+    timing: Timing,
     /// `val` — what this process wants decided, once the layer above has said.
     val: Option<V>,
     /// `proposed` — whether this process has proposed in the current epoch.
@@ -132,22 +133,14 @@ pub struct LeaderDrivenConsensus<V> {
     leader: NodeId,
     /// `(newts, newℓ)` — the epoch waiting for the current one to finish aborting.
     pending: Option<(u64, NodeId)>,
-    ec: EpochChange,
+    ec: Child<EpochChange>,
     /// `ep.ets`. One instance, replaced on each epoch change — never a map.
-    ep: EpochConsensus<V>,
-    ec_inbox: Vec<ec::Ind>,
-    ep_inbox: Vec<ep::Ind<V>>,
+    ep: Child<EpochConsensus<V>>,
 }
 
 impl<V: Clone> LeaderDrivenConsensus<V> {
     /// Paxos among `peers`.
-    pub fn new(
-        me: NodeId,
-        peers: impl IntoIterator<Item = NodeId>,
-        retransmit: core::time::Duration,
-        heartbeat: core::time::Duration,
-        detect_after: core::time::Duration,
-    ) -> Self {
+    pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, timing: Timing) -> Self {
         let mut peers: BTreeSet<NodeId> = peers.into_iter().collect();
         peers.insert(me);
         // "Obtain the leader ℓ0 of the initial epoch with timestamp 0 from epoch-change" — the same
@@ -156,17 +149,22 @@ impl<V: Clone> LeaderDrivenConsensus<V> {
         LeaderDrivenConsensus {
             me,
             peers: peers.clone(),
-            retransmit,
+            timing,
             val: None,
             proposed: false,
             decided: false,
             ets: 0,
             leader: l0,
             pending: None,
-            ec: EpochChange::new(me, peers.clone(), retransmit, heartbeat, detect_after),
-            ep: EpochConsensus::new(me, peers, 0, l0, State::default(), retransmit),
-            ec_inbox: Vec::new(),
-            ep_inbox: Vec::new(),
+            ec: Child::new(EpochChange::new(me, peers.clone(), timing)),
+            ep: Child::new(EpochConsensus::new(
+                me,
+                peers,
+                0,
+                l0,
+                State::default(),
+                timing.retransmit,
+            )),
         }
     }
 
@@ -224,8 +222,14 @@ impl<V: Clone> LeaderDrivenConsensus<V> {
         self.ets = ts;
         self.leader = leader;
         self.proposed = false;
-        self.ep =
-            EpochConsensus::new(self.me, self.peers.clone(), ts, leader, state, self.retransmit);
+        self.ep.replace(EpochConsensus::new(
+            self.me,
+            self.peers.clone(),
+            ts,
+            leader,
+            state,
+            self.timing.retransmit,
+        ));
         self.maybe_propose(cx);
     }
 
@@ -234,15 +238,11 @@ impl<V: Clone> LeaderDrivenConsensus<V> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut EpochChange, &mut ProtoCx<'_, EpochChange>),
     ) {
-        let mut inbox = core::mem::take(&mut self.ec_inbox);
-        {
-            let ec = &mut self.ec;
-            cx.with_child_consuming(Wire::Change, &mut inbox, |ccx| f(ec, ccx));
-        }
-        for ec::Ind::StartEpoch { ts, leader } in inbox.drain(..) {
+        let mut inds = self.ec.run(cx, Wire::Change, f);
+        for ec::Ind::StartEpoch { ts, leader } in inds.drain(..) {
             self.on_start_epoch(ts, leader, cx);
         }
-        self.ec_inbox = inbox;
+        self.ec.reclaim(inds);
     }
 
     fn through_ep(
@@ -250,12 +250,8 @@ impl<V: Clone> LeaderDrivenConsensus<V> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut EpochConsensus<V>, &mut ProtoCx<'_, EpochConsensus<V>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.ep_inbox);
-        {
-            let ep = &mut self.ep;
-            cx.with_child_consuming(Wire::Consensus, &mut inbox, |ccx| f(ep, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.ep.run(cx, Wire::Consensus, f);
+        for ind in inds.drain(..) {
             match ind {
                 // `upon event ⟨ ep.ts, Decide | v ⟩ such that ts = ets do if decided = FALSE …`
                 ep::Ind::Decide(v) => {
@@ -267,7 +263,7 @@ impl<V: Clone> LeaderDrivenConsensus<V> {
                 ep::Ind::Aborted(state) => self.on_aborted(state, cx),
             }
         }
-        self.ep_inbox = inbox;
+        self.ep.reclaim(inds);
     }
 }
 

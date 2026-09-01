@@ -94,11 +94,20 @@
 //! announcement was accepted. A NACK is still sent when the sender is not trusted, and when the
 //! timestamp is genuinely stale — those are the two cases the book's `else` is for.
 //!
+//! # Departure: each distinct announcement is refused once per peer
+//!
+//! The same shape one step earlier, for the announcements that *are* stale. A NEWEPOCH below
+//! `startts` from a process that is not the leader of the epoch entered is refused; the stubborn
+//! broadcast delivers it again next interval; Algorithm 5.8 refuses it again, on a fresh stubborn
+//! transmission, and so on for ever. `nacked` remembers the highest timestamp refused per peer and
+//! refuses nothing at or below it. Bounded by membership. The one NACK sent is itself stubborn, so
+//! it reaches the leader; a second carries no information the first did not.
+//!
 //! # Departure: nothing calls `Stop`
 //!
 //! [`crate::stubborn_broadcast`] and [`crate::stubborn_link`] retransmit until retired, and this
-//! module retires nothing, so its space grows with the number of announcements and refusals rather
-//! than with the membership. That is the same unbounded transcription
+//! module retires nothing, so its space grows with the number of *distinct* announcements and
+//! refusals rather than with the membership — though not, after the two guards above, with time. That is the same unbounded transcription
 //! [`crate::logged_uniform_reliable_broadcast`] has and for the same reason: retransmitting for
 //! ever is what reaches a process that was down when the message was sent, and a recovered process
 //! has no way to ask for what it missed.
@@ -115,9 +124,11 @@
 //!                  provided the leader detector settles
 //! ```
 
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::Timing;
 
 use crate::eventual_leader_detector::{self as eld, EventualLeaderDetector};
 use crate::perfect_failure_detector::Heartbeat;
@@ -183,24 +194,18 @@ pub struct LoggedEpochChange {
     next_send: u64,
     /// Names the next stubborn broadcast. Volatile, and so is what it keys.
     next_broadcast: u64,
-    omega: EventualLeaderDetector,
-    sbeb: StubbornBroadcast<NewEpoch>,
-    sl: StubbornLink<Nack>,
-    omega_inbox: Vec<eld::Ind>,
-    sbeb_inbox: Vec<sbeb::Ind<NewEpoch>>,
-    sl_inbox: Vec<sl::Ind<Nack>>,
+    /// The highest timestamp refused, per peer. Bounded by membership; see the departure.
+    nacked: BTreeMap<NodeId, u64>,
+    omega: Child<EventualLeaderDetector>,
+    sbeb: Child<StubbornBroadcast<NewEpoch>>,
+    sl: Child<StubbornLink<Nack>>,
 }
 
 impl LoggedEpochChange {
     /// Epoch-change among `peers`, over a leader detector with the given heartbeat and timeout and
     /// stubborn children retransmitting every `retransmit`.
-    pub fn new(
-        me: NodeId,
-        peers: impl IntoIterator<Item = NodeId>,
-        retransmit: core::time::Duration,
-        heartbeat: core::time::Duration,
-        detect_after: core::time::Duration,
-    ) -> Self {
+    pub fn new(me: NodeId, peers: impl IntoIterator<Item = NodeId>, timing: Timing) -> Self {
+        let Timing { retransmit, heartbeat, detect_after } = timing;
         let mut peers: BTreeSet<NodeId> = peers.into_iter().collect();
         peers.insert(me);
         let l0 = peers.iter().next_back().copied().expect("Π contains at least this process");
@@ -217,12 +222,15 @@ impl LoggedEpochChange {
             ts: ts.wrapping_sub(n),
             next_send: 0,
             next_broadcast: 0,
-            omega: EventualLeaderDetector::new(me, peers.clone(), heartbeat, detect_after),
-            sbeb: StubbornBroadcast::new(me, peers.clone(), retransmit),
-            sl: StubbornLink::new(retransmit),
-            omega_inbox: Vec::new(),
-            sbeb_inbox: Vec::new(),
-            sl_inbox: Vec::new(),
+            nacked: BTreeMap::new(),
+            omega: Child::new(EventualLeaderDetector::new(
+                me,
+                peers.clone(),
+                heartbeat,
+                detect_after,
+            )),
+            sbeb: Child::new(StubbornBroadcast::new(me, peers.clone(), retransmit)),
+            sl: Child::new(StubbornLink::new(retransmit)),
         }
     }
 
@@ -277,6 +285,12 @@ impl LoggedEpochChange {
             // A repeat of the announcement this process has already accepted. Silence, not a
             // refusal — see the departure in the module documentation.
         } else {
+            // Once per distinct announcement per peer — see the departure. A peer's candidates
+            // strictly increase, so anything at or below the last one refused is a repeat.
+            if self.nacked.get(&from).is_some_and(|last| newts <= *last) {
+                return;
+            }
+            self.nacked.insert(from, newts);
             let id = SendId(self.next_send);
             self.next_send += 1;
             self.through_sl(cx, |l, ccx| {
@@ -301,15 +315,11 @@ impl LoggedEpochChange {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut EventualLeaderDetector, &mut ProtoCx<'_, EventualLeaderDetector>),
     ) {
-        let mut inbox = core::mem::take(&mut self.omega_inbox);
-        {
-            let omega = &mut self.omega;
-            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(omega, ccx));
-        }
-        for eld::Ind::Trust { leader } in inbox.drain(..) {
+        let mut inds = self.omega.run(cx, Wire::Detector, f);
+        for eld::Ind::Trust { leader } in inds.drain(..) {
             self.on_trust(leader, cx);
         }
-        self.omega_inbox = inbox;
+        self.omega.reclaim(inds);
     }
 
     fn through_sbeb(
@@ -317,15 +327,11 @@ impl LoggedEpochChange {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut StubbornBroadcast<NewEpoch>, &mut ProtoCx<'_, StubbornBroadcast<NewEpoch>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.sbeb_inbox);
-        {
-            let b = &mut self.sbeb;
-            cx.with_child_consuming(Wire::Announce, &mut inbox, |ccx| f(b, ccx));
-        }
-        for sbeb::Ind::Deliver { from, msg } in inbox.drain(..) {
+        let mut inds = self.sbeb.run(cx, Wire::Announce, f);
+        for sbeb::Ind::Deliver { from, msg } in inds.drain(..) {
             self.on_new_epoch(from, msg.ts, cx);
         }
-        self.sbeb_inbox = inbox;
+        self.sbeb.reclaim(inds);
     }
 
     fn through_sl(
@@ -333,15 +339,11 @@ impl LoggedEpochChange {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut StubbornLink<Nack>, &mut ProtoCx<'_, StubbornLink<Nack>>),
     ) {
-        let mut inbox = core::mem::take(&mut self.sl_inbox);
-        {
-            let l = &mut self.sl;
-            cx.with_child_consuming(Wire::Refuse, &mut inbox, |ccx| f(l, ccx));
-        }
-        for sl::Ind::Deliver { msg, .. } in inbox.drain(..) {
+        let mut inds = self.sl.run(cx, Wire::Refuse, f);
+        for sl::Ind::Deliver { msg, .. } in inds.drain(..) {
             self.on_nack(msg.nts, cx);
         }
-        self.sl_inbox = inbox;
+        self.sl.reclaim(inds);
     }
 }
 

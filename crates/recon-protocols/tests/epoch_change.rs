@@ -5,26 +5,13 @@ use recon_core::NodeId;
 use recon_protocols::epoch_change::{EpochChange, Ind};
 use recon_sim::{Config, Sim};
 
-const A: NodeId = NodeId::new(1);
-const B: NodeId = NodeId::new(2);
-const C: NodeId = NodeId::new(3);
-const D: NodeId = NodeId::new(4);
+mod common;
+use common::*;
+
 const ALL: [NodeId; 4] = [A, B, C, D];
 
-const BOUND: Duration = Duration::from_millis(20);
-
-fn retransmit() -> Duration {
-    Duration::from_millis(10)
-}
-fn heartbeat() -> Duration {
-    BOUND * 2
-}
-fn timeout() -> Duration {
-    heartbeat() * 3
-}
-
 fn ec(me: NodeId) -> EpochChange {
-    EpochChange::new(me, ALL, retransmit(), heartbeat(), timeout())
+    EpochChange::new(me, ALL, timing())
 }
 
 fn sync_sim(seed: u64) -> Sim<EpochChange> {
@@ -208,4 +195,16 @@ fn processes_may_be_in_different_epochs_meanwhile() {
         "correct processes must be able to sit in different epochs — if they cannot, the layers \
          above are never tested against the case they exist to survive"
     );
+}
+
+// ------------------------------------------------- bounded by membership, not by time
+
+#[test]
+fn the_send_rate_does_not_grow_once_leadership_has_settled() {
+    // The module claims a membership bound. Once leadership settles the perfect links beneath
+    // retransmit a *fixed* set for ever, and a fixed set is a flat rate. The unguarded NACK of
+    // Algorithm 5.5 fails this: every refusal re-announces, and the set is never fixed.
+    let mut s = sync_sim(20);
+    s.run_for(timeout() * 4);
+    assert_send_rate_flat!(s, timeout() * 2, 4);
 }

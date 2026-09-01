@@ -7,32 +7,20 @@
 
 use core::time::Duration;
 use recon_core::NodeId;
-use recon_protocols::leader_driven_consensus::{Cmd, Ind, LeaderDrivenConsensus};
+use recon_core::Time;
+use recon_protocols::epoch_consensus::EpochMsg;
+use recon_protocols::leader_driven_consensus::{Cmd, Ind, LeaderDrivenConsensus, Wire};
+use recon_sim::TraceEvent;
 use recon_sim::{Config, Sim};
+use std::collections::BTreeMap;
 
-const A: NodeId = NodeId::new(1);
-const B: NodeId = NodeId::new(2);
-const C: NodeId = NodeId::new(3);
-const D: NodeId = NodeId::new(4);
-const E: NodeId = NodeId::new(5);
-const ALL: [NodeId; 5] = [A, B, C, D, E];
-
-const BOUND: Duration = Duration::from_millis(20);
-
-fn retransmit() -> Duration {
-    Duration::from_millis(10)
-}
-fn heartbeat() -> Duration {
-    BOUND * 2
-}
-fn timeout() -> Duration {
-    heartbeat() * 3
-}
+mod common;
+use common::*;
 
 type Uc = LeaderDrivenConsensus<u32>;
 
 fn uc(me: NodeId) -> Uc {
-    LeaderDrivenConsensus::new(me, ALL, retransmit(), heartbeat(), timeout())
+    LeaderDrivenConsensus::new(me, ALL, timing())
 }
 
 fn sync_sim(seed: u64) -> Sim<Uc> {
@@ -61,9 +49,47 @@ fn all_decisions(s: &Sim<Uc>) -> Vec<u32> {
     ALL.iter().flat_map(|n| decided_by(s, *n)).collect()
 }
 
-/// How many distinct processes were ever the leader of an epoch some process entered.
-fn leaders_seen(s: &Sim<Uc>) -> std::collections::BTreeSet<NodeId> {
-    ALL.iter().filter_map(|n| s.protocol(*n).map(|p| p.leader())).collect()
+/// Whether a second leader began while the first's epoch was still unfinished somewhere.
+///
+/// Read from the trace rather than from who each process follows when the run ends. An epoch's
+/// leader is whoever originates its `READ` — nothing else sends one — and an epoch is finished at a
+/// process once `DECIDED` for it has been delivered there. Leadership was disputed if some leader's
+/// first `READ` in its epoch precedes another leader's epoch being finished at *every* process:
+/// that is a process which may yet be asked to accept the old leader's write while the new one is
+/// reading, which is the case the intersection argument exists for.
+///
+/// This is deliberately not "two leaders originating messages at the same instant". An epoch's
+/// leader acts for a few milliseconds and a rival emerges after a detector timeout, so that
+/// reading came out at 0 in 40 noisy runs and would have made the safety test vacuous by its own
+/// standard. The proxy it replaces — different leaders followed at the end of the run — was
+/// measuring divergence at the end, not overlap during.
+fn leadership_was_disputed(s: &Sim<Uc>) -> bool {
+    // (leader, epoch) -> first READ sent.
+    let mut began: BTreeMap<(NodeId, u64), Time> = BTreeMap::new();
+    // (epoch, process) -> first DECIDED delivered.
+    let mut finished: BTreeMap<(u64, NodeId), Time> = BTreeMap::new();
+    for e in s.trace().events() {
+        match e {
+            TraceEvent::Sent { at, from, msg: Wire::Consensus(w), .. }
+                if matches!(w.payload.msg, EpochMsg::Read) =>
+            {
+                began.entry((*from, w.payload.ets)).or_insert(*at);
+            }
+            TraceEvent::Delivered { at, to, msg: Wire::Consensus(w), .. }
+                if matches!(w.payload.msg, EpochMsg::Decided { .. }) =>
+            {
+                finished.entry((w.payload.ets, *to)).or_insert(*at);
+            }
+            _ => {}
+        }
+    }
+    began.iter().any(|((later, _), t_later)| {
+        began.iter().any(|((earlier, e_earlier), t_earlier)| {
+            earlier != later
+                && t_earlier < t_later
+                && ALL.iter().any(|p| finished.get(&(*e_earlier, *p)).is_none_or(|t| t > t_later))
+        })
+    })
 }
 
 // ------------------------------------------------- The happy path: task 5.1
@@ -186,13 +212,14 @@ fn agreement_holds_while_the_leader_detector_is_wrong() {
             decisions.windows(2).all(|w| w[0] == w[1]),
             "seed {seed}: two processes decided differently under a lying detector: {decisions:?}"
         );
-        if leaders_seen(&s).len() > 1 {
+        if leadership_was_disputed(&s) {
             disputed += 1;
         }
     }
 
     // The non-vacuity half. An agreement assertion over runs where one leader was never challenged
-    // proves nothing at all — it is satisfied by any algorithm with a single coordinator.
+    // proves nothing at all — it is satisfied by any algorithm with a single coordinator. "Disputed"
+    // is read from the trace: two processes originating leader-only messages at the same time.
     assert!(
         disputed > 0,
         "no run had processes in epochs with different leaders, so the assertion above never met \
@@ -211,7 +238,7 @@ fn the_disputed_leadership_is_real_and_frequent() {
                 s.command(n, Cmd::Propose(1));
             }
             s.run_for(timeout() * 10);
-            leaders_seen(&s).len() > 1
+            leadership_was_disputed(&s)
         })
         .count();
 
@@ -254,9 +281,9 @@ fn the_next_epoch_begins_from_the_state_the_previous_one_returned() {
     s.command(E, Cmd::Propose(9));
     s.run_for(timeout() * 4);
 
-    let epoch_before = s.protocol(A).unwrap().epoch();
+    let epoch_before = s.at(A).epoch();
     for n in ALL {
-        let st = s.protocol(n).unwrap().state();
+        let st = s.at(n).state();
         assert_eq!(st.val, Some(9), "{n} accepted nothing, so this test has nothing to carry");
         assert!(st.valts > 0, "{n} accepted at timestamp 0");
     }
@@ -268,7 +295,7 @@ fn the_next_epoch_begins_from_the_state_the_previous_one_returned() {
     s.run_for(timeout() * 4);
 
     for n in [A, B, C] {
-        let p = s.protocol(n).unwrap();
+        let p = s.at(n);
         assert!(
             p.epoch() > epoch_before,
             "{n} is still in epoch {}, so nothing was rebuilt and the assertion below is empty",
@@ -376,4 +403,15 @@ fn nothing_is_decided_while_no_majority_exists() {
         live.iter().all(|p| [D, E].contains(&p.leader())),
         "the survivors still follow a crashed leader, so the detector never settled on them"
     );
+}
+
+// ------------------------------------------------- bounded by membership, not by time
+
+#[test]
+fn the_send_rate_does_not_grow_after_the_decision() {
+    let mut s = sync_sim(20);
+    s.command(E, Cmd::Propose(9));
+    s.run_for(timeout() * 4);
+    assert_eq!(decided_by(&s, A), vec![9], "decided first, so the rate measured is the idle one");
+    assert_send_rate_flat!(s, timeout() * 2, 4);
 }

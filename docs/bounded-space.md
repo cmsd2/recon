@@ -34,13 +34,27 @@ Every protocol above the failure detector violated the rule when this was writte
 and then the leader-driven family were built the other way round, so the table is now mixed rather
 than uniformly bad.
 
-The two logged consensus modules carry a warning rather than a cross, and the distinction is worth
-stating precisely. Their **own** state is bounded by membership and their durable record is one
-value rewritten — an epoch, or one accepted `(valts, val)` — so neither grows with messages handled.
-What is not bounded is what the stubborn link and stubborn broadcast beneath them hold outstanding,
-because nothing calls `Stop`. That is the stubborn link's problem below, inherited rather than
-introduced, and it is bounded in practice by the epoch ending: `Abort` retires the instance and
-everything under it. `logged_epoch_change` has no such ending, and says so.
+The logged consensus modules deserve a precise statement, because they were wrong when first
+written and the way they were wrong is this document's subject. Their **state** was always bounded:
+one rewritten record each. Their **work** was not. Over a stubborn broadcast every `READ` and `WRITE`
+comes round again each interval, and Algorithm 5.9 answers every delivery — each answer a fresh
+stubborn transmission that is itself retransmitted for ever. Measured in steady state with nothing
+faulty, `logged_epoch_consensus` sent 12.6k, 28.6k, 44.6k, 60.6k, 76.6k messages in successive
+400 ms windows; the volatile Paxos beside it sent 1,400 in each. The send *rate* grew linearly in
+time, the total quadratically, and the seven modules of that change carried no test that would have
+noticed.
+
+Two guards fix it, both departures recorded in their modules: a follower answers `READ` once and
+`WRITE` once — the reply is stubborn, so a second carries no information — and `logged_epoch_change`
+refuses each distinct announcement once per peer. Every module claiming a membership bound now has a
+test that its send rate is flat across a run several times longer than the work takes, and the two
+logged consensus ones fail it without the guards.
+
+What the stubborn children hold outstanding is still never retired, because nothing calls `Stop`.
+For the consensus that is one reply per follower per epoch and the epoch's own three announcements
+— bounded, and retired by `Abort`. For `logged_epoch_change`, which has no ending, it is one
+transmission per *distinct* announcement or refusal, which grows with leadership changes rather
+than with time. That is the residual warning in the table.
 
 | Protocol | State | Bounded by |
 |---|---|---|
@@ -62,9 +76,9 @@ everything under it. `logged_epoch_change` has no such ending, and says so.
 | `epoch_change` | `trusted`, `lastts`, `ts`, `peers` | **membership** ✅ |
 | `epoch_consensus` | `states`, `accepted`, one `(valts, val)` | **membership** ✅ |
 | `leader_driven_consensus` | one epoch consensus, replaced not accumulated | **membership** ✅ |
-| `logged_epoch_change` | `(startts, start)` — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
-| `logged_epoch_consensus` | `(valts, val)` and `epochdecision` — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
-| `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
+| `logged_epoch_change` | `(startts, start)` — **in stable storage**, one value rewritten; `nacked`, per peer | **membership** for state and for work; the stubborn children's outstanding set grows with distinct announcements, not with time ⚠️ |
+| `logged_epoch_consensus` | `(valts, val)` and `epochdecision` — **in stable storage**, one value rewritten | **membership** for state and for work; the stubborn children hold one reply per follower per epoch ✅ |
+| `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership** for state and for work; inherits `logged_epoch_change`'s ⚠️ |
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the
 second problem and no longer do: the durable state was one blob rewritten on every change, so a
@@ -139,10 +153,11 @@ deployment the transport has already constructed it.
 | reliable broadcast | **deployed**, once `delivered` is windowed |
 | uniform reliable broadcast | **deployed**, once `pending`, `ack` and `delivered` are collected |
 | perfect failure detector | **deployed only where synchrony is real.** Otherwise ◇P |
-| eventual leader detector, Ω | **deployed.** Derived here from P, which is stronger than the book's ◇P |
-| epoch-change and epoch consensus | **deployed.** Both bounded by membership, and both tested where the detector is wrong |
-| leader-driven consensus | **deployed.** This is the shape that ships, and `flooding_consensus` is not |
-| the logged pair | **deployed**, once something calls `Stop` on the stubborn children |
+| **the gossip pair** | **the real-world set**, as of 2026-09. Bounded by a window; the second obligation — session links, and a message count checked against the work — is the next change |
+| eventual leader detector, Ω | would be, over ◇P. Derived here from P, which is stronger than the book's ◇P and never re-trusts a recovered process |
+| epoch-change and epoch consensus | **the book's stepping stones** to Paxos; bounded by membership and tested where the detector is wrong, kept faithful rather than tuned |
+| leader-driven consensus | **not in the real-world set** — single-instance Paxos is what the book builds, and multi-Paxos is what ships. Kept as the page has it |
+| the logged consensus | **not in the real-world set**: it runs over stubborn links, which are academic here. Bounded in work now, and left as the book has it |
 
 The stubborn and perfect links are how you obtain a perfect link when you have nothing but a lossy
 datagram service. That is the simulator's situation and not production's. They stay — everything

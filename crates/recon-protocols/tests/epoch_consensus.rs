@@ -7,16 +7,8 @@ use recon_protocols::epoch_consensus::{Cmd, EpochConsensus, EpochMsg, Ind, State
 use recon_protocols::perfect_link as pl;
 use recon_sim::{Config as SimConfig, Sim};
 
-const A: NodeId = NodeId::new(1);
-const B: NodeId = NodeId::new(2);
-const C: NodeId = NodeId::new(3);
-const D: NodeId = NodeId::new(4);
-const E: NodeId = NodeId::new(5);
-const ALL: [NodeId; 5] = [A, B, C, D, E];
-
-fn retransmit() -> Duration {
-    Duration::from_millis(10)
-}
+mod common;
+use common::*;
 
 type Ep = EpochConsensus<u32>;
 type Fx = Vec<Effect<pl::Wire<Tagged<u32>>, Ind<u32>>>;
@@ -384,4 +376,17 @@ fn what_this_instance_sends_carries_its_own_epoch() {
         .collect();
     assert!(!stamps.is_empty());
     assert!(stamps.iter().all(|t| *t == 11), "every send is stamped for epoch 11: {stamps:?}");
+}
+
+// ------------------------------------------------- bounded by membership, not by time
+
+#[test]
+fn the_send_rate_does_not_grow_after_the_epoch_has_decided() {
+    // One epoch, decided, then left running. What the perfect links beneath retransmit is fixed
+    // once the last message of the protocol has been sent, so the rate must be flat.
+    let mut s: Sim<Ep> =
+        Sim::new(SimConfig::default().seed(20).synchronous(BOUND), &ALL, |me| fresh(me, 7, E));
+    s.command(E, Cmd::Propose(9));
+    s.run_for(Duration::from_millis(200));
+    assert_send_rate_flat!(s, Duration::from_millis(200), 4);
 }

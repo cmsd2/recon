@@ -29,6 +29,7 @@ pub mod session_link;
 pub mod stacks;
 pub mod stubborn_broadcast;
 pub mod stubborn_link;
+pub mod timing;
 pub mod uniform_reliable_broadcast;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
@@ -46,4 +47,5 @@ pub use reliable_broadcast::ReliableBroadcast;
 pub use session_link::SessionLink;
 pub use stubborn_broadcast::StubbornBroadcast;
 pub use stubborn_link::StubbornLink;
+pub use timing::Timing;
 pub use uniform_reliable_broadcast::UniformReliableBroadcast;

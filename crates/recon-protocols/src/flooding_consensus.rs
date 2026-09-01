@@ -95,7 +95,7 @@
 //!   failure detection, without which no round can ever complete after a crash.
 
 use core::time::Duration;
-use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
+use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -165,7 +165,7 @@ pub enum Ind<P> {
 /// An application with its own driver-backed link runs this consensus over it unedited. It
 /// defaults to [`PerfectLink`], so the ordinary stack is still written `FloodingConsensus<P>`.
 #[derive(Debug)]
-pub struct FloodingConsensus<P, L = PerfectLink<Flood<P>>> {
+pub struct FloodingConsensus<P: Clone + Ord, L: VolatileLink<Flood<P>> = PerfectLink<Flood<P>>> {
     /// Every process believed correct. Shrinks on a crash indication and never grows.
     correct: BTreeSet<NodeId>,
     round: u64,
@@ -175,16 +175,11 @@ pub struct FloodingConsensus<P, L = PerfectLink<Flood<P>>> {
     receivedfrom: BTreeMap<u64, BTreeSet<NodeId>>,
     /// The proposals accumulated in each round.
     proposals: BTreeMap<u64, BTreeSet<P>>,
-    beb: BestEffortBroadcast<Flood<P>, L>,
-    detector: PerfectFailureDetector,
-    beb_inbox: Vec<beb::Ind<Flood<P>>>,
-    det_inbox: Vec<pfd::Ind>,
-    /// Sending re-enters the child while its own inbox is in use, so it needs a buffer of its
-    /// own. By construction it stays empty; the assertion in `send` records why.
-    send_inbox: Vec<beb::Ind<Flood<P>>>,
+    beb: Child<BestEffortBroadcast<Flood<P>, L>>,
+    detector: Child<PerfectFailureDetector>,
 }
 
-impl<P, L> FloodingConsensus<P, L> {
+impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
     /// Consensus among `members`, over a link the caller supplies.
     ///
     /// The link is anything satisfying [`Link`]; this layer never names an implementation.
@@ -205,16 +200,13 @@ impl<P, L> FloodingConsensus<P, L> {
             proposed: false,
             receivedfrom,
             proposals: BTreeMap::new(),
-            beb: BestEffortBroadcast::with_link(me, members.clone(), link),
-            detector: PerfectFailureDetector::new(me, members, heartbeat, detect_after),
-            beb_inbox: Vec::new(),
-            det_inbox: Vec::new(),
-            send_inbox: Vec::new(),
+            beb: Child::new(BestEffortBroadcast::with_link(me, members.clone(), link)),
+            detector: Child::new(PerfectFailureDetector::new(me, members, heartbeat, detect_after)),
         }
     }
 }
 
-impl<P> FloodingConsensus<P, PerfectLink<Flood<P>>> {
+impl<P: Clone + Ord> FloodingConsensus<P, PerfectLink<Flood<P>>> {
     /// Consensus among `members`, which must include `me`.
     ///
     /// `detect_after` must exceed `heartbeat` plus the network's delivery bound, or the detector
@@ -239,11 +231,8 @@ impl<P> FloodingConsensus<P, PerfectLink<Flood<P>>> {
             proposed: false,
             receivedfrom,
             proposals: BTreeMap::new(),
-            beb: BestEffortBroadcast::new(me, members.clone(), retransmit),
-            detector: PerfectFailureDetector::new(me, members, heartbeat, detect_after),
-            beb_inbox: Vec::new(),
-            det_inbox: Vec::new(),
-            send_inbox: Vec::new(),
+            beb: Child::new(BestEffortBroadcast::new(me, members.clone(), retransmit)),
+            detector: Child::new(PerfectFailureDetector::new(me, members, heartbeat, detect_after)),
         }
     }
 
@@ -290,12 +279,8 @@ impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
             &mut ProtoCx<'_, BestEffortBroadcast<Flood<P>, L>>,
         ),
     ) {
-        let mut inbox = core::mem::take(&mut self.beb_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, &mut inbox, |ccx| f(beb, ccx));
-        }
-        for ind in inbox.drain(..) {
+        let mut inds = self.beb.run(cx, Wire::Broadcast, f);
+        for ind in inds.drain(..) {
             // The broadcast beneath reports scope boundaries only over a link that raises them.
             // This layer is not yet parameterised over its link, so its child is the perfect link
             // and a boundary cannot arrive. Named rather than dropped: silently absorbing a scope
@@ -306,7 +291,7 @@ impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
             };
             self.on_beb_deliver(from, msg, cx);
         }
-        self.beb_inbox = inbox;
+        self.beb.reclaim(inds);
         self.check_round(cx);
     }
 
@@ -316,18 +301,13 @@ impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut PerfectFailureDetector, &mut ProtoCx<'_, PerfectFailureDetector>),
     ) {
-        let mut inbox = core::mem::take(&mut self.det_inbox);
-        {
-            let detector = &mut self.detector;
-            cx.with_child_consuming(Wire::Detector, &mut inbox, |ccx| f(detector, ccx));
-        }
-        for ind in inbox.drain(..) {
-            let pfd::Ind::Crash { node } = ind;
+        let mut inds = self.detector.run(cx, Wire::Detector, f);
+        for pfd::Ind::Crash { node } in inds.drain(..) {
             // `upon event ⟨ P, Crash | p ⟩ do correct := correct \ {p}`. Permanent: this
             // detector has no Restore, and nothing here would act on one if it did.
             self.correct.remove(&node);
         }
-        self.det_inbox = inbox;
+        self.detector.reclaim(inds);
         // A crash alone can complete a round, by shrinking `correct` to a set already heard
         // from. That is why the guard is checked here and not only on the message path.
         self.check_round(cx);
@@ -411,18 +391,14 @@ impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
     }
 
     fn send(&mut self, msg: Flood<P>, cx: &mut ProtoCx<'_, Self>) {
-        let mut send_inbox = core::mem::take(&mut self.send_inbox);
-        {
-            let beb = &mut self.beb;
-            cx.with_child_consuming(Wire::Broadcast, &mut send_inbox, |ccx| {
-                beb.on_cmd(beb::Cmd::Broadcast(msg), ccx)
-            });
-        }
+        // Re-enters the child while its inbox is out on loan, so `run` hands back a fresh one.
+        let inds =
+            self.beb.run(cx, Wire::Broadcast, |beb, ccx| beb.on_cmd(beb::Cmd::Broadcast(msg), ccx));
         debug_assert!(
-            send_inbox.is_empty(),
+            inds.is_empty(),
             "sending must not deliver synchronously; if it does, check_round can recurse"
         );
-        self.send_inbox = send_inbox;
+        self.beb.reclaim(inds);
     }
 }
 
