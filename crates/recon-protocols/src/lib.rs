@@ -7,9 +7,11 @@
 //! The bottom abstraction, fair-loss links, is not here: it is what the simulator provides.
 
 pub mod best_effort_broadcast;
+pub mod detector;
 pub mod epoch_change;
 pub mod epoch_consensus;
 pub mod eventual_leader_detector;
+pub mod eventually_perfect_failure_detector;
 pub mod fair_loss_link;
 pub mod flooding_consensus;
 pub mod lazy_probabilistic_broadcast;
@@ -33,6 +35,8 @@ pub mod timing;
 pub mod uniform_reliable_broadcast;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
+pub use detector::{Detector, DetectorInd};
+pub use eventually_perfect_failure_detector::EventuallyPerfectFailureDetector;
 pub use fair_loss_link::FairLossLink;
 pub use flooding_consensus::FloodingConsensus;
 pub use logged_epoch_change::LoggedEpochChange;

@@ -25,11 +25,13 @@
 //! call site with its own alias; there is nothing for this crate to name.
 
 use crate::best_effort_broadcast::BestEffortBroadcast;
+use crate::eventual_leader_detector::EventualLeaderDetector;
 use crate::flooding_consensus::{self as fc, FloodingConsensus};
 use crate::lazy_probabilistic_broadcast::{self as lpb, LazyProbabilisticBroadcast};
 use crate::majority_ack_uniform_reliable_broadcast::{
     self as maurb, MajorityAckUniformReliableBroadcast,
 };
+use crate::perfect_failure_detector::PerfectFailureDetector;
 use crate::probabilistic_broadcast::{self as pb, ProbabilisticBroadcast};
 use crate::reliable_broadcast::{self as rb, ReliableBroadcast};
 use crate::session_link::SessionLink;
@@ -86,3 +88,32 @@ pub type LazyProbabilisticBroadcastOverSessions<P> = LazyProbabilisticBroadcast<
     SessionLink<lpb::Recovery<P>>,
     SessionLink<pb::Carried<lpb::Data<P>>>,
 >;
+
+/// Ω over the **perfect** failure detector — what this module was before `◇P` existed.
+///
+/// Strictly stronger than Algorithm 2.8 asks for, and therefore correct: a detector that is right
+/// from the start satisfies "eventually right". What it costs is that a suspicion is permanent, so
+/// leadership only ever walks *downward* through the membership and a process that crashed and
+/// recovered can never lead again. In the crash-stop model nothing recovers and that costs nothing;
+/// in the fail-recovery model it is the difference between a stack that can regain a leader and one
+/// that cannot.
+///
+/// Use it where the delivery bound really is known and permanence is wanted. Otherwise use
+/// [`EventualLeaderDetector`], which defaults to the detector its algorithm names.
+pub type EventualLeaderDetectorOverPerfectDetection =
+    EventualLeaderDetector<PerfectFailureDetector>;
+
+impl EventualLeaderDetectorOverPerfectDetection {
+    /// Ω over a perfect failure detector beating every `heartbeat` and accusing after
+    /// `detect_after` of silence.
+    pub fn over_perfect_detection(
+        me: recon_core::NodeId,
+        peers: impl IntoIterator<Item = recon_core::NodeId>,
+        heartbeat: core::time::Duration,
+        detect_after: core::time::Duration,
+    ) -> Self {
+        EventualLeaderDetector::with_detector(me, peers, |me, all| {
+            PerfectFailureDetector::new(me, all, heartbeat, detect_after)
+        })
+    }
+}

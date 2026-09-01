@@ -68,12 +68,18 @@ bound, which is what this capability declines to do.
 ### Requirement: The timeout adapts in both directions and is bounded
 
 The timeout SHALL increase when a suspicion is found to have been wrong, SHALL decrease after a
-period of sustained accuracy, SHALL never fall below a configured floor, and SHALL never exceed a
-configured maximum.
+period in which **nothing was suspected**, SHALL never fall below a configured floor, and SHALL
+never exceed a configured maximum.
 
 Algorithm 2.7 increases and never decreases. A timeout that only grows leaves detection permanently
 slower after any bad period, with nothing reporting that it has — a liveness failure that does not
 clear when the network does.
+
+The condition for decreasing SHALL be that nothing is suspected, and not merely that no suspicion
+was withdrawn. A network bad enough that suspicions are never taken back produces no withdrawals, so
+the weaker condition eases the timeout off exactly while the detector is being consistently wrong.
+The consequence — a permanently suspected crashed process freezes the timeout where it reached —
+SHALL be stated rather than left to be discovered.
 
 #### Scenario: A false suspicion raises the timeout
 
@@ -82,8 +88,14 @@ clear when the network does.
 
 #### Scenario: Sustained accuracy lowers the timeout
 
-- **WHEN** several consecutive rounds pass with no suspicion withdrawn
+- **WHEN** several consecutive rounds pass with nothing suspected
 - **THEN** the timeout is shorter, and not below the floor
+
+#### Scenario: A bad network does not lower the timeout
+
+- **WHEN** processes are suspected round after round and never heard from, so no suspicion is
+  withdrawn
+- **THEN** the timeout is not lowered
 
 #### Scenario: The timeout does not thrash
 
@@ -94,7 +106,10 @@ clear when the network does.
 
 - **WHEN** the network is bad enough for long enough that the timeout would otherwise grow without
   limit
-- **THEN** it stops at the configured maximum
+- **THEN** it reaches the configured maximum and never passes it
+
+The maximum is a ceiling rather than a resting place: once suspicions clear, the decrease moves the
+timeout back down, and a run observes the trajectory rather than a final value.
 
 ### Requirement: State is bounded by membership and the send rate does not grow
 

@@ -79,6 +79,8 @@
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, Time, TimerId};
+
+use crate::detector::{Detector, DetectorInd};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -185,6 +187,17 @@ impl PerfectFailureDetector {
         for &p in &self.peers {
             self.last_heard.insert(p, now);
         }
+    }
+}
+
+/// `P` satisfies the detector port, and never withdraws a suspicion.
+///
+/// `PFD2` is *strong* accuracy — a detected process has crashed — so there is nothing to take back.
+/// The port's second arm is unreachable over this detector rather than merely unused, which
+/// `tests/detector_port.rs` pins.
+impl Detector for PerfectFailureDetector {
+    fn classify(Ind::Crash { node }: Ind) -> DetectorInd {
+        DetectorInd::Suspect { node }
     }
 }
 

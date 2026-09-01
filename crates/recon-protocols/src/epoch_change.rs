@@ -66,6 +66,38 @@
 //! reader to notice. Nothing about the guarantee changes: `beb::Cmd::SendTo` reaches exactly the
 //! one addressed process, which is what `pl, Send` does.
 //!
+//! # Departure: a leader is told where the processes trusting it have reached
+//!
+//! `⟨ Ω, Trust | p ⟩` is raised when the trusted process **changes**, and Algorithm 5.5 announces an
+//! epoch only on that edge. So a process that trusted *itself* all along is never told it has become
+//! everyone's leader — and if the others ran their epochs ahead under other leaders while it did
+//! not, nothing it would announce is high enough for them to accept, and nothing prompts it to climb.
+//!
+//! Measured, five processes partitioned `[A,B] [C] [D,E]` and then healed: Ω converges correctly on
+//! `E`, and afterwards `trusted = [E,E,E,E,E]` with `lastts = [32, 27, 43, 10, 10]`. `E` is trusted
+//! by everyone, sits in epoch 10, and announces nothing — for ever. Retransmission does not rescue
+//! it either: what `E` re-sends is `NEWEPOCH(10)`, which its recipients' links deduplicate, so it
+//! draws no refusal. `E` received **zero** in thirty timeouts.
+//!
+//! This is a gap in Algorithm 5.5 composed with **Algorithm 2.8**, rather than in either module's
+//! specification: Module 2.9 says only that Ω eventually agrees, and an Ω that re-raised `Trust`
+//! would leave 5.5 correct as written. It was unreachable while the detector beneath was
+//! [`crate::perfect_failure_detector`], whose accusations are permanent, because a partition never
+//! healed for it.
+//!
+//! So a process whose trusted leader changes to one that is **not itself**, while its current epoch
+//! was started by somebody else, tells that leader the timestamp it has reached. The leader then
+//! chooses its next candidate above what it was told. Nothing is sent while nothing has changed: the
+//! report rides the same edge the announcement does.
+//!
+//! # Departure: a refused leader climbs past the refusal in one step
+//!
+//! The same message carries the refuser's own `lastts`, and the leader jumps its candidate above it
+//! rather than adding `N`. Algorithm 5.5 steps once per refusal, which costs a round trip per step —
+//! the gap above is 33, or seven round trips. Boundedness is unaffected, and for the same reason as
+//! before: after the jump the leader's candidate is strictly above what it was told, so a repeated
+//! report names a timestamp it has already passed and moves nothing.
+//!
 //! # Departure: the NACK names the timestamp it refuses
 //!
 //! Algorithm 5.5 sends a bare `[NACK]` and bumps `ts` on every one that arrives. Algorithm 5.8 —
@@ -160,6 +192,9 @@ pub struct EpochChange {
     trusted: NodeId,
     /// `lastts` — the timestamp of the last epoch this process started.
     lastts: u64,
+    /// Who started it. Not the book's; needed to tell whether a newly trusted leader is already the
+    /// one this process is following. See the departure on telling a leader where others have got to.
+    started_by: NodeId,
     /// `ts` — this process's own next candidate, always in its own residue class mod `N`.
     ts: u64,
     omega: Child<EventualLeaderDetector>,
@@ -182,6 +217,7 @@ impl EpochChange {
             peers: peers.clone(),
             trusted: l0,
             lastts: 0,
+            started_by: l0,
             ts: rank(&peers, me),
             omega: Child::new(EventualLeaderDetector::new(
                 me,
@@ -212,11 +248,42 @@ impl EpochChange {
         });
     }
 
+    /// Announce the next candidate strictly above `floor`, staying in this process's residue class.
+    ///
+    /// The class is what keeps timestamps unique across processes — see the note on that above — so
+    /// jumping means rounding up to the next value congruent to `rank(self)` modulo `N`, not simply
+    /// taking `floor + 1`.
+    fn announce_above(&mut self, floor: u64, cx: &mut ProtoCx<'_, Self>) {
+        let n = self.peers.len() as u64;
+        let residue = self.ts % n;
+        let mut next = floor.max(self.ts) + 1;
+        next += (n + residue - next % n) % n;
+        debug_assert!(next > floor && next % n == residue);
+        self.ts = next;
+        let ts = self.ts;
+        self.through_beb(cx, |b, ccx| {
+            b.on_cmd(beb::Cmd::Broadcast(EpochMsg::NewEpoch { ts }), ccx)
+        });
+    }
+
+    /// Tell `leader` the timestamp this process has reached, so a leader that was never told it
+    /// became one can climb above it. Same message as a refusal, and for the same purpose.
+    fn report_to(&mut self, leader: NodeId, cx: &mut ProtoCx<'_, Self>) {
+        let nts = self.lastts;
+        self.through_beb(cx, |b, ccx| {
+            b.on_cmd(beb::Cmd::SendTo { to: leader, msg: EpochMsg::Nack { nts } }, ccx)
+        });
+    }
+
     /// `upon event ⟨ Ω, Trust | p ⟩`.
     fn on_trust(&mut self, leader: NodeId, cx: &mut ProtoCx<'_, Self>) {
         self.trusted = leader;
         if leader == self.me {
             self.announce(cx);
+        } else if self.started_by != leader {
+            // Departure: this process is following an epoch its new leader did not start, and that
+            // leader may never have been told anything changed. Tell it where we have reached.
+            self.report_to(leader, cx);
         }
     }
 
@@ -226,24 +293,26 @@ impl EpochChange {
             EpochMsg::NewEpoch { ts } => {
                 if from == self.trusted && ts > self.lastts {
                     self.lastts = ts;
+                    self.started_by = from;
                     cx.indicate(Ind::StartEpoch { ts, leader: from });
                 } else {
                     // The would-be leader is not who this process trusts, or its timestamp is not
-                    // newer than one already started. Either way: tell it, so it can climb past.
+                    // newer than one already started. Either way: tell it, so it can climb past —
+                    // and name the higher of the two, so it climbs past in one step rather than one
+                    // step per refusal.
+                    let nts = ts.max(self.lastts);
                     self.through_beb(cx, |b, ccx| {
-                        b.on_cmd(
-                            beb::Cmd::SendTo { to: from, msg: EpochMsg::Nack { nts: ts } },
-                            ccx,
-                        )
+                        b.on_cmd(beb::Cmd::SendTo { to: from, msg: EpochMsg::Nack { nts } }, ccx)
                     });
                 }
             }
             // `upon event ⟨ sl, Deliver | p, [NACK, nts] ⟩ such that nts = ts` — Algorithm 5.8's
-            // guard, applied here. Without it this is the divergence described in the module
-            // documentation.
+            // guard, relaxed to `nts ≥ ts` because the report now carries how far the sender has
+            // reached rather than only what it refused. Boundedness is unchanged: the jump leaves
+            // the candidate strictly above `nts`, so a repeat names a timestamp already passed.
             EpochMsg::Nack { nts } => {
-                if self.trusted == self.me && nts == self.ts {
-                    self.announce(cx);
+                if self.trusted == self.me && nts >= self.ts {
+                    self.announce_above(nts, cx);
                 }
             }
         }

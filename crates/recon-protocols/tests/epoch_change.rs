@@ -1,8 +1,9 @@
 //! Epoch-change against Module 5.5 — monotonicity always, consistency eventually.
 
 use core::time::Duration;
-use recon_core::NodeId;
-use recon_protocols::epoch_change::{EpochChange, Ind};
+use recon_core::{Effect, Event, MemStore, NodeId, ProtoEffect, Protocol, Time, step_with};
+use recon_protocols::epoch_change::{EpochChange, EpochMsg, Ind, Wire};
+use recon_protocols::perfect_link as pl;
 use recon_sim::{Config, Sim};
 
 mod common;
@@ -19,6 +20,51 @@ fn sync_sim(seed: u64) -> Sim<EpochChange> {
 }
 
 /// Every epoch `node` started, in order.
+/// `rank(p)` as the module computes it: position in the ordered membership, counting from one.
+fn rank_of(p: NodeId) -> u64 {
+    ALL.iter().position(|q| *q == p).expect("p is a member") as u64 + 1
+}
+
+/// One report or refusal, as it arrives over the wire.
+fn nack(from: NodeId, seq: u64, nts: u64) -> <EpochChange as Protocol>::Msg {
+    Wire::Epoch(pl::Wire { id: pl::MsgId { src: from, seq }, payload: EpochMsg::Nack { nts } })
+}
+
+/// Drive one event against a directly-held instance.
+fn drive(
+    p: &mut EpochChange,
+    ev: Event<
+        <EpochChange as Protocol>::Cmd,
+        <EpochChange as Protocol>::Msg,
+        core::convert::Infallible,
+    >,
+) -> Vec<ProtoEffect<EpochChange>> {
+    use rand::SeedableRng;
+    step_with(
+        p,
+        ev,
+        Time::ZERO,
+        &mut rand_chacha::ChaCha8Rng::seed_from_u64(0),
+        &mut MemStore::default(),
+        &mut 0,
+    )
+}
+
+/// The timestamps announced by these effects.
+fn announcements(fx: &[ProtoEffect<EpochChange>]) -> Vec<u64> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Send { msg: Wire::Epoch(w), .. } => match w.payload {
+                EpochMsg::NewEpoch { ts } => Some(ts),
+                EpochMsg::Nack { .. } => None,
+            },
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<u64>>()
+        .into_iter()
+        .collect()
+}
+
 fn epochs_at(s: &Sim<EpochChange>, node: NodeId) -> Vec<(u64, NodeId)> {
     s.trace().indications_at(node).map(|Ind::StartEpoch { ts, leader }| (*ts, *leader)).collect()
 }
@@ -207,4 +253,92 @@ fn the_send_rate_does_not_grow_once_leadership_has_settled() {
     let mut s = sync_sim(20);
     s.run_for(timeout() * 4);
     assert_send_rate_flat!(s, timeout() * 2, 4);
+}
+
+// ------------------------------------------------- telling a leader where the others reached
+
+#[test]
+fn a_leader_that_never_observed_a_change_still_starts_an_epoch() {
+    // The gap a detector that retracts exposes, and the reason for the report. D is maxrank of the
+    // whole membership *and* of its own partition, so its trusted process never changes and Ω never
+    // tells it anything. Meanwhile [A,B] and [C] run their epochs ahead under leaders of their own.
+    // When the partition heals everyone trusts D — which, told nothing, would announce nothing for
+    // ever, and nothing it retransmits draws a refusal because its recipients deduplicate it.
+    let mut s = sync_sim(13);
+    s.run_for(timeout() * 2);
+    s.partition(&[&[A, B], &[C], &[D]]);
+    s.run_for(timeout() * 6);
+
+    let ahead = s.at(C).last_timestamp().max(s.at(A).last_timestamp());
+    assert!(ahead > s.at(D).last_timestamp(), "the isolated groups ran ahead of D: {ahead}");
+    assert_eq!(s.at(D).trusted(), D, "D trusted itself throughout, so was never told anything");
+
+    s.heal();
+    s.run_for(timeout() * 20);
+
+    for n in ALL {
+        assert_eq!(s.at(n).trusted(), D, "{n} trusts maxrank once suspicions are withdrawn");
+    }
+    let settled = s.at(D).last_timestamp();
+    assert!(settled > ahead, "D's epoch {settled} did not climb past the group that ran ahead");
+    for n in ALL {
+        assert_eq!(s.at(n).last_timestamp(), settled, "{n} did not join D's epoch");
+    }
+}
+
+#[test]
+fn a_refused_leader_climbs_past_in_one_step_not_one_per_refusal() {
+    // The report carries how far the sender has reached, and the leader jumps above it rather than
+    // adding `N` once per refusal — which costs a round trip per step, so crossing a gap of `g`
+    // costs `g / N` of them. Driven directly, because what is under test is the arithmetic and a
+    // run's incidental gap is not evidence about it.
+    let mut d = ec(D);
+    assert_eq!(d.trusted(), D, "D is maxrank, so it trusts itself from the start");
+
+    let fx = drive(&mut d, Event::Msg { from: A, msg: nack(A, 1, 100) });
+    let announced = announcements(&fx);
+    assert_eq!(announced.len(), 1, "one announcement, not one per step of the gap");
+    let ts = announced[0];
+    assert!(ts > 100, "the candidate {ts} is not above the timestamp it was told");
+    assert_eq!(
+        ts % ALL.len() as u64,
+        rank_of(D) % ALL.len() as u64,
+        "the jump left this process's residue class, so two processes could mint {ts}"
+    );
+
+    // And a repeat of the same report names a timestamp already passed, so nothing moves.
+    let fx = drive(&mut d, Event::Msg { from: A, msg: nack(A, 2, 100) });
+    assert!(announcements(&fx).is_empty(), "a repeated report moved the candidate again");
+}
+
+#[test]
+fn a_report_no_higher_than_the_candidate_already_chosen_moves_nothing() {
+    // Boundedness. The refusal guard was relaxed from `nts = ts` to `nts ≥ ts`, and what keeps it
+    // bounded is that the jump leaves the candidate strictly above what was reported — so a repeat
+    // names a timestamp already passed. Repeats are guaranteed: the link beneath retransmits.
+    let mut s = sync_sim(15);
+    s.run_for(timeout() * 4);
+    let settled = s.at(D).last_timestamp();
+    let before = epochs_at(&s, A).len();
+
+    s.run_for(timeout() * 20);
+    assert_eq!(s.at(D).last_timestamp(), settled, "D's epoch moved with nothing changed");
+    assert_eq!(epochs_at(&s, A).len(), before, "an epoch began with nothing changed");
+}
+
+#[test]
+fn a_settled_stack_reports_nothing() {
+    // The report rides the trust-change edge, so a run in which trust never changes contains none
+    // at all — the quiescence the steady-leader test asserts, now that there is a second thing that
+    // could break it.
+    let mut s = sync_sim(16);
+    s.run_for(timeout() * 8);
+    let reports = s
+        .trace()
+        .sends()
+        .filter(
+            |(_, _, m)| matches!(m, Wire::Epoch(w) if matches!(w.payload, EpochMsg::Nack { .. })),
+        )
+        .count();
+    assert_eq!(reports, 0, "a settled stack sent {reports} reports or refusals");
 }

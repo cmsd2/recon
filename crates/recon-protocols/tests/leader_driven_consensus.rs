@@ -368,12 +368,11 @@ fn nothing_is_decided_while_no_majority_exists() {
     // an algorithm that decided here would be violating agreement in every run where the crashed
     // processes had not really crashed.
     //
-    // Crashes rather than a partition, and the reason is the detector. This Ω is derived from a
-    // *perfect* failure detector, whose accusations are permanent — see `eventual_leader_detector`.
-    // A partition therefore does not heal for the detector even when it heals for the network, so a
-    // "restore the majority" run over this stack can never resume, and asserting that it does would
-    // be testing the departure rather than the algorithm. Recovery is where that question belongs,
-    // and `logged_leader_driven_consensus` is where it is asked.
+    // Crashes rather than a partition, and the reason is no longer the detector — Ω now rests on
+    // one that retracts, and a healed partition does heal for it. It is epoch-change that cannot
+    // yet resume: after a heal every process trusts the highest-ranked one, which was already its
+    // own leader throughout and so is never told anything changed, and never announces an epoch
+    // above the ones the other group ran up. See this change's `tasks.md`, group 5.
     let mut s = sync_sim(12);
     // Crashed before anything is proposed: with a quorum available even briefly this algorithm is
     // fast enough to have decided already, and the run would then be testing nothing.
@@ -414,4 +413,44 @@ fn the_send_rate_does_not_grow_after_the_decision() {
     s.run_for(timeout() * 4);
     assert_eq!(decided_by(&s, A), vec![9], "decided first, so the rate measured is the idle one");
     assert_send_rate_flat!(s, timeout() * 2, 4);
+}
+
+#[test]
+fn progress_resumes_when_a_healed_partition_restores_the_majority() {
+    // What `P` made untestable, and what `◇P` alone was not enough for. Three groups, none a
+    // majority: no quorum can form and the honest behaviour is to wait. Healing restores the
+    // majority *and* the detector — and then E, which was maxrank throughout and so was never told
+    // anything changed, has to be told where the others reached before it can lead them. See
+    // `epoch_change`'s departure on reporting to a leader.
+    let mut s = sync_sim(13);
+    s.partition(&[&[A, B], &[C], &[D, E]]);
+    for n in ALL {
+        s.command(n, Cmd::Propose(3));
+    }
+    s.run_for(timeout() * 6);
+
+    assert!(
+        all_decisions(&s).is_empty(),
+        "decided with no majority anywhere: {:?}",
+        all_decisions(&s)
+    );
+    assert!(
+        ALL.iter().any(|n| s.at(*n).epoch() > 0),
+        "nobody entered an epoch, so the run never reached the quorum it is missing"
+    );
+    // Non-vacuity: the groups really did diverge, which is what makes the recovery hard.
+    let epochs: std::collections::BTreeSet<u64> = ALL.iter().map(|n| s.at(*n).epoch()).collect();
+    assert!(epochs.len() > 1, "the partition left everyone in the same epoch: {epochs:?}");
+
+    s.heal();
+    s.run_for(timeout() * 16);
+
+    for n in ALL {
+        assert_eq!(decided_by(&s, n), vec![3], "{n} did not decide after the partition healed");
+    }
+    assert_eq!(
+        s.at(A).leader(),
+        E,
+        "leadership returned to maxrank once suspicions were withdrawn"
+    );
 }

@@ -51,6 +51,31 @@ cap that is occasionally too small costs progress during a network episode and n
 clears when the episode does. The uncapped ratchet costs progress *permanently* and silently. Both
 are liveness failures; only one recovers.
 
+### The decrease eases off on "nothing suspected", not "nothing withdrawn" — found during apply
+
+The obvious reading of "a quiet round" is one in which no suspicion was taken back. It is wrong, and
+wrong in the worst case: a network bad enough that suspicions are *never* withdrawn produces no
+withdrawals, so the delay comes down exactly while the detector is being consistently wrong. Measured
+against a network twelve times the initial delay, the delay drifted back to the floor instead of
+holding near the cap.
+
+The condition is therefore that nothing is suspected at all — no outstanding claim that could be
+wrong, and the network evidently keeping up. A genuinely crashed peer, permanently suspected, then
+**freezes** the delay wherever it reached. That is deliberate and stated: with a crashed process in
+the membership there is no clean signal to ease off on, and freezing is better than the ratchet,
+which grows, and than easing off blindly, which gets more wrong. Telling the two apart means
+measuring the observed silence of the peers you are *not* suspecting — which is an accrual detector,
+and the reason it is the next change.
+
+### Algorithm 2.7's increase is driven by correction, not by error
+
+`alive ∩ suspected ≠ ∅` fires when a suspected process is heard from: a false suspicion caught **in
+the act of being corrected**. So the delay climbs with the rate at which the detector is *caught*,
+not the rate at which it is wrong — and a detector consistently wrong, because every peer is beyond
+the delay every round, is never corrected and never climbs. That is the book's behaviour rather than
+anything added here, and it is the sharpest argument for the cap: the increase alone does not
+converge on a bad network, so what bounds the failure is the ceiling, stated.
+
 ### `◇P2` is conditional, and the table says so
 
 ```text
@@ -121,12 +146,44 @@ change to them would be converting two working modules into broken ones.
 
 Steps 1–3 are safe individually. Step 4 is the one that can surface work.
 
+## The liveness gap this change exposed, and the options
+
+Found at step 4 and measured rather than predicted: after a partition heals, every process trusts
+the highest-ranked one, and that process never announces an epoch, because `⟨Ω, Trust⟩` is
+edge-triggered on the leader *value* and it was already its own leader throughout. The other group's
+epochs ran ahead, so nothing can proceed. Unreachable under `P`; crash-and-restart is unaffected,
+because a restarted Ω trusts afresh from `⊥`.
+
+- **A. Ω re-raises `Trust` whenever `suspected` changes**, even when the leader does not. Three
+  lines. The leader is then told something changed and announces. Costs an epoch — an abort — on
+  every suspicion change anywhere, including ones that cannot affect who leads. Ω's specified
+  property survives, since it says trust is a function of the suspected set and that an *unchanged*
+  set raises nothing; the scenario asserting a restoration below the incumbent raises nothing would
+  be withdrawn.
+- **B. A process prompts the leader it trusts.** Trusting `ℓ ≠ self` while in an epoch led by
+  someone else, it sends `ℓ` a `Nack { nts: lastts }`, and the leader jumps its candidate above
+  `nts`. Reuses the existing message and handler, targets exactly the stuck case, and incidentally
+  fixes the climb — today a leader behind by 30 needs six round trips at `+N` each. A departure from
+  Algorithm 5.5 and a change to `epoch_change`'s spec.
+- **C. The leader re-announces periodically.** What production systems do, and robust against more
+  than this one case. Costs a timer and standing traffic, against a stack that is otherwise silent
+  when idle.
+- **D. Keep `P` as Ω's default**, ship `◇P` and the port, and let the fail-recovery stack opt in
+  where it is tested to work. Everything in this change stands; only the default changes.
+
+**B was chosen**, with a delta spec for `consensus/epoch-change`. It is the smallest departure that
+fixes the mechanism, reuses the message and handler already there, preserves quiescence — nothing is
+sent while nothing has changed — and improves a convergence rate that was separately poor. The
+general form of the problem, a holder of a standing fact re-announcing it so that whoever missed the
+edge converges, is on `README.md`'s roadmap: this repair is reactive and narrow, and was found by a
+test failing rather than by design.
+
 ## Open Questions
 
-- **If epoch churn under a flapping Ω proves unbounded**, the fallback is to keep `P` as Ω's default
-  and offer `◇P` by an alias in `stacks.rs`, leaving the fail-recovery stack to opt in. That would
-  be the honest outcome rather than a failure — but it should be a decision taken on a measurement,
-  and this change is what produces the measurement.
+- ~~**If epoch churn under a flapping Ω proves unbounded**, keep `P` as Ω's default.~~ **Closed.**
+  The churn test passes unchanged and a settled stack is silent. The fallback was not needed, and
+  `stacks::EventualLeaderDetectorOverPerfectDetection` exists for anything that wants the old
+  behaviour anyway.
 - **The accrual detector is deliberately not here.** Reporting a *suspicion level* rather than a
   verdict, and letting each caller pick its own threshold — aggressive for Ω, where being wrong
   costs one epoch; conservative for a layer whose mistake costs safety — is the shape a deployment

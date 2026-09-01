@@ -62,6 +62,15 @@
 //! permanently. Losing its **completeness** costs only *liveness* — everyone blocks, but nobody
 //! is wrong. The asymmetry is the reason this protocol is worth writing.
 //!
+//! # This layer keeps the **perfect** detector, and that is not an oversight
+//!
+//! [`crate::eventually_perfect_failure_detector`] exists, and Ω moved onto it. This layer must not:
+//! it is the fail-**stop** algorithm, and its agreement rests on strong accuracy so completely that
+//! this suite exists largely to demonstrate what one false suspicion costs it. Giving it a detector
+//! allowed to be wrong would not make it deployable; it would make the demonstration untrue.
+//! [`crate::leader_driven_consensus`] is the algorithm that survives an inaccurate detector, and it
+//! is a different algorithm rather than this one reconfigured.
+//!
 //! # Why stabilising later does not help
 //!
 //! The model these algorithms are written against is not one in which the set of correct

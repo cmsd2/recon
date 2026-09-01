@@ -1,10 +1,12 @@
 //! Ω against Module 2.9 — and against the fact that everything above it is only worth testing
 //! where it is *wrong*.
 //!
-//! The last test in this file is the load-bearing one. Ω here is derived from a *perfect* failure
-//! detector, which never lies, so an Ω that always agrees would make every safety test of the Paxos
-//! stack above it vacuous. That the detector can be made to disagree is checked here, before
-//! anything is built on it, rather than discovered later when a suite looks thin.
+//! Two tests here are load-bearing. That the detector can be made to **disagree** is checked before
+//! anything is built on it, because an Ω that always agrees would make every safety test of the
+//! Paxos stack vacuous. And that trust **returns** to a process that was suspected is checked
+//! because it is what `◇P` buys over `P` and what the fail-recovery stack above needs: under a
+//! detector that never retracts, leadership only ever walks downward and a recovered process can
+//! never lead again.
 
 use core::time::Duration;
 use recon_core::NodeId;
@@ -178,4 +180,87 @@ fn the_send_rate_does_not_grow_with_time() {
     let mut s = sync_sim(20);
     s.run_for(timeout() * 2);
     assert_send_rate_flat!(s, timeout() * 2, 4);
+}
+
+// ------------------------------------------------- trust returns: tasks 3.2 and 3.3
+
+#[test]
+fn a_recovered_process_can_lead_again() {
+    // The reason for `◇P`. Under a detector that never retracts, D is suspected the moment it
+    // crashes and stays suspected for the rest of the run, so leadership walks down to C and can
+    // never come back — however long D runs afterwards.
+    let mut s = sync_sim(20);
+    s.run_for(timeout() * 2);
+    assert_eq!(trusted_by(&s, A).last().copied(), Some(D), "D leads, being maxrank");
+
+    s.crash(D);
+    s.run_for(timeout() * 4);
+    assert_eq!(trusted_by(&s, A).last().copied(), Some(C), "leadership walked down to C");
+
+    s.restart(D);
+    s.run_for(timeout() * 6);
+
+    for n in ALL {
+        assert_eq!(
+            trusted_by(&s, n).last().copied(),
+            Some(D),
+            "{n} did not return to the recovered process — leadership only walks downward, which is \
+             what `P` makes unavoidable and `◇P` exists to fix"
+        );
+    }
+    // And it went down and back up, rather than never having moved.
+    assert_eq!(trusted_by(&s, A), vec![D, C, D], "A followed leadership down and back");
+}
+
+#[test]
+fn a_restoration_that_does_not_change_the_leader_raises_nothing() {
+    // Ω's other property, now that `suspected` can shrink: trust is a function of the set, so a
+    // withdrawal below the incumbent's rank changes nothing and must say nothing. Otherwise every
+    // recovery of a low-ranked process would cost the layer above an epoch.
+    let mut s = sync_sim(21);
+    s.run_for(timeout() * 2);
+    s.crash(A);
+    s.run_for(timeout() * 4);
+    let before = trusted_by(&s, D);
+    assert_eq!(before.last().copied(), Some(D), "D leads throughout: A is the lowest rank");
+
+    s.restart(A);
+    s.run_for(timeout() * 6);
+
+    assert_eq!(
+        trusted_by(&s, D),
+        before,
+        "restoring a process below the incumbent changed the trusted process"
+    );
+}
+
+#[test]
+fn leadership_returning_is_a_property_of_the_detector_not_of_omega() {
+    // Composed over `P` instead, the same run cannot recover its leader — because `P` has no
+    // withdrawal to raise. This is the contrast that makes the test above mean something, and it
+    // is why the detector is a parameter rather than a fixed child.
+    use recon_protocols::stacks::EventualLeaderDetectorOverPerfectDetection;
+
+    let mut s: Sim<EventualLeaderDetectorOverPerfectDetection> =
+        Sim::new(Config::default().seed(20).synchronous(BOUND), &ALL, |me| {
+            EventualLeaderDetectorOverPerfectDetection::over_perfect_detection(
+                me,
+                ALL,
+                heartbeat(),
+                timeout(),
+            )
+        });
+    s.run_for(timeout() * 2);
+    s.crash(D);
+    s.run_for(timeout() * 4);
+    s.restart(D);
+    s.run_for(timeout() * 6);
+
+    let trusted: Vec<NodeId> =
+        s.trace().indications_at(A).map(|Ind::Trust { leader }| *leader).collect();
+    assert_eq!(
+        trusted.last().copied(),
+        Some(C),
+        "over a detector that never retracts, leadership cannot return: {trusted:?}"
+    );
 }

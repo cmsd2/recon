@@ -155,6 +155,8 @@ The bottom abstraction, fair-loss links, is not a module: it is what the simulat
 | Stubborn link | [`stubborn_link.rs`](crates/recon-protocols/src/stubborn_link.rs) | Module 2.2, Alg. 2.1 | academic | unbounded |
 | Perfect link | [`perfect_link.rs`](crates/recon-protocols/src/perfect_link.rs) | Module 2.3, Alg. 2.2 | academic as written | unbounded |
 | Perfect failure detector | [`perfect_failure_detector.rs`](crates/recon-protocols/src/perfect_failure_detector.rs) | Module 2.6, Alg. 2.5 | deployable where synchrony is real | bounded by membership |
+| Eventually perfect failure detector, ◇P | [`eventually_perfect_failure_detector.rs`](crates/recon-protocols/src/eventually_perfect_failure_detector.rs) | Module 2.8, Alg. 2.7 | **implementation** | bounded by membership |
+| Detector port | [`detector.rs`](crates/recon-protocols/src/detector.rs) | — | — | — |
 | Best-effort broadcast | [`best_effort_broadcast.rs`](crates/recon-protocols/src/best_effort_broadcast.rs) | Module 3.1, Alg. 3.1 | deployable | bounded by membership |
 | Reliable broadcast | [`reliable_broadcast.rs`](crates/recon-protocols/src/reliable_broadcast.rs) | Module 3.2, Alg. 3.3 | transcription | unbounded |
 | Uniform reliable broadcast | [`uniform_reliable_broadcast.rs`](crates/recon-protocols/src/uniform_reliable_broadcast.rs) | Module 3.3, Alg. 3.4 | transcription | unbounded |
@@ -162,7 +164,7 @@ The bottom abstraction, fair-loss links, is not a module: it is what the simulat
 | Flooding consensus | [`flooding_consensus.rs`](crates/recon-protocols/src/flooding_consensus.rs) | Module 5.1, Alg. 5.1 | academic, fail-stop | bounded by membership and rounds |
 | Probabilistic broadcast | [`probabilistic_broadcast.rs`](crates/recon-protocols/src/probabilistic_broadcast.rs) | Module 3.7, Alg. 3.9 | **implementation** | bounded by a retention window |
 | Lazy probabilistic broadcast | [`lazy_probabilistic_broadcast.rs`](crates/recon-protocols/src/lazy_probabilistic_broadcast.rs) | Module 3.7, Alg. 3.10–3.11 | **implementation** | bounded by a retention window |
-| Eventual leader detector, Ω | [`eventual_leader_detector.rs`](crates/recon-protocols/src/eventual_leader_detector.rs) | Module 2.9, Alg. 2.8 | **implementation** | bounded by membership |
+| Eventual leader detector, Ω | [`eventual_leader_detector.rs`](crates/recon-protocols/src/eventual_leader_detector.rs) | Module 2.9, Alg. 2.8 | **implementation**, over ◇P | bounded by membership |
 | Epoch-change | [`epoch_change.rs`](crates/recon-protocols/src/epoch_change.rs) | Module 5.3, Alg. 5.5 | **implementation** | bounded by membership |
 | Read/write epoch consensus | [`epoch_consensus.rs`](crates/recon-protocols/src/epoch_consensus.rs) | Module 5.4, Alg. 5.6 | **implementation** | bounded by membership |
 | Leader-driven consensus — Paxos | [`leader_driven_consensus.rs`](crates/recon-protocols/src/leader_driven_consensus.rs) | Module 5.2, Alg. 5.7 | **implementation** | bounded by membership |
@@ -353,6 +355,32 @@ layer deciding to stop waiting for an acknowledgement must be conservative, beca
 costs safety. One detector, a threshold each, priced by what a mistake costs that caller. A boolean
 detector forces one answer on everybody.
 
+**Then defensive re-announcement of standing facts.** The current leader, the current epoch, the
+membership: things that are *state*, not events, and that a process joining late or recovering has no
+way to ask for. `epoch_change` already carries one repair for this — a process tells a leader where
+it has reached, because an edge-triggered `⟨Ω, Trust⟩` never tells a leader that never changed its
+mind — and that repair is narrow, reactive and was found by a test failing rather than by design. The
+general form is that a holder of a standing fact re-announces it periodically, so a process that
+missed the edge converges without anyone having to have anticipated how it missed it. It costs
+standing traffic against a stack that is otherwise silent when idle, so it wants measuring rather
+than assuming, and it belongs to the real-world set rather than to the transcriptions.
+
+**And logging and tracing, which this project has been doing by hand.** Every diagnosis in these
+notes was reached by writing a throwaway test that printed a trace and reading it: the epoch that
+climbed to 647,309, the send rate that grew 12.6k → 76.6k per window, the leader that was trusted by
+everyone and announced nothing. That works because the simulator holds the whole run in memory, and
+it stops working the moment anything runs outside one. What is missing is a way for a protocol to
+*say* what it is doing — `tracing` spans and structured events at the decision points a reader would
+want under a real failure: an epoch entered, a suspicion raised or withdrawn, a quorum reached, a
+write made durable, a scope ended.
+
+Two constraints shape it. A protocol is a synchronous state machine that reaches for nothing
+ambient, so a subscriber cannot be a global the way `tracing` usually installs one — it arrives
+through `Cx` like time and randomness do, or the constraint is broken. And the sim's trace is
+already the project's standard of evidence, so the two must not become rival accounts of the same
+run: the trace records what happened *to* a protocol, and this would record what the protocol
+*decided*, which is the half that currently has to be inferred.
+
 After that, `Stop`. Every logged protocol here inherits an unbounded outstanding set from the
 stubborn children, because nothing ever retires a transmission — see
 [`docs/bounded-space.md`](docs/bounded-space.md).
@@ -493,14 +521,15 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 | `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total; a restarted originator's broadcasts delivered, at both layers | 22 / 18 |
 | `tests/probabilistic_broadcast_over_sessions.rs`, `lazy_probabilistic_broadcast_over_sessions.rs` | the real-world set's standard: cost as an identity, silence when idle, a session ending propagated once and repaired by recovery, a restart survived | 6 / 5 |
-| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time | 8 / 9 / 19 |
-| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere | 14 |
+| `tests/eventually_perfect_failure_detector.rs`, `detector_port.rs` | ◇P: a suspicion withdrawn, a timeout that moves both ways, and what the cap costs — swept against a latency rather than asserted | 13 / 5 |
+| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time, and that leadership can **return** to a recovered process | 11 / 13 / 19 |
+| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, and progress resuming when a healed partition restores the majority | 15 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 
-490 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
-`compile_fail` on the link port, two worked examples of a storage slot — 502 in total, all in one
-process, no ports opened.
+516 across the suites above, plus nine unit tests inside `recon-core` and four doctests — two
+`compile_fail` on the link and detector ports, two worked examples of a storage slot — 529 in total,
+all in one process, no ports opened.
 
 ## Licence
 

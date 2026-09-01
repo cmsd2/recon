@@ -86,6 +86,19 @@
 //! is the repair. Nothing is attempted on the *ending* itself: the peer is unreachable at that
 //! moment and anything sent would be discarded.
 //!
+//! # This layer keeps the **perfect** detector, and that is not an oversight
+//!
+//! [`crate::eventually_perfect_failure_detector`] exists, and Ω moved onto it. This layer must not.
+//! Its agreement rests on *strong* accuracy by name — the book's own proof invokes it — and one
+//! false suspicion breaks it, permanently and silently. A detector allowed to be wrong would turn a
+//! correct module into a broken one.
+//!
+//! That is not a gap to be closed later: it is the whole subject of
+//! [`crate::majority_ack_uniform_reliable_broadcast`], which asks *has more than half relayed it?*
+//! instead of *has everyone still believed correct relayed it?*, and drops the detector entirely.
+//! The pair is the demonstration of what strong accuracy is worth, and replacing the detector here
+//! would delete the demonstration rather than improve it.
+//!
 //! ```text
 //! URB1 [always]       Validity — conditional on the two mechanisms below
 //! URB2 [incarnation]  No duplication — `delivered` is volatile, so a restart forgets it

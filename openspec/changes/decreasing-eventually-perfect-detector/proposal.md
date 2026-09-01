@@ -47,6 +47,9 @@ the bad network and then clears; the ratchet's lasts for the rest of the run.
 
 - `failure-detection/eventual-leader-detector`: the detector beneath is a parameter, and trust may
   return to a process that was suspected
+- `consensus/epoch-change`: a leader is told where the processes trusting it have reached, so that
+  one which never observed a change of its own still starts an epoch — the liveness gap a detector
+  that retracts exposes, found while implementing this change and recorded in `design.md`
 
 ## Impact
 
