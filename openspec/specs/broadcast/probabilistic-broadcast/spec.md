@@ -8,7 +8,6 @@ the certainty of reliable broadcast, and this capability states what that trade 
 
 ### Requirement: A broadcast reaches every correct process with high probability
 
-
 A broadcast SHALL reach every correct process with a probability determined by the fanout, the
 number of rounds, and the membership size. It SHALL NOT be required to reach every correct process
 on every run.
@@ -32,7 +31,6 @@ A run in which some correct process never delivers SHALL NOT be reported as a vi
   a failure
 
 ### Requirement: The probabilistic guarantee is evidenced over many runs
-
 
 The guarantee SHALL be asserted over many runs rather than one. A test asserting it SHALL state the
 threshold it requires and the fanout, round count and membership the threshold is derived from, so
@@ -63,13 +61,15 @@ an assertion that cannot fail is the failure mode this project already guards ag
 
 ### Requirement: Nothing is delivered that was not broadcast, and nothing twice
 
-
 A process SHALL deliver a message at most once, and SHALL deliver only messages some process
 broadcast. These hold always, not probabilistically.
 
 Redundant *receipt* is expected and is not duplication: the algorithm's relay is deliberately not
 guarded by the delivery check, so a process may receive the same message many times. What is
 forbidden is delivering it upward more than once.
+
+A broadcast's identity SHALL be scoped to the incarnation of its originator, so that an originator
+which restarts does not name its new broadcasts as ones its receivers have already delivered.
 
 #### Scenario: A message received many times is delivered once
 
@@ -81,8 +81,13 @@ forbidden is delivering it upward more than once.
 - **WHEN** a run completes
 - **THEN** every delivery corresponds to an earlier broadcast
 
-### Requirement: Relaying is bounded by rounds and stops
+#### Scenario: A restarted originator's broadcasts are delivered
 
+- **WHEN** an originator crashes, restarts, and broadcasts again while its earlier identifiers are
+  still within every receiver's window
+- **THEN** the new broadcasts are delivered, and are not discarded as duplicates of the old
+
+### Requirement: Relaying is bounded by rounds and stops
 
 Every relayed message SHALL carry a rounds-to-live count, decremented at each hop, and a process
 SHALL NOT relay a message whose count is exhausted. A broadcast SHALL therefore generate a finite
@@ -100,7 +105,6 @@ number of transmissions and the run SHALL fall silent.
 - **THEN** the number of hops it travels is bounded by the configured round count
 
 ### Requirement: No process sends to the whole membership
-
 
 A process SHALL relay to a randomly chosen subset of its peers whose size is the configured fanout,
 not to all of them. Fanout SHALL be configurable, and the choice SHALL come from the randomness the
@@ -120,7 +124,6 @@ broadcast that fans out to all of `Π` has paid the cost of uncertainty and boug
 - **THEN** each process chooses the same peers in the same order
 
 ### Requirement: State is bounded by a retention window
-
 
 The set a process keeps in order to recognise a message it has already delivered SHALL be bounded
 by a configured retention window, and SHALL NOT grow with the number of messages handled.
@@ -153,7 +156,6 @@ no-duplication holds, and SHALL be described that way.
 
 ### Requirement: The link beneath is a parameter
 
-
 This capability SHALL compose over any link satisfying the link port, and SHALL NOT name a
 particular link implementation.
 
@@ -163,3 +165,31 @@ particular link implementation.
   does not
 - **THEN** both compose, and the protocol is written once
 
+### Requirement: A broadcast costs what the algorithm specifies, and an idle process costs nothing
+
+The messages sent SHALL equal exactly the fanout times one more than the number of receipts with
+rounds still to live, over any run; and when nothing is lost, exactly the closed-form sum of the
+fanout's powers up to the number of rounds, per broadcast. A process with nothing to relay SHALL
+send nothing.
+
+#### Scenario: The send count is the algorithm's
+
+- **WHEN** a run completes over a link that loses nothing
+- **THEN** the number of messages sent per broadcast equals the sum of the fanout's powers from one
+  to the number of rounds, and no more
+
+#### Scenario: An idle gossip is silent
+
+- **WHEN** every broadcast has finished relaying and the run continues
+- **THEN** no further message is sent
+
+### Requirement: A session boundary is propagated and costs only what was in flight
+
+Over a link that reports scope boundaries, this capability SHALL report each boundary upward once,
+and SHALL lose only the messages that were in flight on the session that ended.
+
+#### Scenario: An ending is reported and its cost counted
+
+- **WHEN** a session ends while a broadcast is being relayed across it
+- **THEN** the layer above is told the session ended, the messages in flight on it are the only
+  ones lost, and delivery elsewhere continues
