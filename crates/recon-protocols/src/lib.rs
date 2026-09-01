@@ -13,6 +13,7 @@ pub mod eventual_leader_detector;
 pub mod fair_loss_link;
 pub mod flooding_consensus;
 pub mod lazy_probabilistic_broadcast;
+pub mod leader_driven_consensus;
 pub mod link;
 pub mod logged_link;
 pub mod logged_uniform_reliable_broadcast;

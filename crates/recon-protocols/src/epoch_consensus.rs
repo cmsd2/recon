@@ -142,8 +142,25 @@ pub enum Ind<V> {
     Aborted(State<V>),
 }
 
+/// An epoch message, stamped with the instance it belongs to.
+///
+/// The book writes `ep.ts` and guards every handler with `such that ts = ets`, so instances are
+/// addressed by timestamp and a message for one never reaches another. Nothing in this codebase's
+/// wire does that for free, and the consequence of omitting it is a **safety** failure rather than a
+/// lost message: a `WRITE` from epoch 7 arriving after epoch 11 began would be accepted and recorded
+/// at timestamp 11, inventing an acceptance that never happened.
+///
+/// The stamp lives here rather than in the layer above because the epoch is this instance's own
+/// identity — it stamps what it sends and drops what is not addressed to it, so a parent cannot
+/// forget to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tagged<V> {
+    pub ets: u64,
+    pub msg: EpochMsg<V>,
+}
+
 /// What the broadcast beneath puts on the wire for this layer's messages.
-pub type BebMsg<V> = pl::Wire<EpochMsg<V>>;
+pub type BebMsg<V> = pl::Wire<Tagged<V>>;
 
 /// Abortable consensus within one epoch.
 #[derive(Debug)]
@@ -168,8 +185,8 @@ pub struct EpochConsensus<V> {
     announced: bool,
     /// `halt`. Every handler returns immediately once this is set.
     aborted: bool,
-    beb: BestEffortBroadcast<EpochMsg<V>>,
-    inbox: Vec<beb::Ind<EpochMsg<V>>>,
+    beb: BestEffortBroadcast<Tagged<V>>,
+    inbox: Vec<beb::Ind<Tagged<V>>>,
 }
 
 impl<V: Clone> EpochConsensus<V> {
@@ -226,11 +243,13 @@ impl<V: Clone> EpochConsensus<V> {
     }
 
     fn broadcast(&mut self, msg: EpochMsg<V>, cx: &mut ProtoCx<'_, Self>) {
-        self.through_beb(cx, |b, ccx| b.on_cmd(beb::Cmd::Broadcast(msg), ccx));
+        let tagged = Tagged { ets: self.ets, msg };
+        self.through_beb(cx, |b, ccx| b.on_cmd(beb::Cmd::Broadcast(tagged), ccx));
     }
 
     fn send_to(&mut self, to: NodeId, msg: EpochMsg<V>, cx: &mut ProtoCx<'_, Self>) {
-        self.through_beb(cx, |b, ccx| b.on_cmd(beb::Cmd::SendTo { to, msg }, ccx));
+        let tagged = Tagged { ets: self.ets, msg };
+        self.through_beb(cx, |b, ccx| b.on_cmd(beb::Cmd::SendTo { to, msg: tagged }, ccx));
     }
 
     /// `highest(states)` — the state with the greatest timestamp among those read.
@@ -315,8 +334,8 @@ impl<V: Clone> EpochConsensus<V> {
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(
-            &mut BestEffortBroadcast<EpochMsg<V>>,
-            &mut ProtoCx<'_, BestEffortBroadcast<EpochMsg<V>>>,
+            &mut BestEffortBroadcast<Tagged<V>>,
+            &mut ProtoCx<'_, BestEffortBroadcast<Tagged<V>>>,
         ),
     ) {
         let mut inbox = core::mem::take(&mut self.inbox);
@@ -326,7 +345,13 @@ impl<V: Clone> EpochConsensus<V> {
         }
         for ind in inbox.drain(..) {
             match ind {
-                beb::Ind::Deliver { from, msg } => self.on_epoch_msg(from, msg, cx),
+                // `such that ts = ets` — traffic for another instance is not this one's business,
+                // and reading it would invent an acceptance at the wrong timestamp. Unreachable
+                // while `on_msg` guards the door, and kept because this is where the book puts it.
+                beb::Ind::Deliver { from, msg } if msg.ets == self.ets => {
+                    self.on_epoch_msg(from, msg.msg, cx)
+                }
+                beb::Ind::Deliver { .. } => {}
                 beb::Ind::SessionEnded { .. } | beb::Ind::SessionEstablished { .. } => {}
             }
         }
@@ -363,8 +388,21 @@ impl<V: Clone> Protocol for EpochConsensus<V> {
         }
     }
 
+    /// `such that ts = ets`, applied **at the door** rather than after the link beneath.
+    ///
+    /// The guard has to be here, not only where the delivery is handled, and the reason is the
+    /// perfect link's duplicate-detection set. Each epoch gets a new instance, so each epoch gets a
+    /// new link, and a new link restarts its sequence numbers at one — while the *receiver's* set is
+    /// cleared at a different moment, when its own epoch changes. Hand a foreign-epoch message to
+    /// the link and it records `(src, 1)` as delivered; the real epoch-`ets` message with sequence
+    /// one is then discarded as a duplicate, silently, and that process never answers the leader
+    /// again. Three of five processes stalled this way before the guard moved up here.
+    ///
+    /// This is `CLAUDE.md`'s "identity is as durable as the state it keys" seen from the other side:
+    /// the identifier's scope is one epoch, so nothing outside that epoch may enter the set that
+    /// keys on it.
     fn on_msg(&mut self, from: NodeId, msg: BebMsg<V>, cx: &mut ProtoCx<'_, Self>) {
-        if self.aborted {
+        if self.aborted || msg.payload.ets != self.ets {
             return;
         }
         self.through_beb(cx, |b, ccx| b.on_msg(from, msg, ccx));

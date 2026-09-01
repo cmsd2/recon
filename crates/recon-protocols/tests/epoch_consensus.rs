@@ -3,7 +3,7 @@
 
 use core::time::Duration;
 use recon_core::{Effect, Event, MemStore, NodeId, Time, step_with};
-use recon_protocols::epoch_consensus::{Cmd, EpochConsensus, EpochMsg, Ind, State};
+use recon_protocols::epoch_consensus::{Cmd, EpochConsensus, EpochMsg, Ind, State, Tagged};
 use recon_protocols::perfect_link as pl;
 use recon_sim::{Config as SimConfig, Sim};
 
@@ -19,7 +19,7 @@ fn retransmit() -> Duration {
 }
 
 type Ep = EpochConsensus<u32>;
-type Fx = Vec<Effect<pl::Wire<EpochMsg<u32>>, Ind<u32>>>;
+type Fx = Vec<Effect<pl::Wire<Tagged<u32>>, Ind<u32>>>;
 
 /// An instance for epoch `ets` led by `leader`, beginning from `state`.
 fn ep(me: NodeId, ets: u64, leader: NodeId, state: State<u32>) -> Ep {
@@ -40,23 +40,26 @@ fn store() -> MemStore<core::convert::Infallible, core::convert::Infallible> {
 }
 
 /// Drive one event and return the effects.
-fn drive(
-    p: &mut Ep,
-    ev: Event<Cmd<u32>, pl::Wire<EpochMsg<u32>>, core::convert::Infallible>,
-) -> Fx {
+fn drive(p: &mut Ep, ev: Event<Cmd<u32>, pl::Wire<Tagged<u32>>, core::convert::Infallible>) -> Fx {
     step_with(p, ev, Time::ZERO, &mut rng(), &mut store(), &mut 0)
 }
 
-/// Wrap an epoch message as it arrives from `from` over the broadcast beneath.
-fn arriving(from: NodeId, seq: u64, msg: EpochMsg<u32>) -> pl::Wire<EpochMsg<u32>> {
-    pl::Wire { id: pl::MsgId { src: from, seq }, payload: msg }
+/// Wrap an epoch message as it arrives from `from`, stamped for epoch 7 — the epoch every instance
+/// in this file is in, unless a test says otherwise.
+fn arriving(from: NodeId, seq: u64, msg: EpochMsg<u32>) -> pl::Wire<Tagged<u32>> {
+    stamped(from, seq, 7, msg)
+}
+
+/// The same, for an arbitrary epoch, so the instance guard can be tested.
+fn stamped(from: NodeId, seq: u64, ets: u64, msg: EpochMsg<u32>) -> pl::Wire<Tagged<u32>> {
+    pl::Wire { id: pl::MsgId { src: from, seq }, payload: Tagged { ets, msg } }
 }
 
 /// Every epoch message these effects send, with its destination.
 fn sent(fx: &Fx) -> Vec<(NodeId, EpochMsg<u32>)> {
     fx.iter()
         .filter_map(|e| match e {
-            Effect::Send { to, msg } => Some((*to, msg.payload.clone())),
+            Effect::Send { to, msg } => Some((*to, msg.payload.msg.clone())),
             _ => None,
         })
         .collect()
@@ -338,4 +341,47 @@ fn a_value_decided_in_one_epoch_is_what_a_later_epoch_decides() {
             .collect();
         assert_eq!(got, vec![9], "{n} must decide 9 again, not B's 1000");
     }
+}
+
+// ------------------------------------------------- The instance guard
+
+#[test]
+fn traffic_for_another_epoch_is_dropped() {
+    // `such that ts = ets`. A `WRITE` from a superseded epoch reaching this instance would be
+    // recorded at *this* epoch's timestamp — inventing an acceptance that never happened, which a
+    // later epoch's read would then treat as the most recent thing anyone accepted. A safety
+    // failure, not a lost message.
+    let mut p = fresh(B, 11, A);
+    let stale = stamped(A, 1, 7, EpochMsg::Write { val: 42 });
+    let fx = drive(&mut p, Event::Msg { from: A, msg: stale });
+
+    assert!(sent(&fx).is_empty(), "a message for epoch 7 was answered by the epoch 11 instance");
+    assert_eq!(*p.state(), State::default(), "and nothing was recorded: {:?}", p.state());
+}
+
+#[test]
+fn traffic_for_this_epoch_is_not_dropped() {
+    // Non-vacuity for the guard: the same message, correctly stamped, is acted on. Without this
+    // the test above would pass on an instance that ignored everything.
+    let mut p = fresh(B, 11, A);
+    let current = stamped(A, 1, 11, EpochMsg::Write { val: 42 });
+    let fx = drive(&mut p, Event::Msg { from: A, msg: current });
+
+    assert_eq!(sent(&fx), vec![(A, EpochMsg::Accept)]);
+    assert_eq!(*p.state(), State { valts: 11, val: Some(42) });
+}
+
+#[test]
+fn what_this_instance_sends_carries_its_own_epoch() {
+    let mut p = fresh(A, 11, A);
+    let fx = drive(&mut p, Event::Cmd(Cmd::Propose(9)));
+    let stamps: Vec<u64> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Send { msg, .. } => Some(msg.payload.ets),
+            _ => None,
+        })
+        .collect();
+    assert!(!stamps.is_empty());
+    assert!(stamps.iter().all(|t| *t == 11), "every send is stamped for epoch 11: {stamps:?}");
 }

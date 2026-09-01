@@ -6,7 +6,7 @@
       not suspected, where the proposal had written lowest
 - [ ] 1.1b Transcribe Modules 5.5 and 5.6 and the consensus module into their module docstrings,
       once those modules exist
-- [ ] 1.2 Transcribe Algorithms 5.5, 5.6 and 5.7 into their module docstrings. **The `Uses:` lines
+- [x] 1.2 Transcribe Algorithms 5.5, 5.6 and 5.7 into their module docstrings. **The `Uses:` lines
       are already verified against the book** — the line that was wrong last time and decided which
       link the whole change ran over:
       - 5.5 Leader-Based Epoch-Change: `PerfectPointToPointLinks`, `BestEffortBroadcast`,
@@ -69,24 +69,40 @@
 
 ## 5. Leader-driven consensus — Paxos
 
-- [ ] 5.1 Add the module over epoch-change and epoch consensus per Algorithm 5.7, holding the epoch
+- [x] 5.1 Add the module over epoch-change and epoch consensus per Algorithm 5.7, holding the epoch
       consensus as a concrete field replaced on each epoch change, and verify a run with no faults
-      decides everywhere
-- [ ] 5.2 Verify the next instance is constructed from the state the previous one returned, and not
+      decides everywhere. **It did not, and the cause was the perfect link's duplicate set**: each
+      epoch builds a new link whose sequence numbers restart at one, while the receiver's set is
+      cleared at a different moment, so a foreign-epoch message recorded `(src, 1)` and the real
+      one was discarded as a duplicate. Three of five processes stalled permanently. `ep, on_msg`
+      now drops mis-tagged traffic at the door, before the link beneath can record it
+- [x] 5.2 Verify the next instance is constructed from the state the previous one returned, and not
       before it has answered — collapsing that window loses the state and with it the safety property
-- [ ] 5.3 Verify a decision is final: a new epoch beginning after a process has decided does not make
+- [x] 5.3 Verify a decision is final: a new epoch beginning after a process has decided does not make
       it decide again or differently
-- [ ] 5.4 Verify agreement holds under crashes, including a leader crashing partway through a write
-- [ ] 5.5 **The headline obligation.** Verify agreement holds under an *inaccurate* leader detector:
+- [x] 5.4 Verify agreement holds under crashes, including a leader crashing partway through a write
+- [x] 5.5 **The headline obligation.** Verify agreement holds under an *inaccurate* leader detector:
       withdraw the synchrony assumption so correct processes are suspected, produce two processes
       each acting as leader in overlapping epochs, and assert no two processes decide differently
-- [ ] 5.6 Verify that assertion is not vacuous, by confirming from the trace that more than one
+- [x] 5.6 Verify that assertion is not vacuous, by confirming from the trace that more than one
       process really did act as a leader in overlapping epochs — an agreement assertion over a run
       with one unchallenged leader proves nothing
-- [ ] 5.7 Verify the contrast that justifies the abstraction: the same schedule that splits
+- [x] 5.7 Verify the contrast that justifies the abstraction: the same schedule that splits
       `flooding_consensus` does not split this one
-- [ ] 5.8 Verify termination is conditional and honest — every correct process decides once a
-      majority is correct and the detector settles, and nothing is decided while no majority exists
+- [x] 5.8 Verify termination is conditional and honest — every correct process decides once a
+      majority is correct and the detector settles, and nothing is decided while no majority exists.
+      The no-majority half uses crashes, not a partition: Ω here is derived from a *perfect* failure
+      detector, whose accusations never retract, so a healed partition never heals for the detector
+      and a "restore the majority" run would be testing that departure rather than the algorithm.
+      Recovery is where that question belongs, and it is asked in group 8
+
+      **Found while writing this group, and fixed in `epoch_change`:** Algorithm 5.5's bare `[NACK]`
+      does not terminate over a link that retransmits. Every process that does not yet trust the
+      announcer NACKs, each NACK bumps `ts` and re-announces, and the stubborn link beneath keeps
+      everything alive — a five-process run with one crash reached epoch **647,309** and 2.3 million
+      sends inside a second of virtual time, and no epoch lasted long enough for a write to finish.
+      Algorithm 5.8 sends `[NACK, nts]` and guards with `such that nts = ts`; taking 5.8's form here
+      brings the same run to epoch 14 and 3,511 sends. The departure is recorded in the module
 
 ## 6. The fail-recovery half — logged epoch-change
 

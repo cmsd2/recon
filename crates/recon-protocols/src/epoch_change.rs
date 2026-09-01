@@ -66,6 +66,25 @@
 //! reader to notice. Nothing about the guarantee changes: `beb::Cmd::SendTo` reaches exactly the
 //! one addressed process, which is what `pl, Send` does.
 //!
+//! # Departure: the NACK names the timestamp it refuses
+//!
+//! Algorithm 5.5 sends a bare `[NACK]` and bumps `ts` on every one that arrives. Algorithm 5.8 —
+//! the same abstraction in the fail-recovery model — sends `[NACK, nts]` and guards the handler
+//! with `such that nts = ts`. This module takes 5.8's form, because over a link that retransmits,
+//! 5.5's does not terminate.
+//!
+//! The loop: the leader broadcasts `NEWEPOCH(t)`; every process that does not yet trust it answers
+//! `NACK`; each NACK bumps `ts` and broadcasts again, so one announcement to `N` processes produces
+//! `N − 1` further announcements, each of which produces its own. The stubborn link beneath resends
+//! everything it has ever sent, so nothing decays. Measured before the guard: a five-process run
+//! with one crash reached epoch **647,309** and 2.3 million sends inside a second of virtual time,
+//! and no epoch ever lasted long enough for the consensus above it to finish a write. Measured
+//! after: single figures.
+//!
+//! With the guard, an announcement is answered at most once — the first NACK moves `ts`, and every
+//! later NACK naming the old timestamp is for an announcement already superseded. That is the whole
+//! of the fix, and the book states it one algorithm later.
+//!
 //! ```text
 //! EC1 [always]     Monotonicity — timestamps strictly increase, and one timestamp names one leader
 //! EC2 [eventual]   Consistency — eventually every correct process starts the same last epoch
@@ -85,8 +104,10 @@ use crate::perfect_link as pl;
 pub enum EpochMsg {
     /// `[NEWEPOCH, ts]` — the trusted leader announcing the epoch it wants to start.
     NewEpoch { ts: u64 },
-    /// `[NACK]` — "I will not start that one", sent back to the would-be leader.
-    Nack,
+    /// `[NACK, nts]` — "I will not start that one", sent back to the would-be leader, naming the
+    /// timestamp it is refusing. Algorithm 5.5 writes a bare `[NACK]`; the timestamp is taken from
+    /// Algorithm 5.8, and the reason is in the module documentation.
+    Nack { nts: u64 },
 }
 
 /// The wire, multiplexing the two children.
@@ -213,12 +234,18 @@ impl EpochChange {
                     // The would-be leader is not who this process trusts, or its timestamp is not
                     // newer than one already started. Either way: tell it, so it can climb past.
                     self.through_beb(cx, |b, ccx| {
-                        b.on_cmd(beb::Cmd::SendTo { to: from, msg: EpochMsg::Nack }, ccx)
+                        b.on_cmd(
+                            beb::Cmd::SendTo { to: from, msg: EpochMsg::Nack { nts: ts } },
+                            ccx,
+                        )
                     });
                 }
             }
-            EpochMsg::Nack => {
-                if self.trusted == self.me {
+            // `upon event ⟨ sl, Deliver | p, [NACK, nts] ⟩ such that nts = ts` — Algorithm 5.8's
+            // guard, applied here. Without it this is the divergence described in the module
+            // documentation.
+            EpochMsg::Nack { nts } => {
+                if self.trusted == self.me && nts == self.ts {
                     self.announce(cx);
                 }
             }
