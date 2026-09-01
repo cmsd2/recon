@@ -127,17 +127,29 @@
 
 ## 7. Logged read/write epoch consensus
 
-- [ ] 7.1 Add the module per Algorithm 5.9, over the stubborn link and stubborn broadcast its header
+- [x] 7.1 Add the module per Algorithm 5.9, over the stubborn link and stubborn broadcast its header
       names, and verify the accepted value and timestamp are written before the acceptance is sent —
-      in the handler's own text, not by relying on the driver to buffer effects
-- [ ] 7.2 Verify recovery restores the accepted state, and that a read of a recovered process returns
-      the value and timestamp it accepted rather than an empty state
-- [ ] 7.3 Verify a process that accepted nothing recovers nothing and is not treated as having
-      accepted
-- [ ] 7.4 Verify dying inside the write never leaves an acceptance announced without a record, by
-      spending `crash_on_next_write`
-- [ ] 7.5 Verify safety across crashes and recoveries, including a leader crashing after some but not
-      all processes have accepted
+      in the handler's own text, not by relying on the driver to buffer effects. The same for the
+      decision, one step later
+- [x] 7.2 Verify recovery restores the accepted state, and that a read of a recovered process returns
+      the value and timestamp it accepted rather than an empty state — asserted on the wire, not
+      only in the field, since the leader's READ is still being retransmitted when it comes back
+- [x] 7.3 Verify a process that accepted nothing recovers nothing and is not treated as having
+      accepted. **Not "recovers nothing":** 5.9 stores `(valts, val)` in `Init`, so every process
+      has a record from its first event. What the test asserts is that the record says ⊥
+- [x] 7.4 Verify dying inside the write never leaves an acceptance announced without a record, by
+      spending `crash_on_next_write`. Both outcomes occur across forty seeds, and either way the
+      leader's retransmission brings the acceptance back with a record behind it
+- [x] 7.5 Verify safety across crashes and recoveries, including a leader crashing after some but not
+      all processes have accepted, with a non-vacuity half confirming the write really was left
+      partly applied
+
+      **The stubborn children forced three changes to the book's counters**, all recorded in the
+      module: `accepted := accepted + 1` counts messages and one process's ACCEPT arrives for ever,
+      so it counts processes instead; `upon #(states) > N/2` and `upon accepted > N/2` are re-armed
+      by clearing what they count, which is not enough when the messages come back, so `written` and
+      `announced` make each fire once; and `store` is applied only when it changes something, so the
+      write count stays one per acceptance and a test can check it rather than trust it
 
 ## 8. Logged leader-driven consensus
 
