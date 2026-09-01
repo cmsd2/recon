@@ -352,11 +352,15 @@ openspec/specs/
 ├── simulation/                        determinism, faults, sessions, the trace
 ├── links/                             the port, fair-loss, stubborn, perfect,
 │                                      session, logged
-├── failure-detection/                 perfect failure detector
+├── failure-detection/                 perfect failure detector, eventual
+│                                      leader detector
 ├── broadcast/                         best-effort, reliable, uniform reliable,
 │                                      majority-ack, the logged ones, and the
 │                                      two probabilistic ones
-└── consensus/                         flooding consensus
+└── consensus/                         flooding consensus, epoch-change, epoch
+                                       consensus, leader-driven consensus, and
+                                       the logged version of each of the last
+                                       three
 ```
 
 Work is proposed, applied and archived through OpenSpec. In Claude Code these are slash commands
