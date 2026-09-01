@@ -161,7 +161,7 @@ fn one_request_addresses_the_fanout_not_the_membership() {
     // A gossip arrives from B carrying B's fourth message, while A is still expecting B's first:
     // three gaps, and `forall missing ∈ [next[s], …, sn − 1]` requests each.
     let inner = pb::Gossip {
-        id: pb::BroadcastId { origin: B, seq: 1 },
+        id: pb::BroadcastId { origin: B, incarnation: 0, seq: 1 },
         ttl: 1,
         payload: Data { origin: B, seq: 4, payload: 9u32 },
     };
@@ -353,7 +353,7 @@ fn arrive(
 ) {
     use recon_core::{Event, MemStore, Time, step_with};
     let inner = pb::Gossip {
-        id: pb::BroadcastId { origin, seq },
+        id: pb::BroadcastId { origin, incarnation: 0, seq },
         ttl: 1,
         payload: Data { origin, seq, payload },
     };

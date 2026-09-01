@@ -26,9 +26,11 @@
 
 use crate::best_effort_broadcast::BestEffortBroadcast;
 use crate::flooding_consensus::{self as fc, FloodingConsensus};
+use crate::lazy_probabilistic_broadcast::{self as lpb, LazyProbabilisticBroadcast};
 use crate::majority_ack_uniform_reliable_broadcast::{
     self as maurb, MajorityAckUniformReliableBroadcast,
 };
+use crate::probabilistic_broadcast::{self as pb, ProbabilisticBroadcast};
 use crate::reliable_broadcast::{self as rb, ReliableBroadcast};
 use crate::session_link::SessionLink;
 use crate::uniform_reliable_broadcast::{self as urb, UniformReliableBroadcast};
@@ -65,3 +67,22 @@ pub type MajorityAckUniformReliableBroadcastOverSessions<P> =
 /// Named for completeness rather than because a fork of it existed. Its failure detector's
 /// synchrony assumption is unaffected by the link beneath.
 pub type FloodingConsensusOverSessions<P> = FloodingConsensus<P, SessionLink<fc::Carried<P>>>;
+
+/// Eager gossip over a session link — the real-world set's form of Algorithm 3.9.
+///
+/// Within a session nothing is lost, so the only loss is a session ending, which this layer
+/// propagates: it keeps identifiers rather than payloads and has nothing to resend. `PB1` stays
+/// probabilistic because `picktargets` is still random.
+pub type ProbabilisticBroadcastOverSessions<P> =
+    ProbabilisticBroadcast<P, SessionLink<pb::Carried<P>>>;
+
+/// Lazy gossip over session links — both halves, the gossip and the recovery, over one session per
+/// peer pair.
+///
+/// Bridges a session ending the way the algorithm bridges any loss: the next message from that
+/// sender exposes the gap, and a request pulls what the ending dropped from whoever stored it.
+pub type LazyProbabilisticBroadcastOverSessions<P> = LazyProbabilisticBroadcast<
+    P,
+    SessionLink<lpb::Recovery<P>>,
+    SessionLink<pb::Carried<lpb::Data<P>>>,
+>;

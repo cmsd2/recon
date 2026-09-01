@@ -49,15 +49,17 @@ process stored it, and delivery from that sender SHALL continue in sequence.
 
 ### Requirement: Recovery traffic is bounded by the gaps
 
-Requests SHALL not exceed the gaps detected, answers SHALL not exceed the requests received by
-processes that had stored the message, and a process with no gap and no request SHALL send
-nothing.
+Request messages SHALL equal the fanout times the gaps detected plus the requests relayed — a
+detected gap is gossiped to the fanout, as Algorithm 3.10 has it, and nothing else sends one —
+answers SHALL not exceed the requests received by processes that had stored the message, and a
+process with no gap and no request SHALL send nothing.
 
 #### Scenario: Requests match gaps
 
-- **WHEN** a run completes
-- **THEN** the number of requests sent is at most the number of gaps detected, and the number of
-  answers is at most the number of requests that reached a process holding the message
+- **WHEN** a run completes with one round of requests, so that none is relayed
+- **THEN** the number of request messages sent is exactly the fanout times the number of distinct
+  gaps detected, and the number of answers is at most the number of requests that reached a
+  process holding the message
 
 #### Scenario: Quiet means silent
 

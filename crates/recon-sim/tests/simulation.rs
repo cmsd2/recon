@@ -1608,3 +1608,27 @@ fn a_run_with_timers_reproduces_from_its_seed_including_its_handles() {
     assert!(fires > 10, "non-vacuity: the run must actually have fired timers");
     assert_eq!(first, again, "the same seed must reproduce the same trace, handles included");
 }
+
+// ------------------------------------------------------- stepping by event, not by duration
+
+#[test]
+fn step_now_dispatches_this_instant_and_leaves_the_clock_where_it_is() {
+    // A command is scheduled, not run. `step_now` runs it — and everything else due now — without
+    // moving the clock, so what it sent is in flight afterwards and a test can act on that state
+    // without guessing at a duration shorter than the latency.
+    let mut s =
+        sim(Config::default().seed(1).latency(Duration::from_millis(5), Duration::from_millis(10)));
+    s.command(A, Cmd::SendTo(B, 7));
+    assert_eq!(s.trace().send_count(), 0, "scheduled, not yet run");
+
+    s.step_now();
+    assert_eq!(s.now(), Time::ZERO, "the clock did not move");
+    assert_eq!(s.trace().send_count(), 1, "the command ran and its send is in flight");
+    assert_eq!(s.trace().delivery_count(), 0, "nothing due later was touched");
+
+    s.step_now();
+    assert_eq!(s.trace().delivery_count(), 0, "a second call at the same instant finds nothing");
+
+    s.run_for(Duration::from_millis(20));
+    assert_eq!(s.trace().delivery_count(), 1);
+}

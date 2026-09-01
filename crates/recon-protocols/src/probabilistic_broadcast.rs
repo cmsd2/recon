@@ -66,6 +66,16 @@
 //! `CLAUDE.md` requires: a durable set keyed by a volatile counter is the bug, and neither half is
 //! durable here.
 //!
+//! **The identifier also names the originator's incarnation.** A volatile counter restarts at one
+//! when its process does, and every *other* process's window is keyed on it — so without this, an
+//! originator that crashed and came back would have its first `window` broadcasts discarded
+//! everywhere as duplicates of ones it sent before. The incarnation is a value drawn from the seeded
+//! generator at `Init`: distinct across restarts with probability `1 − 2⁻⁶⁴` per pair, decided by
+//! the one process that knows it restarted, and needing no storage. A session boundary could not
+//! have done this job — a receiver's link is to a relayer, not to the originator, and a link cannot
+//! tell a reconnect from a restart in any case (`docs/conditional-guarantees.md`). Under the book's
+//! crash-stop model nobody restarts and the field is inert; it exists for the real-world set.
+//!
 //! # The retention window, which is this project's and not the book's
 //!
 //! Page 100: "garbage collection of the stored message copies is omitted in the pseudo code for
@@ -97,6 +107,8 @@ use crate::link::{Boundary, LinkInd, VolatileLink};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BroadcastId {
     pub origin: NodeId,
+    /// Which incarnation of `origin` sent it. See the module note on identity.
+    pub incarnation: u64,
     pub seq: u64,
 }
 
@@ -167,12 +179,15 @@ pub struct ProbabilisticBroadcast<P: Clone, L: VolatileLink<Carried<P>> = FairLo
     /// Π — every process, including this one. The sender delivers to itself directly, as Algorithm
     /// 3.9 has it, so `picktargets` draws from everyone else.
     peers: BTreeSet<NodeId>,
+    /// This incarnation's name, drawn at `Init`. Zero until then, which a driver that never sends
+    /// `Init` — a test stepping the protocol by hand — will see.
+    incarnation: u64,
     seq: u64,
     config: Config,
     /// Identifiers already delivered, and the order they arrived in per sender, so the oldest can
-    /// be evicted in constant time. Bounded by `config.window` per sender.
+    /// be evicted in constant time. Bounded by `config.window` per sender, across incarnations.
     delivered: BTreeSet<BroadcastId>,
-    order: BTreeMap<NodeId, VecDeque<u64>>,
+    order: BTreeMap<NodeId, VecDeque<(u64, u64)>>,
     link: Child<L>,
     _payload: core::marker::PhantomData<fn() -> P>,
 }
@@ -203,6 +218,7 @@ impl<P: Clone, L: VolatileLink<Carried<P>>> ProbabilisticBroadcast<P, L> {
         ProbabilisticBroadcast {
             me,
             peers,
+            incarnation: 0,
             seq: 0,
             config,
             delivered: BTreeSet::new(),
@@ -232,6 +248,11 @@ impl<P: Clone, L> ProbabilisticBroadcast<P, L>
 where
     L: VolatileLink<Carried<P>>,
 {
+    /// The link beneath.
+    pub fn link(&self) -> &L {
+        &self.link
+    }
+
     /// Run the link, then act on whatever it reported.
     fn through_link(
         &mut self,
@@ -310,11 +331,11 @@ where
     fn record(&mut self, id: BroadcastId) {
         self.delivered.insert(id);
         let seen = self.order.entry(id.origin).or_default();
-        seen.push_back(id.seq);
+        seen.push_back((id.incarnation, id.seq));
         if seen.len() > self.config.window
-            && let Some(evicted) = seen.pop_front()
+            && let Some((incarnation, seq)) = seen.pop_front()
         {
-            self.delivered.remove(&BroadcastId { origin: id.origin, seq: evicted });
+            self.delivered.remove(&BroadcastId { origin: id.origin, incarnation, seq });
         }
     }
 }
@@ -337,7 +358,7 @@ where
     /// `upon event ⟨ pb, Broadcast | m ⟩` — deliver to self, then gossip.
     fn on_cmd(&mut self, Cmd::Broadcast(payload): Cmd<P>, cx: &mut ProtoCx<'_, Self>) {
         self.seq += 1;
-        let id = BroadcastId { origin: self.me, seq: self.seq };
+        let id = BroadcastId { origin: self.me, incarnation: self.incarnation, seq: self.seq };
         self.record(id);
         cx.indicate(Ind::Deliver { from: self.me, msg: payload.clone() });
         self.gossip(Gossip { id, ttl: self.config.rounds, payload }, cx);
@@ -349,6 +370,13 @@ where
 
     fn on_timer(&mut self, id: TimerId, cx: &mut ProtoCx<'_, Self>) {
         self.through_link(cx, |link, ccx| link.on_timer(id, ccx));
+    }
+
+    /// Name this incarnation. Runs on a first start and on every restart, which is the point: a
+    /// restarted process is a new incarnation and its identifiers must say so.
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.incarnation = cx.rng().next_u64();
+        self.through_link(cx, |link, ccx| link.on_init(ccx));
     }
 
     /// Hand the scope ending down to the link. The trait's default would drop it.

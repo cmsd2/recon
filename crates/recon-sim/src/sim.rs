@@ -382,6 +382,27 @@ where
     }
 
     /// Process every event scheduled within `d` of now.
+    /// Dispatch everything scheduled for the current instant, and nothing later. The clock does not
+    /// move.
+    ///
+    /// For sequencing a test by *events* rather than by durations: a command is scheduled, not run,
+    /// so `command(...)` followed by `break_session(...)` breaks a session with nothing in flight.
+    /// `step_now()` between them runs the handler, whose sends then sit in the queue at their
+    /// latency — in flight, and the break finds them. The older idiom, `run_for(1 ms)` with a
+    /// comment, depends on the latency being longer than the millisecond.
+    pub fn step_now(&mut self) {
+        let now = self.now;
+        while self.steps < self.config.max_steps {
+            let Some((&key, _)) = self.queue.iter().next() else { break };
+            if key.0 > now {
+                break;
+            }
+            let item = self.queue.remove(&key).expect("key just observed");
+            self.steps += 1;
+            self.dispatch(item);
+        }
+    }
+
     pub fn run_for(&mut self, d: Duration) {
         self.run_until(self.now + d);
     }

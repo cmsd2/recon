@@ -153,7 +153,7 @@ deployment the transport has already constructed it.
 | reliable broadcast | **deployed**, once `delivered` is windowed |
 | uniform reliable broadcast | **deployed**, once `pending`, `ack` and `delivered` are collected |
 | perfect failure detector | **deployed only where synchrony is real.** Otherwise ◇P |
-| **the gossip pair** | **the real-world set**, as of 2026-09. Bounded by a window; the second obligation — session links, and a message count checked against the work — is the next change |
+| **the gossip pair** | **the real-world set**, as of 2026-09. Bounded by a window, over session links, and their cost is asserted as an identity: `Σ kⁱ` per broadcast, `k` requests per gap, and **zero** when idle |
 | eventual leader detector, Ω | would be, over ◇P. Derived here from P, which is stronger than the book's ◇P and never re-trusts a recovered process |
 | epoch-change and epoch consensus | **the book's stepping stones** to Paxos; bounded by membership and tested where the detector is wrong, kept faithful rather than tuned |
 | leader-driven consensus | **not in the real-world set** — single-instance Paxos is what the book builds, and multi-Paxos is what ships. Kept as the page has it |

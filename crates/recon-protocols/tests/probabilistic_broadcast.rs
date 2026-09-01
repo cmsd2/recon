@@ -239,7 +239,7 @@ fn different_seeds_choose_differently() {
 
 #[test]
 fn the_wire_survives_encoding() {
-    let m = Gossip { id: BroadcastId { origin: A, seq: 3 }, ttl: 2, payload: 7u32 };
+    let m = Gossip { id: BroadcastId { origin: A, incarnation: 0, seq: 3 }, ttl: 2, payload: 7u32 };
     assert_eq!(recon_sim::codec::round_trip(&m).expect("round trip"), m);
 }
 
@@ -380,7 +380,7 @@ fn arrive(
     r: &mut rand_chacha::ChaCha8Rng,
     ids: &mut u64,
 ) -> Vec<Effect<Gossip<u32>, Ind<u32>>> {
-    let wire = Gossip { id: BroadcastId { origin, seq }, ttl: 1, payload };
+    let wire = Gossip { id: BroadcastId { origin, incarnation: 0, seq }, ttl: 1, payload };
     step_with(p, Event::Msg { from: B, msg: wire }, Time::ZERO, r, &mut store(), ids)
 }
 
@@ -463,7 +463,10 @@ fn no_duplication_holds_within_the_window_and_not_beyond_it() {
     for seq in 2..=(window as u64 + 2) {
         arrive(&mut p, B, seq, seq as u32, &mut r, &mut ids);
     }
-    assert!(!p.has_delivered(BroadcastId { origin: B, seq: 1 }), "seq 1 has been evicted");
+    assert!(
+        !p.has_delivered(BroadcastId { origin: B, incarnation: 0, seq: 1 }),
+        "seq 1 has been evicted"
+    );
 
     let beyond = arrive(&mut p, B, 1, 100, &mut r, &mut ids);
     assert_eq!(
@@ -471,4 +474,50 @@ fn no_duplication_holds_within_the_window_and_not_beyond_it() {
         1,
         "beyond the window it is delivered again, which is what `PB2 [window]` says"
     );
+}
+
+// ------------------------------------------------- identity survives the originator: task 1.2
+
+#[test]
+fn a_restarted_originators_broadcasts_are_delivered_not_discarded_as_duplicates() {
+    // `BroadcastId` carries the originator's incarnation, drawn at `Init`. Without it a restarted
+    // originator restarts its sequence at one and every receiver's window — still holding
+    // `(A, 1..=3)` from before — would discard the new broadcasts as duplicates of the old.
+    //
+    // Fanout of the whole peer set and one round, so every broadcast reaches everyone directly and
+    // the only thing that can stop a delivery is the window.
+    let mut s = sim(31, Config { fanout: ALL.len() - 1, rounds: 1, window: ROOMY });
+    for m in [1, 2, 3] {
+        s.command(A, Cmd::Broadcast(m));
+    }
+    s.run_for(Duration::from_millis(200));
+    s.crash(A);
+    s.restart(A);
+    for m in [4, 5, 6] {
+        s.command(A, Cmd::Broadcast(m));
+    }
+    s.run_for(Duration::from_millis(200));
+
+    for n in ALL {
+        let got: Vec<u32> = s
+            .trace()
+            .indications_at(n)
+            .filter_map(|i| match i {
+                Ind::Deliver { from: A, msg } => Some(*msg),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, vec![1, 2, 3, 4, 5, 6], "{n} lost the restarted originator's broadcasts");
+    }
+
+    // Non-vacuity: the sequence numbers really did collide, and only the incarnation told them
+    // apart. Read from the wire.
+    let ids: std::collections::BTreeSet<BroadcastId> =
+        s.trace().sends().filter(|(from, _, _)| *from == A).map(|(_, _, g)| g.id).collect();
+    let seqs: std::collections::BTreeSet<u64> = ids.iter().map(|id| id.seq).collect();
+    let incarnations: std::collections::BTreeSet<u64> =
+        ids.iter().map(|id| id.incarnation).collect();
+    assert_eq!(seqs, [1, 2, 3].into_iter().collect(), "the sequence restarted at one both times");
+    assert_eq!(incarnations.len(), 2, "two incarnations named themselves differently");
+    assert_eq!(ids.len(), 6, "six distinct identifiers, where a bare (origin, seq) gives three");
 }

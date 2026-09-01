@@ -199,6 +199,7 @@ type Urb = UniformReliableBroadcast<u32, MyLink<uniform_reliable_broadcast::Carr
 | Link port | [`link.rs`](crates/recon-protocols/src/link.rs) | — | — |
 | Ready-made stacks | [`stacks.rs`](crates/recon-protocols/src/stacks.rs) | — | — |
 | Session link | [`session_link.rs`](crates/recon-protocols/src/session_link.rs) | deployable | bounded by membership |
+| Gossip over sessions | `ProbabilisticBroadcastOverSessions`, `LazyProbabilisticBroadcastOverSessions` in `stacks.rs` | **the real-world set** | bounded by a retention window; idle cost zero |
 
 There were four forked `session_*` broadcast modules until the link became a parameter — around
 2,000 lines whose algorithms were the originals with the link swapped underneath, and in which the
@@ -250,8 +251,14 @@ that is what it is for. A **small number** are maintained as things that would a
 they are held to a second standard besides correctness: they run over the **session link** rather
 than the stubborn one, and their resource use is checked — minimal messages for the work, and no
 growth in state or in send rate with how long they have been running. Today that set is the two
-gossip protocols. Multi-Paxos will join it when it is written; single-instance Paxos will not — it
-is the book's stepping stone, and is kept as one.
+gossip protocols, and both now meet the standard. `tests/probabilistic_broadcast_over_sessions.rs`
+asserts a broadcast's cost as an identity — `k` sends per receipt with rounds to live, `Σ kⁱ` per
+broadcast when nothing is lost — and that an idle gossip sends **nothing**;
+`tests/lazy_probabilistic_broadcast_over_sessions.rs` asserts that a session ending is a loss the
+recovery phase repairs, at exactly `k` requests per gap. A `BroadcastId` now names its originator's
+incarnation, so a restarted originator's broadcasts are not discarded as duplicates of the old.
+Multi-Paxos will join the set when it is written; single-instance Paxos will not — it is the book's
+stepping stone, and is kept as one.
 
 ### Detectors versus quorums
 
@@ -456,7 +463,7 @@ cargo test --workspace -- --nocapture                 # with output
 | Suite | Covers | Tests |
 |---|---|---|
 | [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, and a durable child inside a durable parent | 29 |
-| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles | 80 |
+| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event | 81 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | [`tests/link_port.rs`](crates/recon-protocols/tests/link_port.rs), `foreign_link.rs` | that both links satisfy the port, that a protocol is not a link by accident, and that a link this project never wrote carries the stack up to consensus | 6 / 3 |
 | `tests/alloc_probe.rs` | what one delivery costs in allocations | 2 |
@@ -467,14 +474,15 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/majority_ack_uniform_reliable_broadcast.rs`, `majority_ack_over_sessions.rs` | the same guarantees without a failure detector, over each link | 18 / 16 |
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
-| `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total | 21 / 15 |
+| `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total; a restarted originator's broadcasts delivered | 22 / 15 |
+| `tests/probabilistic_broadcast_over_sessions.rs`, `lazy_probabilistic_broadcast_over_sessions.rs` | the real-world set's standard: cost as an identity, silence when idle, a session ending propagated once and repaired by recovery | 6 / 4 |
 | `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time | 8 / 9 / 19 |
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere | 14 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 
-472 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
-`compile_fail` on the link port, two worked examples of a storage slot — 484 in total, all in one
+484 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
+`compile_fail` on the link port, two worked examples of a storage slot — 496 in total, all in one
 process, no ports opened.
 
 ## Licence

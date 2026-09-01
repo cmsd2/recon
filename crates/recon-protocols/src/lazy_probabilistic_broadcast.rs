@@ -186,15 +186,26 @@ pub struct Config {
     pub window: usize,
 }
 
-/// The gossip this layer rides on: Algorithm 3.9 over the fair-loss link it names, carrying
-/// [`Data`].
-pub type Gossiper<P> = ProbabilisticBroadcast<Data<P>, FairLossLink<pb::Carried<Data<P>>>>;
+/// The gossip this layer rides on: Algorithm 3.9 carrying [`Data`], over `G` — the fair-loss link
+/// the book names unless the caller says otherwise.
+pub type Gossiper<P, G = FairLossLink<pb::Carried<Data<P>>>> = ProbabilisticBroadcast<Data<P>, G>;
 
 /// Gossip with recovery.
-pub struct LazyProbabilisticBroadcast<P, L = FairLossLink<Recovery<P>>>
-where
+///
+/// Two links, both parameters: `L` carries the recovery traffic and `G` carries the gossip. Over
+/// sessions both are session links — two instances each holding one epoch per peer, both handed
+/// every scope event, on one wire — which is how [`crate::uniform_reliable_broadcast`] already puts
+/// a broadcast and a detector together. Their scopes must agree (`G::Scope = L::Scope`), because a
+/// scope event reaching this layer is one event about one session and goes to both.
+pub struct LazyProbabilisticBroadcast<
+    P,
+    L = FairLossLink<Recovery<P>>,
+    G = FairLossLink<pb::Carried<Data<P>>>,
+> where
     P: Clone + serde::Serialize + serde::de::DeserializeOwned,
     L: VolatileLink<Recovery<P>>,
+    L::Scope: Clone,
+    G: VolatileLink<pb::Carried<Data<P>>, Scope = L::Scope>,
 {
     me: NodeId,
     peers: BTreeSet<NodeId>,
@@ -212,7 +223,7 @@ where
     stored_order: BTreeMap<NodeId, VecDeque<u64>>,
     /// Which gap each outstanding timer is waiting on.
     timers: BTreeMap<TimerId, (NodeId, u64)>,
-    upb: Child<Gossiper<P>>,
+    upb: Child<Gossiper<P, G>>,
     link: Child<L>,
 }
 
@@ -229,13 +240,38 @@ where
 impl<P, L> LazyProbabilisticBroadcast<P, L>
 where
     P: Clone + serde::Serialize + serde::de::DeserializeOwned,
-    L: VolatileLink<Recovery<P>>,
+    L: VolatileLink<Recovery<P>, Scope = core::convert::Infallible>,
 {
-    /// Lazy probabilistic broadcast, over the link supplied for its recovery traffic.
+    /// Lazy probabilistic broadcast, over the link supplied for its recovery traffic and the
+    /// book's fair-loss link for the gossip.
+    ///
+    /// Only for a recovery link that reports no boundary: the gossip beneath runs over a fair-loss
+    /// link here, and the two links' scopes have to agree. Over sessions use
+    /// [`LazyProbabilisticBroadcast::with_links`] with a session link for both.
     pub fn with_link(
         me: NodeId,
         peers: impl IntoIterator<Item = NodeId>,
         link: L,
+        config: Config,
+    ) -> Self {
+        Self::with_links(me, peers, FairLossLink::new(), link, config)
+    }
+}
+
+impl<P, L, G> LazyProbabilisticBroadcast<P, L, G>
+where
+    P: Clone + serde::Serialize + serde::de::DeserializeOwned,
+    L: VolatileLink<Recovery<P>>,
+    L::Scope: Clone,
+    G: VolatileLink<pb::Carried<Data<P>>, Scope = L::Scope>,
+{
+    /// Lazy probabilistic broadcast over two links: `gossip` beneath the eager broadcast that
+    /// disseminates data, `recovery` for the requests and answers that repair gaps.
+    pub fn with_links(
+        me: NodeId,
+        peers: impl IntoIterator<Item = NodeId>,
+        gossip: G,
+        recovery: L,
         config: Config,
     ) -> Self {
         let mut peers: BTreeSet<NodeId> = peers.into_iter().collect();
@@ -251,14 +287,19 @@ where
             pending_order: BTreeMap::new(),
             stored_order: BTreeMap::new(),
             timers: BTreeMap::new(),
-            upb: Child::new(ProbabilisticBroadcast::with_link(
-                me,
-                peers,
-                FairLossLink::new(),
-                config.gossip,
-            )),
-            link: Child::new(link),
+            upb: Child::new(ProbabilisticBroadcast::with_link(me, peers, gossip, config.gossip)),
+            link: Child::new(recovery),
         }
+    }
+
+    /// The link the gossip travels over.
+    pub fn gossip_link(&self) -> &G {
+        self.upb.link()
+    }
+
+    /// The link the recovery traffic travels over.
+    pub fn recovery_link(&self) -> &L {
+        &self.link
     }
 
     /// `next[s]`, which is one until this process has delivered anything from `s`.
@@ -282,29 +323,28 @@ where
     }
 }
 
-impl<P: Clone, L> LazyProbabilisticBroadcast<P, L>
+impl<P: Clone, L, G> LazyProbabilisticBroadcast<P, L, G>
 where
     L: VolatileLink<Recovery<P>>,
+    L::Scope: Clone,
+    G: VolatileLink<pb::Carried<Data<P>>, Scope = L::Scope>,
     P: serde::Serialize + serde::de::DeserializeOwned,
 {
     /// Run the gossip child, then act on what it reported.
     fn through_upb(
         &mut self,
         cx: &mut ProtoCx<'_, Self>,
-        f: impl FnOnce(&mut Gossiper<P>, &mut ProtoCx<'_, Gossiper<P>>),
+        f: impl FnOnce(&mut Gossiper<P, G>, &mut ProtoCx<'_, Gossiper<P, G>>),
     ) {
         let mut inds = self.upb.run(cx, Wire::Gossip, f);
         for ind in inds.drain(..) {
             match ind {
                 pb::Ind::Deliver { msg, .. } => self.on_upb_deliver(msg, cx),
-                // The gossip is composed over a fair-loss link, which reports no boundary. The
-                // arm exists because the type says it can, not because it can.
-                pb::Ind::SessionEnded { peer, epoch } => {
-                    cx.indicate(Ind::SessionEnded { peer, epoch })
-                }
-                pb::Ind::SessionEstablished { peer, epoch } => {
-                    cx.indicate(Ind::SessionEstablished { peer, epoch })
-                }
+                // A boundary the gossip's link observed. The recovery link observed the same one —
+                // both links are handed every scope event, and their scopes are one type by the
+                // bound on `G` — so it is reported upward from `through_link` and once. Reporting
+                // it here too would tell the layer above one session ended twice.
+                pb::Ind::SessionEnded { .. } | pb::Ind::SessionEstablished { .. } => {}
             }
         }
         self.upb.reclaim(inds);
@@ -477,14 +517,16 @@ where
     }
 }
 
-impl<P, L> Protocol for LazyProbabilisticBroadcast<P, L>
+impl<P, L, G> Protocol for LazyProbabilisticBroadcast<P, L, G>
 where
     P: Clone + serde::Serialize + serde::de::DeserializeOwned,
     L: VolatileLink<Recovery<P>>,
+    L::Scope: Clone,
+    G: VolatileLink<pb::Carried<Data<P>>, Scope = L::Scope>,
 {
     type Cmd = Cmd<P>;
     type Ind = Ind<P>;
-    type Msg = Wire<pb::Carried<Data<P>>, L::Msg>;
+    type Msg = Wire<G::Msg, L::Msg>;
     type Scope = L::Scope;
     /// Keeps nothing durably.
     type Meta = core::convert::Infallible;
@@ -527,7 +569,15 @@ where
         self.through_link(cx, |link, ccx| link.on_timer(id, ccx));
     }
 
+    /// Both children run over the same session, so both are told when it ends or begins.
     fn on_scope_event(&mut self, scope: L::Scope, cx: &mut ProtoCx<'_, Self>) {
+        let for_gossip = scope.clone();
+        self.through_upb(cx, |upb, ccx| upb.on_scope_event(for_gossip, ccx));
         self.through_link(cx, |link, ccx| link.on_scope_event(scope, ccx));
+    }
+
+    fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.through_upb(cx, |upb, ccx| upb.on_init(ccx));
+        self.through_link(cx, |link, ccx| link.on_init(ccx));
     }
 }
