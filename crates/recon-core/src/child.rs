@@ -24,7 +24,7 @@ pub struct Child<P: Protocol> {
 
 impl<P: Protocol> Child<P> {
     pub fn new(proto: P) -> Self {
-        Child { proto, inbox: Vec::new() }
+            Child { proto, inbox: Vec::new() }
     }
 
     /// Replace the protocol, keeping the inbox's allocation.
