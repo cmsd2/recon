@@ -246,6 +246,7 @@ impl Protocol for Silent {
     type Ind = Ind<u32>;
     type Msg = pl::Wire<u32>;
     type Scope = core::convert::Infallible;
+    type Note = recon_protocols::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -296,6 +297,7 @@ impl Protocol for Defective {
     type Ind = Ind<u32>;
     type Msg = pl::Wire<u32>;
     type Scope = core::convert::Infallible;
+    type Note = recon_protocols::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

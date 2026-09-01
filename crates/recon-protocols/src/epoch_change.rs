@@ -126,11 +126,11 @@ use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use crate::Timing;
 use crate::best_effort_broadcast::{self as beb, BestEffortBroadcast};
 use crate::eventual_leader_detector::{self as eld, EventualLeaderDetector};
 use crate::perfect_failure_detector::Heartbeat;
 use crate::perfect_link as pl;
+use crate::{Note, Refusal, Timing};
 
 /// What this layer puts on the wire, beneath the broadcast.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,6 +270,9 @@ impl EpochChange {
     /// became one can climb above it. Same message as a refusal, and for the same purpose.
     fn report_to(&mut self, leader: NodeId, cx: &mut ProtoCx<'_, Self>) {
         let nts = self.lastts;
+        // The same `NACK` goes on the wire as when an announcement is refused, so the trace cannot
+        // tell the two decisions apart. This is the half the trace cannot say.
+        cx.note(Note::ReachReported { leader, nts });
         self.through_beb(cx, |b, ccx| {
             b.on_cmd(beb::Cmd::SendTo { to: leader, msg: EpochMsg::Nack { nts } }, ccx)
         });
@@ -300,6 +303,12 @@ impl EpochChange {
                     // newer than one already started. Either way: tell it, so it can climb past —
                     // and name the higher of the two, so it climbs past in one step rather than one
                     // step per refusal.
+                    let why = if from != self.trusted {
+                        Refusal::NotTrusted { trusted: self.trusted }
+                    } else {
+                        Refusal::NotAhead { reached: self.lastts }
+                    };
+                    cx.note(Note::EpochRefused { from, ts, why });
                     let nts = ts.max(self.lastts);
                     self.through_beb(cx, |b, ccx| {
                         b.on_cmd(beb::Cmd::SendTo { to: from, msg: EpochMsg::Nack { nts } }, ccx)
@@ -313,6 +322,17 @@ impl EpochChange {
             EpochMsg::Nack { nts } => {
                 if self.trusted == self.me && nts >= self.ts {
                     self.announce_above(nts, cx);
+                } else {
+                    // **Nothing whatever reaches the trace from here.** This is the shape of
+                    // silence that cost the most to diagnose: a leader that everyone trusts and
+                    // which announces nothing looks, in a record of effects, exactly like a leader
+                    // nobody told anything.
+                    let why = if self.trusted != self.me {
+                        Refusal::NotLeader { trusted: self.trusted }
+                    } else {
+                        Refusal::NotAhead { reached: self.ts }
+                    };
+                    cx.note(Note::ReportIgnored { from, nts, why });
                 }
             }
         }
@@ -363,6 +383,7 @@ impl Protocol for EpochChange {
     type Ind = Ind;
     type Msg = Wire<BebMsg>;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably. `logged_epoch_change` is the variant that does.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

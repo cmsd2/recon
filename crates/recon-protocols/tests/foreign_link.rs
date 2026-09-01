@@ -47,6 +47,7 @@ impl<P: Clone> Protocol for DriverLink<P> {
     type Ind = DriverInd<P>;
     type Msg = P;
     type Scope = core::convert::Infallible;
+    type Note = recon_protocols::Note;
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 

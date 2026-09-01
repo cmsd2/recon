@@ -76,7 +76,7 @@ use recon_core::{NodeId, Protocol};
 /// fn requires_a_link<L: recon_protocols::link::Link<u32>>() {}
 /// requires_a_link::<NotALink>();
 /// ```
-pub trait Link<P>: Protocol {
+pub trait Link<P>: Protocol<Note = crate::Note> {
     /// The request that sends `msg` to `to`.
     ///
     /// A constructor rather than a fixed type, because the request is the link's own vocabulary.

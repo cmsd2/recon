@@ -346,6 +346,7 @@ where
     /// Whatever the link's guarantees are conditional on. This layer bridges an ending by
     /// resending on the establishment that follows.
     type Scope = L::Scope;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

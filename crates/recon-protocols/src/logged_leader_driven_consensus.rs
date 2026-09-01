@@ -406,6 +406,7 @@ impl<V: Clone + PartialEq> Protocol for LoggedLeaderDrivenConsensus<V> {
     type Ind = Ind<V>;
     type Msg = Wire<V>;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     type Meta = Durable<V>;
     /// Nothing accumulates: one epoch, one leader, one decision, and one record per child.
     type Entry = core::convert::Infallible;

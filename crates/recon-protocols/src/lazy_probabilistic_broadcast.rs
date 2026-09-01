@@ -621,6 +621,7 @@ where
     type Ind = Ind<P>;
     type Msg = Wire<G::Msg, L::Msg>;
     type Scope = L::Scope;
+    type Note = crate::Note;
     /// Keeps nothing durably.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

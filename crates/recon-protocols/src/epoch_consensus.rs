@@ -358,6 +358,7 @@ impl<V: Clone> Protocol for EpochConsensus<V> {
     type Ind = Ind<V>;
     type Msg = BebMsg<V>;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably. `logged_epoch_consensus` is the variant that does.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

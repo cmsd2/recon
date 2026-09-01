@@ -182,6 +182,7 @@ where
     /// Whatever the link's guarantees are conditional on, since this layer adds no condition of
     /// its own and cannot bridge the link's.
     type Scope = L::Scope;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

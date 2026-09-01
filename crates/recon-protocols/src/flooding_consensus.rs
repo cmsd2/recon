@@ -419,6 +419,7 @@ impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> Protocol for FloodingConsensus<P
     type Msg = Wire<L::Msg>;
     /// No session beneath, so no scope end can be constructed — as for both children.
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

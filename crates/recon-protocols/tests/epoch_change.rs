@@ -4,6 +4,7 @@ use core::time::Duration;
 use recon_core::{Effect, Event, MemStore, NodeId, ProtoEffect, Protocol, Time, step_with};
 use recon_protocols::epoch_change::{EpochChange, EpochMsg, Ind, Wire};
 use recon_protocols::perfect_link as pl;
+use recon_protocols::{Note, Refusal};
 use recon_sim::{Config, Sim};
 
 mod common;
@@ -372,4 +373,159 @@ fn under_a_bridge_epochs_settle_even_though_leadership_does_not() {
     s.run_for(timeout() * 20);
     let later: Vec<u64> = ALL.iter().map(|n| s.at(*n).last_timestamp()).collect();
     assert_eq!(settled, later, "the epochs are stable under a standing disagreement");
+}
+
+// ------------------------------------------------- what this module says, checked against the run
+//
+// The three checks below are of different strengths, and they say which rather than implying one.
+// A note is only worth having where a record of effects cannot say the same thing, so what is
+// narrated here is refusals — a `NewEpoch` rejected, a report ignored — and the *reason* for a
+// message the trace cannot otherwise attribute.
+
+/// A run with enough churn that leadership moves and stale announcements arrive: a crash, a
+/// recovery, and a bridge that heals. A settled stack refuses nothing, which would make every
+/// check below vacuous.
+fn churning(seed: u64) -> Sim<EpochChange> {
+    let mut s = sync_sim(seed);
+    s.record_notes();
+    s.run_for(timeout() * 2);
+    s.crash(D);
+    s.run_for(timeout() * 4);
+    s.restart(D);
+    s.run_for(timeout() * 6);
+    s.sever(A, D);
+    s.run_for(timeout() * 6);
+    s.reconnect(A, D);
+    s.run_for(timeout() * 6);
+    s
+}
+
+/// Every distinct `NewEpoch` that reached `node` — distinct, because the stubborn broadcast beneath
+/// re-sends each one for as long as the run lasts and the perfect link discards all but the first.
+/// Roughly fifteen hundred deliveries carry about eight announcements.
+fn announcements_reaching(s: &Sim<EpochChange>, node: NodeId) -> usize {
+    s.trace()
+        .deliveries()
+        .filter_map(|(_, to, m)| match m {
+            Wire::Epoch(w) if to == node => match w.payload {
+                EpochMsg::NewEpoch { .. } => Some(w.id),
+                EpochMsg::Nack { .. } => None,
+            },
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
+/// The strong check: a note about an action taken agrees with the effect it claims.
+///
+/// `ReachReported` is the only note here that precedes an action, and it exists because the wire
+/// cannot distinguish it: a report volunteered to a new leader and a refusal of an announcement
+/// both go out as the same `NACK`. So the claim is checkable — every report narrated is a `NACK`
+/// carrying that timestamp, sent to that leader.
+#[test]
+fn every_reported_reach_is_a_report_that_went() {
+    let s = churning(41);
+
+    let mut claimed = 0;
+    for (node, note) in s.trace().notes() {
+        let Note::ReachReported { leader, nts } = note else { continue };
+        claimed += 1;
+        let went = s.trace().sends().any(|(from, to, m)| {
+            from == node
+                && to == *leader
+                && matches!(m, Wire::Epoch(w) if w.payload == EpochMsg::Nack { nts: *nts })
+        });
+        assert!(went, "{node} said it reported {nts} to {leader}, and no such report was sent");
+    }
+    assert!(claimed > 0, "no reports were narrated, so nothing was checked");
+}
+
+/// The negative check: a note about an action *refused* agrees with the absence of the effect.
+///
+/// Weaker than the one above, and honestly so — an absence is consistent with many things. What it
+/// does rule out is the case that matters: a process claiming to have refused an announcement while
+/// having entered that epoch anyway.
+#[test]
+fn nothing_a_process_says_it_refused_was_afterwards_entered() {
+    let s = churning(42);
+
+    let mut refusals = 0;
+    for (node, note) in s.trace().notes() {
+        let Note::EpochRefused { from, ts, .. } = note else { continue };
+        refusals += 1;
+        let entered = s
+            .trace()
+            .indications_at(node)
+            .any(|Ind::StartEpoch { ts: t, leader }| t == ts && leader == from);
+        assert!(!entered, "{node} said it refused epoch {ts} from {from}, then started it");
+    }
+    assert!(refusals > 0, "nothing was refused, so nothing was checked");
+}
+
+/// The coverage check, and the one that catches narration falling quietly out of a clause.
+///
+/// Every distinct `NewEpoch` that reached a process either started an epoch there or was refused —
+/// and a refusal is narrated exactly once, so the two account for every announcement. A clause that
+/// stopped narrating would pass both checks above, which is why this one exists: they are satisfied
+/// by silence and this is not.
+#[test]
+fn every_announcement_that_arrived_was_either_entered_or_narrated_as_refused() {
+    let s = churning(43);
+
+    for node in ALL {
+        let arrived = announcements_reaching(&s, node);
+        let entered = s.trace().indications_at(node).count();
+        let refused =
+            s.trace().notes_at(node).filter(|n| matches!(n, Note::EpochRefused { .. })).count();
+        assert!(arrived > 0, "{node} received no announcements, so it checked nothing");
+
+        if node == D {
+            // `D` crashed and restarted, and a restart loses the perfect link's deduplication
+            // state — so an announcement it had already discarded reaches the layer a second time
+            // and is decided on again. The wire identifier cannot tell the two occasions apart, so
+            // the count is bounded rather than exact here. This is the failure mode the check
+            // guards against, seen from the other side: every arrival is accounted for, and one may
+            // be accounted for twice.
+            assert!(
+                entered + refused >= arrived,
+                "{node}: {arrived} announcements arrived, only {entered} entered and {refused} \
+                 narrated as refused"
+            );
+            assert!(entered + refused > arrived, "the restart should have re-decided one");
+            continue;
+        }
+
+        assert_eq!(
+            arrived,
+            entered + refused,
+            "{node}: {arrived} announcements arrived, {entered} entered and {refused} narrated as \
+             refused — the two must account for every one"
+        );
+    }
+}
+
+/// Non-vacuity for the whole group: the run being checked actually narrates, and narrates the kind
+/// of decision that leaves no other mark.
+///
+/// An agreement property is satisfied by a protocol that says nothing, exactly as an
+/// absence-of-violation property is satisfied by a protocol that does nothing.
+#[test]
+fn the_run_being_checked_actually_says_something() {
+    let s = churning(44);
+
+    let notes: Vec<&Note> = s.trace().notes().map(|(_, n)| n).collect();
+    assert!(notes.len() > 3, "only {} notes in the whole run", notes.len());
+    assert!(notes.iter().any(|n| matches!(n, Note::EpochRefused { .. })));
+
+    // The one a record of effects cannot hold at all: a report arrived, nothing followed, and the
+    // only evidence that the process considered it is what it said.
+    let ignored: Vec<&Note> =
+        notes.iter().copied().filter(|n| matches!(n, Note::ReportIgnored { .. })).collect();
+    assert!(!ignored.is_empty(), "no report was ignored, which is the case narration is for");
+    for note in ignored {
+        let Note::ReportIgnored { why, .. } = note else { unreachable!() };
+        // And it says *why*, which is the half that would otherwise need a debugger.
+        assert!(matches!(why, Refusal::NotLeader { .. } | Refusal::NotAhead { .. }), "{why:?}");
+    }
 }

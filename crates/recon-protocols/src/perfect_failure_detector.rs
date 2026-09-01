@@ -210,6 +210,7 @@ impl Protocol for PerfectFailureDetector {
     type Msg = Heartbeat;
     /// No scope conditions: this protocol's guarantees do not lapse.
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

@@ -96,6 +96,7 @@ impl Protocol for NotALink {
     type Ind = Whatever;
     type Msg = Whatever;
     type Scope = core::convert::Infallible;
+    type Note = recon_protocols::Note;
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 

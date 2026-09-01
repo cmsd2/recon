@@ -272,6 +272,7 @@ impl<V: Clone> Protocol for LeaderDrivenConsensus<V> {
     type Ind = Ind<V>;
     type Msg = Wire<<EpochChange as Protocol>::Msg, ep::BebMsg<V>>;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably. `logged_leader_driven_consensus` is the variant that does.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

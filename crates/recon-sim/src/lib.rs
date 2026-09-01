@@ -7,6 +7,7 @@
 
 pub mod codec;
 pub mod config;
+pub mod narrate;
 pub mod scenario;
 pub mod shrink;
 pub mod sim;

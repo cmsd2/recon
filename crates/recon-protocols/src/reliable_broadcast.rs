@@ -255,6 +255,7 @@ where
     /// Whatever the link's guarantees are conditional on. RB4 is scoped to the sessions that
     /// carried the relay, and this layer cannot bridge one ending.
     type Scope = L::Scope;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

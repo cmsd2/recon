@@ -271,6 +271,7 @@ impl Protocol for EventuallyPerfectFailureDetector {
     /// No scope conditions of its own: `◇P2`'s conditions are on the network, not on a scope this
     /// protocol is told about.
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably. A restarted detector suspects nobody and learns again.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

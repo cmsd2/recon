@@ -23,6 +23,37 @@ impl<M, I> EffectSink<M, I> for Vec<Effect<M, I>> {
     }
 }
 
+/// Receives the decisions a protocol narrates.
+///
+/// Separate from [`EffectSink`], and deliberately. An effect is *deferred*: it describes something
+/// the driver will do on the protocol's behalf. A note describes something that has **already
+/// happened**, at a point inside the handler — so it is recorded at the moment of the call, in the
+/// handler's own text, for the same reason [`crate::Store`] is not an effect either.
+///
+/// Nothing a protocol can observe reveals whether anything is listening, so no behaviour can
+/// depend on it: a run is identical whether or not it was read.
+pub trait NoteSink<N> {
+    fn note(&mut self, note: N);
+}
+
+impl<N> NoteSink<N> for Vec<N> {
+    fn note(&mut self, note: N) {
+        self.push(note);
+    }
+}
+
+/// Nobody is listening.
+///
+/// The ordinary case: a run pays for narration only when something asked to read it. A driver
+/// keeps one of these and hands it to every context it builds, exactly as it would a real sink —
+/// so that a protocol's code is identical either way, which is what makes narrating unable to
+/// change the run.
+pub struct NoNotes;
+
+impl<N> NoteSink<N> for NoNotes {
+    fn note(&mut self, _note: N) {}
+}
+
 /// Translates a child's effects into a parent's terms as they are emitted.
 ///
 /// This is what makes composition free of intermediate buffers: the child pushes, the mapper
@@ -68,27 +99,36 @@ impl<PM, PI, CM, CI> EffectSink<CM, CI> for ConsumeSink<'_, '_, PM, PI, CM, CI> 
 /// Supplies the current time and a seeded randomness source, and receives every effect the
 /// protocol emits. Nothing else reaches a protocol: given the same state, event, `now`, and RNG
 /// stream, it behaves identically every time.
-pub struct Cx<'a, M, I, Me, En> {
+pub struct Cx<'a, M, I, N, Me, En> {
     sink: &'a mut dyn EffectSink<M, I>,
     now: Time,
     rng: &'a mut dyn RngCore,
     store: &'a mut dyn Store<Me, En>,
+    /// Where narrated decisions go. Shared down the whole composition like `next_timer`, so a
+    /// child's note reaches the run without the parent handling it. [`NoNotes`] when nobody is
+    /// listening, which is the ordinary case.
+    notes: &'a mut dyn NoteSink<N>,
     /// Where registered timers get their identities. Owned by the driver and shared down the whole
     /// composition, so an identity is unique to a run rather than to a layer — two layers each
     /// starting from zero would each accept the other's expiry.
     next_timer: &'a mut u64,
 }
 
-impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
-    /// Build a context over any sink and any store.
+impl<'a, M, I, N, Me, En> Cx<'a, M, I, N, Me, En> {
+    /// Build a context over any sink, any store, and any audience for what it narrates.
+    ///
+    /// Pass [`NoNotes`] when nothing is listening, which is the ordinary case. It is a parameter
+    /// rather than an option so that the protocol's own code is the same either way — which is
+    /// what makes narrating unable to change the run.
     pub fn new(
         sink: &'a mut dyn EffectSink<M, I>,
         now: Time,
         rng: &'a mut dyn RngCore,
         store: &'a mut dyn Store<Me, En>,
         next_timer: &'a mut u64,
+        notes: &'a mut dyn NoteSink<N>,
     ) -> Self {
-        Cx { sink, now, rng, store, next_timer }
+        Cx { sink, now, rng, store, next_timer, notes }
     }
 
     /// Transmit `msg` to `to`.
@@ -111,6 +151,43 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
         *self.next_timer += 1;
         self.sink.emit(Effect::SetTimer { after, id });
         id
+    }
+
+    /// Record a decision this protocol has taken.
+    ///
+    /// Recorded at the point of the call, not deferred like an effect: a note says what has already
+    /// happened, and its place in the run is where the handler put it.
+    ///
+    /// **Worth narrating only where the record of effects cannot say it.** A note beside
+    /// `indicate` restating the same thing adds nothing a reader could not already see and can
+    /// drift from it. What no trace can hold is a decision that produced *no* effect — a message
+    /// refused, a timestamp already passed, an announcement not made — and that is the case whose
+    /// absence has cost this project the most.
+    ///
+    /// Uncallable for a protocol whose `Note` is uninhabited: there is no value to pass. The
+    /// absence is checked rather than trusted, exactly as it is for a scope event.
+    ///
+    /// ```compile_fail
+    /// # use recon_core::{Cx, NodeId, ProtoCx, Protocol, TimerId};
+    /// struct Quiet;
+    /// impl Protocol for Quiet {
+    ///     type Cmd = ();
+    ///     type Ind = ();
+    ///     type Msg = ();
+    ///     type Scope = core::convert::Infallible;
+    ///     // Narrates nothing, and so cannot.
+    ///     type Note = core::convert::Infallible;
+    ///     type Meta = core::convert::Infallible;
+    ///     type Entry = core::convert::Infallible;
+    ///     fn on_cmd(&mut self, (): (), cx: &mut ProtoCx<'_, Self>) {
+    ///         cx.note(());
+    ///     }
+    ///     fn on_msg(&mut self, _: NodeId, (): (), _: &mut ProtoCx<'_, Self>) {}
+    ///     fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
+    /// }
+    /// ```
+    pub fn note(&mut self, note: N) {
+        self.notes.note(note);
     }
 
     /// This protocol's durable state. A write does not return until it would survive a crash, so
@@ -142,7 +219,7 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
         &mut self,
         msg: fn(CM) -> M,
         ind: fn(CI) -> I,
-        f: impl FnOnce(&mut Cx<'_, CM, CI, Infallible, Infallible>),
+        f: impl FnOnce(&mut Cx<'_, CM, CI, N, Infallible, Infallible>),
     ) {
         let mut mapped = MapSink { parent: &mut *self.sink, msg, ind };
         let mut none = NoStore;
@@ -152,6 +229,7 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
             rng: &mut *self.rng,
             store: &mut none,
             next_timer: &mut *self.next_timer,
+            notes: &mut *self.notes,
         };
         f(&mut child);
     }
@@ -166,7 +244,7 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
         &mut self,
         msg: fn(CM) -> M,
         collected: &mut Vec<CI>,
-        f: impl FnOnce(&mut Cx<'_, CM, CI, Infallible, Infallible>),
+        f: impl FnOnce(&mut Cx<'_, CM, CI, N, Infallible, Infallible>),
     ) {
         let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg };
         let mut none = NoStore;
@@ -176,6 +254,7 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
             rng: &mut *self.rng,
             store: &mut none,
             next_timer: &mut *self.next_timer,
+            notes: &mut *self.notes,
         };
         f(&mut child);
     }
@@ -200,7 +279,7 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
         msg: fn(CM) -> M,
         collected: &mut Vec<CI>,
         slot: Slot<Me, CMe>,
-        f: impl FnOnce(&mut Cx<'_, CM, CI, CMe, Infallible>),
+        f: impl FnOnce(&mut Cx<'_, CM, CI, N, CMe, Infallible>),
     ) {
         let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg };
         let mut store = SlotStore { parent: &mut *self.store, slot };
@@ -210,6 +289,7 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
             rng: &mut *self.rng,
             store: &mut store,
             next_timer: &mut *self.next_timer,
+            notes: &mut *self.notes,
         };
         f(&mut child);
     }

@@ -5,14 +5,15 @@
 //! protocols above are responsible for recovering from that.
 
 use crate::config::Config;
+use crate::narrate::{Render, render};
 use crate::trace::{DropReason, Trace, TraceEvent};
 use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::error::CodecError;
 use recon_core::{
-    Cx, Effect, MemStore, NodeId, Position, ProtoCx, ProtoEffect, Protocol, SessionEvent, Store,
-    Time, TimerId, WriteKind,
+    Cx, Effect, MemStore, NoNotes, NodeId, NoteSink, Position, ProtoCx, ProtoEffect, Protocol,
+    SessionEvent, Store, Time, TimerId, WriteKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -107,12 +108,20 @@ pub struct Sim<P: Protocol> {
     storage: BTreeMap<NodeId, MemStore<P::Meta, P::Entry>>,
     /// Processes whose next write is fatal — dying mid-`fsync`.
     doomed: BTreeSet<NodeId>,
-    trace: Trace<P::Msg, P::Ind>,
+    trace: Trace<P::Msg, P::Ind, P::Note>,
+    /// What the current handler narrated, flushed into the trace when it returns. Empty, and never
+    /// written to, unless the run was asked to record notes.
+    notes: Vec<P::Note>,
+    /// Whether anything is listening. Off by default, so an ordinary run pays nothing.
+    record_notes: bool,
     /// One source of timer identities for the whole run: two layers of one process must never
     /// be handed the same handle, or each would accept the other's expiry.
     next_timer: u64,
     effects: Vec<ProtoEffect<P>>,
     codec_check: Option<CodecCheck<P::Msg>>,
+    /// Renders each event as it is recorded. Absent unless the run was asked for it, exactly as
+    /// the codec check is.
+    render: Option<Render<P::Msg, P::Ind, P::Note>>,
 }
 
 impl<P> Sim<P>
@@ -154,8 +163,11 @@ where
             storage: BTreeMap::new(),
             doomed: BTreeSet::new(),
             trace: Trace::default(),
+            notes: Vec::new(),
+            record_notes: false,
             effects: Vec::new(),
             codec_check: None,
+            render: None,
         };
         if sim.config.is_session_based() {
             // The link starts trying immediately and keeps trying, so a session comes up as soon
@@ -185,8 +197,28 @@ where
     }
 
     /// The record of what has happened so far.
-    pub fn trace(&self) -> &Trace<P::Msg, P::Ind> {
+    pub fn trace(&self) -> &Trace<P::Msg, P::Ind, P::Note> {
         &self.trace
+    }
+
+    /// Record what protocols narrate, so the trace holds their decisions beside what happened.
+    ///
+    /// Off by default: a run pays nothing for an audience it does not have, and the protocol's own
+    /// code is the same either way — it calls `Cx::note` regardless, and the sink discards. That is
+    /// what makes narrating unable to change the run.
+    pub fn record_notes(&mut self) {
+        self.record_notes = true;
+    }
+
+    /// Record one event: render it if anything is listening, then keep it.
+    ///
+    /// Rendered *as* it is recorded rather than by a later walk over the trace, because a run that
+    /// fails to terminate is one of the things worth reading.
+    fn record(&mut self, event: TraceEvent<P::Msg, P::Ind, P::Note>) {
+        if let Some(render) = self.render {
+            render(&event);
+        }
+        self.trace.push(event);
     }
 
     /// Borrow a process, for inspecting state a trace cannot show.
@@ -247,7 +279,7 @@ where
             self.end_sessions_of(node);
         }
         let at = self.now;
-        self.trace.push(TraceEvent::Crashed { at, node });
+        self.record(TraceEvent::Crashed { at, node });
     }
 
     /// Suspend `node`: it stops handling events but keeps its state, its timers, and everything
@@ -264,7 +296,7 @@ where
         if let Some(n) = self.nodes.get_mut(&node) {
             n.liveness = Liveness::Suspended;
             let at = self.now;
-            self.trace.push(TraceEvent::Suspended { at, node });
+            self.record(TraceEvent::Suspended { at, node });
         }
     }
 
@@ -286,7 +318,7 @@ where
             None => return,
         }
         let at = self.now;
-        self.trace.push(TraceEvent::Resumed { at, node });
+        self.record(TraceEvent::Resumed { at, node });
         self.release_deferred(node);
     }
 
@@ -302,7 +334,7 @@ where
             None => return,
         }
         let at = self.now;
-        self.trace.push(TraceEvent::Restarted { at, node });
+        self.record(TraceEvent::Restarted { at, node });
 
         // What survived, handed back as an event rather than through the constructor: the
         // algorithms that need it re-announce their log and re-send what was pending, and those
@@ -310,7 +342,7 @@ where
         // Exactly one branch, as the book has it: something in storage means recovery, nothing
         // means this incarnation is starting afresh and takes the first-start path instead.
         let survived = self.storage.get(&node).map(|s| !s.is_empty()).unwrap_or(false);
-        self.trace.push(TraceEvent::Recovered { at, node, had_state: survived });
+        self.record(TraceEvent::Recovered { at, node, had_state: survived });
         if survived {
             self.run_handler(node, |p, cx| p.on_recovery(cx));
         } else {
@@ -523,7 +555,7 @@ where
                     return;
                 }
                 let at = self.now;
-                self.trace.push(TraceEvent::TimerFired { at, node, id });
+                self.record(TraceEvent::TimerFired { at, node, id });
                 self.run_handler(node, |p, cx| p.on_timer(id, cx));
             }
             Scheduled::Deliver { from, to, msg } => {
@@ -536,7 +568,7 @@ where
                 }
                 if self.stopped(to) {
                     let at = self.now;
-                    self.trace.push(TraceEvent::Dropped {
+                    self.record(TraceEvent::Dropped {
                         at,
                         from,
                         to,
@@ -550,7 +582,7 @@ where
                     Err(e) => panic!("codec check failed for a message from {from} to {to}: {e}"),
                 };
                 let at = self.now;
-                self.trace.push(TraceEvent::Delivered { at, from, to, msg: msg.clone() });
+                self.record(TraceEvent::Delivered { at, from, to, msg: msg.clone() });
                 self.run_handler(to, |p, cx| p.on_msg(from, msg, cx));
             }
         }
@@ -586,26 +618,46 @@ where
         let keep = doomed && self.rng.random::<bool>();
         let mut writes: Vec<WriteKind> = Vec::new();
         let mut died = false;
+        let mut notes = core::mem::take(&mut self.notes);
+        notes.clear();
 
         {
             let Some(n) = self.nodes.get_mut(&node) else {
                 self.effects = effects;
+                self.notes = notes;
                 return;
             };
             let inner = self.storage.entry(node).or_default();
             let mut store =
                 FaultyStore { inner, writes: &mut writes, doomed, keep, died: &mut died };
-            let mut cx =
-                Cx::new(&mut effects, self.now, &mut self.rng, &mut store, &mut self.next_timer);
+            // The protocol's code is the same either way — it calls `cx.note` regardless — which is
+            // what makes narrating unable to change the run.
+            let mut discard = NoNotes;
+            let listener: &mut dyn NoteSink<P::Note> =
+                if self.record_notes { &mut notes } else { &mut discard };
+            let mut cx = Cx::new(
+                &mut effects,
+                self.now,
+                &mut self.rng,
+                &mut store,
+                &mut self.next_timer,
+                listener,
+            );
             f(&mut n.protocol, &mut cx);
         }
 
         let at = self.now;
+        // Before the writes and the effects: a note marks the decision, and those are what it led
+        // to. A handler that narrated and then wrote reads in that order.
+        for note in notes.drain(..) {
+            self.record(TraceEvent::Said { at, node, note });
+        }
+        self.notes = notes;
         if !writes.is_empty() {
             self.doomed.remove(&node);
         }
         for kind in writes {
-            self.trace.push(TraceEvent::Wrote { at, node, kind });
+            self.record(TraceEvent::Wrote { at, node, kind });
         }
 
         if died {
@@ -613,7 +665,7 @@ where
             // anyway, so nothing decided on the strength of that write can escape.
             effects.clear();
             self.effects = effects;
-            self.trace.push(TraceEvent::DiedWriting { at, node });
+            self.record(TraceEvent::DiedWriting { at, node });
             self.crash(node);
             return;
         }
@@ -623,7 +675,7 @@ where
                 Effect::Send { to, msg } => self.transmit(node, to, msg),
                 Effect::Indicate(ind) => {
                     let at = self.now;
-                    self.trace.push(TraceEvent::Indicated { at, node, ind });
+                    self.record(TraceEvent::Indicated { at, node, ind });
                 }
                 Effect::SetTimer { after, id } => {
                     self.schedule(self.now + after, Scheduled::Timer { node, id });
@@ -637,10 +689,10 @@ where
     /// Apply the network model to one outgoing message.
     fn transmit(&mut self, from: NodeId, to: NodeId, msg: P::Msg) {
         let at = self.now;
-        self.trace.push(TraceEvent::Sent { at, from, to, msg: msg.clone() });
+        self.record(TraceEvent::Sent { at, from, to, msg: msg.clone() });
 
         if self.stopped(from) {
-            self.trace.push(TraceEvent::Dropped {
+            self.record(TraceEvent::Dropped {
                 at,
                 from,
                 to,
@@ -651,13 +703,7 @@ where
         }
 
         if !self.connected(from, to) {
-            self.trace.push(TraceEvent::Dropped {
-                at,
-                from,
-                to,
-                msg,
-                reason: DropReason::Partitioned,
-            });
+            self.record(TraceEvent::Dropped { at, from, to, msg, reason: DropReason::Partitioned });
             return;
         }
 
@@ -670,7 +716,7 @@ where
                 } else {
                     DropReason::NoSession
                 };
-                self.trace.push(TraceEvent::Dropped { at, from, to, msg, reason });
+                self.record(TraceEvent::Dropped { at, from, to, msg, reason });
                 return;
             }
             let deliver_at = self.session_delivery_time(from, to);
@@ -681,7 +727,7 @@ where
         let synchronous = self.config.is_synchronous();
 
         if !synchronous && self.config.loss > 0.0 && self.rng.random::<f64>() < self.config.loss {
-            self.trace.push(TraceEvent::Dropped { at, from, to, msg, reason: DropReason::Lost });
+            self.record(TraceEvent::Dropped { at, from, to, msg, reason: DropReason::Lost });
             return;
         }
 
@@ -692,7 +738,7 @@ where
             && self.config.duplication > 0.0
             && self.rng.random::<f64>() < self.config.duplication
         {
-            self.trace.push(TraceEvent::Duplicated { at, from, to, msg: msg.clone() });
+            self.record(TraceEvent::Duplicated { at, from, to, msg: msg.clone() });
             let second = self.draw_delay(from, to, &msg);
             self.schedule(at + second, Scheduled::Deliver { from, to, msg });
         }
@@ -711,7 +757,7 @@ where
         }
         if self.config.reorder > 0.0 && self.rng.random::<f64>() < self.config.reorder {
             let at = self.now;
-            self.trace.push(TraceEvent::Reordered { at, from, to, msg: msg.clone() });
+            self.record(TraceEvent::Reordered { at, from, to, msg: msg.clone() });
             delay += self.config.reorder_delay;
         }
         delay
@@ -744,6 +790,29 @@ where
     /// without paying for it on every run.
     pub fn enable_codec_check(&mut self) {
         self.codec_check = Some(crate::codec::round_trip);
+    }
+}
+
+impl<P> Sim<P>
+where
+    P: Protocol,
+    P::Msg: Clone + PartialEq + core::fmt::Debug,
+    P::Ind: Clone + core::fmt::Debug,
+    P::Note: core::fmt::Debug,
+    P::Meta: Clone,
+    P::Entry: Clone,
+{
+    /// Emit every recorded event to whatever `tracing` subscriber is installed, as it is recorded.
+    ///
+    /// Off by default, like the codec check: a run pays nothing for an audience it does not have.
+    /// Turning it on does not change the run — the events are the same ones the trace already
+    /// holds, in the same order, and nothing a protocol can observe is affected.
+    ///
+    /// Pair it with [`Sim::record_notes`] to see what the protocols *said* as well as what happened
+    /// to them; without it the rendering shows the run, which is what the trace showed before this
+    /// existed.
+    pub fn enable_tracing(&mut self) {
+        self.render = Some(render::<P::Msg, P::Ind, P::Note>);
     }
 }
 
@@ -798,7 +867,7 @@ where
         let keep = self.rng.random_range(0..=inflight.len());
         for k in inflight.iter().copied().skip(keep) {
             if let Some(Scheduled::Deliver { from, to, msg }) = self.queue.remove(&k) {
-                self.trace.push(TraceEvent::SuffixLost { at, from, to, msg });
+                self.record(TraceEvent::SuffixLost { at, from, to, msg });
             }
         }
 
@@ -819,7 +888,7 @@ where
         self.last_delivery.remove(&(key.1, key.0));
         self.ended_at.insert(key, at);
 
-        self.trace.push(TraceEvent::SessionEnded { at, a: key.0, b: key.1, epoch, reason });
+        self.record(TraceEvent::SessionEnded { at, a: key.0, b: key.1, epoch, reason });
 
         // Both endpoints are told, if they are alive to hear it. The epoch named is the one that
         // ended: at the moment of failure the next is not a fact, and may never become one.
@@ -893,7 +962,7 @@ where
         self.next_epoch.insert(key, epoch + 1);
         self.sessions.insert(key, epoch);
         let at = self.now;
-        self.trace.push(TraceEvent::SessionOpened { at, a: key.0, b: key.1, epoch });
+        self.record(TraceEvent::SessionOpened { at, a: key.0, b: key.1, epoch });
 
         // Both endpoints are told. This is the actionable event: the peer is reachable, so
         // anything sent in response arrives.

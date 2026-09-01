@@ -53,12 +53,15 @@ fn all_decisions(s: &Sim<Lep>) -> Vec<u32> {
 /// The index in the trace of the first event matching `f`.
 fn first_index(
     s: &Sim<Lep>,
-    f: impl Fn(&TraceEvent<Wire<u32>, Ind<u32>>) -> bool,
+    f: impl Fn(&TraceEvent<Wire<u32>, Ind<u32>, recon_protocols::Note>) -> bool,
 ) -> Option<usize> {
     s.trace().events().iter().position(f)
 }
 
-fn is_accept_from(e: &TraceEvent<Wire<u32>, Ind<u32>>, node: NodeId) -> bool {
+fn is_accept_from(
+    e: &TraceEvent<Wire<u32>, Ind<u32>, recon_protocols::Note>,
+    node: NodeId,
+) -> bool {
     matches!(
         e,
         TraceEvent::Sent { from, msg: Wire::Reply(t), .. }

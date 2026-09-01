@@ -106,6 +106,14 @@ peers to have made a promise it has no record of. A protocol that keeps nothing 
 `Scope` is the interval a guarantee holds over — a session, an incarnation, a deadline. A protocol
 with no scopes writes `type Scope = Infallible`, and a scope end for it cannot be constructed.
 
+`Note` is the vocabulary a protocol **narrates** its decisions in, through `cx.note(..)`. A record of
+effects says what a protocol did; it cannot say what a protocol decided, and it is completely silent
+about a decision whose outcome was to do nothing. A protocol that narrates nothing writes
+`type Note = Infallible`, and then a note for it cannot be constructed either. A note's vocabulary
+belongs to the *run* rather than to a layer, exactly as a `TimerId` does, so it passes through
+composition untouched — there is nothing in it for a parent to re-wrap, and a parent letting a
+child's note through is not endorsing it.
+
 Composition is static: a parent owns its children as concrete typed fields and re-wraps their
 effects. `Cx::with_child` forwards a child's indications; a parent that transforms them holds the
 child as a `recon_core::Child<P>` and calls `run`, which collects the child's indications and hands
@@ -150,6 +158,12 @@ state and is *handed back* every timer, delivery and scope event that came due w
 dropping one would lose a message inside a session that never ended. What a stall does take is the
 clock. Properties are asserted over `s.trace()`, never over protocol internals.
 
+What protocols *say* goes into the same trace as what happened to them, once `record_notes()` asks
+for it, and `enable_tracing()` renders every recorded event to a `tracing` subscriber as it is
+recorded — with the process and the run's own virtual time, neither of which a global subscriber
+could get right when five processes share one thread. Both are off by default. One account, not two:
+a claim can then be read against the run, and required to agree with it.
+
 The same run can also be held as a value — a `Scenario` is a configuration with its seed, a
 membership, timed `Step`s and a horizon — and `shrink` reduces a failing one against a predicate
 until nothing more comes out, rendering the result as Rust to paste. That is for the searching kind
@@ -158,7 +172,8 @@ clearer for a test that provokes one named condition, and none of the suites wer
 
 Files: [`sim.rs`](crates/recon-sim/src/sim.rs) · [`config.rs`](crates/recon-sim/src/config.rs) ·
 [`trace.rs`](crates/recon-sim/src/trace.rs) · [`codec.rs`](crates/recon-sim/src/codec.rs) ·
-[`scenario.rs`](crates/recon-sim/src/scenario.rs) · [`shrink.rs`](crates/recon-sim/src/shrink.rs)
+[`scenario.rs`](crates/recon-sim/src/scenario.rs) · [`shrink.rs`](crates/recon-sim/src/shrink.rs) ·
+[`narrate.rs`](crates/recon-sim/src/narrate.rs)
 
 ## The protocols
 
@@ -368,7 +383,7 @@ protocol track                        evidence track
 3. Stop                               C. invocations in the trace
 4. a replicated-log port              D. indeterminate outcomes
 5. multi-Paxos ┐                      E. shrinking                        ✓ built
-   ZAB         ├── over it ───┐       F. logging and tracing
+   ZAB         ├── over it ───┐       F. logging and tracing              ✓ built
    VR, Raft…   ┘              │       G. a concurrent workload
                               └───────┴──▶  H. a checker, written once
                                              against the port
@@ -525,17 +540,46 @@ it was meant to replace.
 So a shrinker answers *when* and *with how little*. `F` is what answers *why*, and on this evidence
 it is the one to build next.
 
-#### F. Logging and tracing
+#### F. Logging and tracing ✓ built
 
-What a protocol *says* it is doing, as against what the trace records happening *to* it — `tracing`
-spans and structured events at the decision points a reader would want under a real failure: an epoch
-entered, a suspicion raised or withdrawn, a quorum reached, a write made durable, a scope ended.
-Paired with `E`, that is the debugging story: a minimal schedule, and a narrated run of it.
+What a protocol *says* it is doing, as against what the trace records happening *to* it. The trace
+cannot hold a decision that produced no effect, and that is the shape of the diagnoses that cost the
+most here: a leader trusted by everyone that announced nothing leaves **nothing at all** behind, and
+finding it meant bisecting the whole stack by hand.
 
-Two constraints shape it. A protocol reaches for nothing ambient, so a subscriber cannot be a global
-the way `tracing` usually installs one — it arrives through `Cx` like time and randomness do, or the
-constraint is broken. And the sim's trace is already the standard of evidence, so the two must not
-become rival accounts of one run.
+`Protocol::Note` names the vocabulary a protocol narrates in and `cx.note(..)` records a decision;
+`Sim::record_notes` puts what was said into the trace beside what happened, and
+`Sim::enable_tracing` renders every recorded event to a `tracing` subscriber as it is recorded.
+Both are off by default, and narrating cannot change the run — a test asserts that a seed observed
+and the same seed unobserved agree on every event but the narration.
+
+Three things decided the shape, and the first is the one that matters:
+
+- **Narration has to be checkable, not merely present.** A `tracing::info!` beside a state change is
+  a second statement about it, and second statements go stale — this repository has already shipped a
+  docstring quoting a resend clause its own comment said a test had replaced. So a note goes into the
+  trace, where a test can require it to agree with the run rather than trust it.
+- **A note earns its place only where the trace cannot say the same thing.** One beside
+  `cx.indicate(..)` restating it adds nothing and can drift. What qualifies is a decision that
+  produced no effect, or the *reason* for an effect the trace cannot attribute — `epoch_change` puts
+  the same `NACK` on the wire whether it is refusing an announcement or volunteering how far it has
+  reached, and a reader cannot tell those apart.
+- **A vocabulary belongs to the run, not to a layer**, exactly as a `TimerId` does, so a note passes
+  through composition untouched. The alternative — each layer naming its own and parents converting —
+  was built and discarded: it put a `where` clause relating two type parameters on every layer
+  generic over a port, to express a conversion that was the identity everywhere it was instantiated.
+
+Constraint 2 is not bent. `tracing`'s dispatcher is thread-local, so protocols never touch one; they
+call `cx.note`, and only the simulator — a driver, which is allowed to — renders. Narration is
+output-only besides: nothing a protocol can observe reveals whether anything is listening, which is
+why a run is reproducible whether or not anybody watched.
+
+`epoch_change` is narrated, as the module whose silences caused a real diagnosis; its suite checks
+its own narration against the run at three stated strengths — an action taken agreeing with its
+effect, an action refused agreeing with the absence of one, and every announcement that arrived
+accounted for as either entered or refused. The last is the one that catches narration quietly
+falling out of a clause. The other twenty-five modules narrate nothing yet, deliberately: a
+vocabulary is better designed against decision points somebody is trying to read.
 
 #### G. A concurrent workload
 
@@ -701,7 +745,7 @@ cargo test --workspace -- --nocapture                 # with output
 
 | Suite | Covers | Tests |
 |---|---|---|
-| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, and a durable child inside a durable parent | 29 |
+| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, a durable child inside a durable parent, and that a child's narration passes through untouched | 31 |
 | [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event, severing pairs | 91 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | [`tests/link_port.rs`](crates/recon-protocols/tests/link_port.rs), `foreign_link.rs` | that both links satisfy the port, that a protocol is not a link by accident, and that a link this project never wrote carries the stack up to consensus | 6 / 3 |
@@ -716,15 +760,17 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total; a restarted originator's broadcasts delivered, at both layers | 22 / 18 |
 | `tests/probabilistic_broadcast_over_sessions.rs`, `lazy_probabilistic_broadcast_over_sessions.rs` | the real-world set's standard: cost as an identity, silence when idle, a session ending propagated once and repaired by recovery, a restart survived | 6 / 5 |
 | `tests/eventually_perfect_failure_detector.rs`, `detector_port.rs` | ◇P: a suspicion withdrawn, a timeout that moves both ways, what the cap costs — swept against a latency rather than asserted — and two correct processes suspecting each other for ever across a bridge | 14 / 5 |
-| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time, that leadership can **return** to a recovered process, and what a bridge does to both | 12 / 14 / 19 |
+| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time, that leadership can **return** to a recovered process, and what a bridge does to both; `epoch_change` additionally checks its own **narration** against the run at three stated strengths | 12 / 18 / 19 |
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
+| [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-547 across the suites above, plus nine unit tests inside `recon-core` and four doctests — two
-`compile_fail` on the link and detector ports, two worked examples of a storage slot — 560 in total,
+561 across the suites above, plus nine unit tests inside `recon-core` and five doctests — three
+`compile_fail`, on the link and detector ports and on narrating without a vocabulary, and two worked
+examples of a storage slot — 575 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.

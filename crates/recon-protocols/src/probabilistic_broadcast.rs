@@ -350,6 +350,7 @@ where
     /// Whatever the link's guarantees are conditional on. This layer adds no condition of its own
     /// and cannot bridge the link's.
     type Scope = L::Scope;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows, which is why `PB2` is
     /// scoped to the window *within* an incarnation and says nothing across one.
     type Meta = core::convert::Infallible;

@@ -198,6 +198,7 @@ impl<D: VolatileDetector> Protocol for EventualLeaderDetector<D> {
     type Msg = D::Msg;
     /// No scope conditions of its own.
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably: a restarted process suspects nobody and trusts afresh.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

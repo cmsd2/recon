@@ -426,6 +426,7 @@ where
     /// Whatever the link's guarantees are conditional on. This layer bridges an ending rather
     /// than absorbing it, but bridging is not the same as never having lapsed.
     type Scope = L::Scope;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

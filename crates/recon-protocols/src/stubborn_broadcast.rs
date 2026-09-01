@@ -124,6 +124,7 @@ impl<P: Clone> Protocol for StubbornBroadcast<P> {
     type Ind = Ind<P>;
     type Msg = P;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably: what it is transmitting is rebuilt by the layer above on recovery.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

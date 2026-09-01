@@ -50,6 +50,29 @@ pub trait Protocol {
     /// detect creates an obligation no implementation can discharge and no test can exercise.
     type Scope;
 
+    /// The vocabulary in which this protocol narrates its decisions.
+    ///
+    /// A record of effects says what a protocol *did*. It cannot say what the protocol *decided*,
+    /// and in particular it is silent about a decision whose outcome was to do nothing — a message
+    /// refused, a candidate already passed, an announcement not made. Those are the cases that have
+    /// cost this project the most, because a silence leaves nothing behind to read.
+    ///
+    /// A protocol narrating nothing declares [`core::convert::Infallible`], as with
+    /// [`Protocol::Scope`] and for the same reason: an uninhabited type has no values, so
+    /// [`Cx::note`] cannot be called for it. The absence is checked rather than trusted.
+    ///
+    /// **A vocabulary belongs to the run, not to a layer**, exactly as a [`TimerId`] does. A
+    /// composed stack narrates in one, and a note passes through composition untouched — no
+    /// mapper, no conversion, nothing for a parent to re-wrap. A parent never restates a child's
+    /// decision, because the decision was the child's; it merely lets it through, which is why
+    /// `Cx::with_child` hands the child the parent's own note sink the way it hands down the
+    /// source of timer identities.
+    ///
+    /// Narration is output-only. Nothing a protocol can observe reveals whether anything received a
+    /// note, so no behaviour may depend on one and a run is reproducible whether or not it was
+    /// read.
+    type Note;
+
     /// Handle a request from the layer above.
     fn on_cmd(&mut self, cmd: Self::Cmd, cx: &mut ProtoCx<'_, Self>);
 
@@ -107,6 +130,7 @@ pub type ProtoCx<'a, P> = Cx<
     'a,
     <P as Protocol>::Msg,
     <P as Protocol>::Ind,
+    <P as Protocol>::Note,
     <P as Protocol>::Meta,
     <P as Protocol>::Entry,
 >;
@@ -178,6 +202,8 @@ pub fn step_in<P: Protocol + ?Sized>(
 /// driven alone and wrong for a composed one: two layers would each be handed identity zero, and
 /// each would accept the other's expiry as its own. A driver owns one source for a whole run — see
 /// `Sim` — and a test driving a stack by hand must do the same.
+///
+/// Nothing listens for what the protocol narrates. Use [`step_noting`] to read that too.
 pub fn step_with<P: Protocol + ?Sized>(
     p: &mut P,
     event: ProtoEvent<P>,
@@ -186,9 +212,26 @@ pub fn step_with<P: Protocol + ?Sized>(
     store: &mut dyn crate::store::Store<P::Meta, P::Entry>,
     next_timer: &mut u64,
 ) -> Vec<ProtoEffect<P>> {
+    step_noting(p, event, now, rng, store, next_timer, &mut crate::NoNotes)
+}
+
+/// [`step_with`], collecting what the protocol narrates as well as what it emitted.
+///
+/// The two are returned separately here because a caller stepping a protocol by hand has no trace
+/// to interleave them into. Under the simulator they land in one account, in order, which is what
+/// lets a claim be checked against what happened.
+pub fn step_noting<P: Protocol + ?Sized>(
+    p: &mut P,
+    event: ProtoEvent<P>,
+    now: Time,
+    rng: &mut dyn RngCore,
+    store: &mut dyn crate::store::Store<P::Meta, P::Entry>,
+    next_timer: &mut u64,
+    notes: &mut dyn crate::NoteSink<P::Note>,
+) -> Vec<ProtoEffect<P>> {
     let mut effects = Vec::new();
     {
-        let mut cx = Cx::new(&mut effects, now, rng, store, next_timer);
+        let mut cx = Cx::new(&mut effects, now, rng, store, next_timer, notes);
         match event {
             Event::Cmd(c) => p.on_cmd(c, &mut cx),
             Event::Msg { from, msg } => p.on_msg(from, msg, &mut cx),

@@ -1,6 +1,7 @@
 //! Verifies the simulation contract using a deliberately trivial protocol, so that anything
 //! observed is the simulator's behaviour and not a protocol's.
 
+use core::convert::Infallible;
 use core::time::Duration;
 use recon_core::{NodeId, Position, ProtoCx, Protocol, Store, Time, TimerId};
 use recon_sim::{Config, DropReason, Sim, TraceEvent};
@@ -33,6 +34,7 @@ impl Protocol for Parrot {
     type Ind = Got;
     type Msg = Wire;
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -393,6 +395,7 @@ impl Protocol for Counter {
     type Ind = u32;
     type Msg = ();
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -1112,6 +1115,7 @@ impl Protocol for Keeper {
     type Ind = Ledger;
     type Msg = u32;
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     type Meta = Ledger;
     type Entry = u32;
 
@@ -1378,7 +1382,7 @@ fn recovery_reads_and_acts_within_the_handler() {
     s.crash(A);
     s.restart(A);
 
-    let after: Vec<&TraceEvent<u32, Ledger>> = s
+    let after: Vec<&TraceEvent<u32, Ledger, Infallible>> = s
         .trace()
         .events()
         .iter()
@@ -1423,6 +1427,7 @@ impl Protocol for Listener {
     type Ind = ();
     type Msg = ();
     type Scope = recon_core::SessionEvent;
+    type Note = core::convert::Infallible;
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 
@@ -1500,6 +1505,7 @@ impl Protocol for TwoTimers {
     type Ind = ();
     type Msg = ();
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

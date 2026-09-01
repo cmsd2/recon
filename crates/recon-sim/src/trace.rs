@@ -26,7 +26,7 @@ pub enum DropReason {
 
 /// One thing that happened, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceEvent<M, I> {
+pub enum TraceEvent<M, I, N> {
     /// A protocol asked for a message to be transmitted.
     Sent { at: Time, from: NodeId, to: NodeId, msg: M },
     /// A message was handed to the recipient protocol.
@@ -62,12 +62,22 @@ pub enum TraceEvent<M, I> {
     /// deliberately not recorded: the point of the fault is that nobody knows until the recovered
     /// process reads its storage back.
     DiedWriting { at: Time, node: NodeId },
+    /// A process narrated a decision it took.
+    ///
+    /// The one event here that is not something that *happened to* a process. It is in the same
+    /// account, on the same clock, precisely so that a claim can be read against the run — a
+    /// process saying it refused an announcement is a process from which no acceptance followed,
+    /// and a test can require that rather than trust it.
+    ///
+    /// Recorded **before** the writes and effects of the handler that narrated it: a note marks the
+    /// decision, and the write and the sends are what the decision led to.
+    Said { at: Time, node: NodeId, note: N },
     /// A restarted process was given back what it had written. `had_state` is false when it had
     /// written nothing and started as if for the first time.
     Recovered { at: Time, node: NodeId, had_state: bool },
 }
 
-impl<M, I> TraceEvent<M, I> {
+impl<M, I, N> TraceEvent<M, I, N> {
     pub fn at(&self) -> Time {
         match self {
             TraceEvent::Sent { at, .. }
@@ -86,6 +96,7 @@ impl<M, I> TraceEvent<M, I> {
             | TraceEvent::Restarted { at, .. }
             | TraceEvent::Wrote { at, .. }
             | TraceEvent::DiedWriting { at, .. }
+            | TraceEvent::Said { at, .. }
             | TraceEvent::Recovered { at, .. } => *at,
         }
     }
@@ -93,23 +104,38 @@ impl<M, I> TraceEvent<M, I> {
 
 /// An ordered log of everything a run did.
 #[derive(Debug, Clone)]
-pub struct Trace<M, I> {
-    events: Vec<TraceEvent<M, I>>,
+pub struct Trace<M, I, N> {
+    events: Vec<TraceEvent<M, I, N>>,
 }
 
-impl<M, I> Default for Trace<M, I> {
+impl<M, I, N> Default for Trace<M, I, N> {
     fn default() -> Self {
         Trace { events: Vec::new() }
     }
 }
 
-impl<M, I> Trace<M, I> {
-    pub(crate) fn push(&mut self, e: TraceEvent<M, I>) {
+impl<M, I, N> Trace<M, I, N> {
+    pub(crate) fn push(&mut self, e: TraceEvent<M, I, N>) {
         self.events.push(e);
     }
 
-    pub fn events(&self) -> &[TraceEvent<M, I>] {
+    pub fn events(&self) -> &[TraceEvent<M, I, N>] {
         &self.events
+    }
+
+    /// Every decision narrated, in order, with the process that narrated it.
+    ///
+    /// Empty unless the run was asked to record them — see `Sim::record_notes`.
+    pub fn notes(&self) -> impl Iterator<Item = (NodeId, &N)> {
+        self.events.iter().filter_map(|e| match e {
+            TraceEvent::Said { node, note, .. } => Some((*node, note)),
+            _ => None,
+        })
+    }
+
+    /// Every decision narrated by `node`, in order.
+    pub fn notes_at(&self, node: NodeId) -> impl Iterator<Item = &N> {
+        self.notes().filter(move |(n, _)| *n == node).map(|(_, x)| x)
     }
 
     pub fn len(&self) -> usize {

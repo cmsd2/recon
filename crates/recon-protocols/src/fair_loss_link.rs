@@ -82,6 +82,7 @@ impl<P: Clone> Protocol for FairLossLink<P> {
     /// No scope conditions. FLL1 to FLL3 are stated over correct processes and hold as long as one
     /// is correct; there is no session to end and nothing this link could report about one.
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Keeps nothing durably, because it keeps nothing at all.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

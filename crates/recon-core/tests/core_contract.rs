@@ -5,8 +5,8 @@ use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::{
-    Cx, Effect, EffectSink, Event, MemStore, NoStore, NodeId, Position, ProtoCx, Protocol, Slot,
-    Store, Time, TimerId, step, step_in, step_with,
+    Cx, Effect, EffectSink, Event, MemStore, NoNotes, NoStore, NodeId, Position, ProtoCx, Protocol,
+    Slot, Store, Time, TimerId, step, step_in, step_with,
 };
 
 const A: NodeId = NodeId::new(1);
@@ -34,6 +34,7 @@ impl Protocol for Echo {
     type Ind = Echoed;
     type Msg = Ping;
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -101,6 +102,7 @@ impl Protocol for Chooser {
     type Ind = Chose;
     type Msg = ();
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -188,6 +190,7 @@ impl Protocol for Wrapper {
     type Ind = WrapInd;
     type Msg = WrapMsg;
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -257,6 +260,7 @@ impl Protocol for Outer {
     type Ind = OuterInd;
     type Msg = OuterMsg;
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -320,7 +324,8 @@ fn a_protocol_runs_against_a_non_allocating_sink() {
     {
         let mut none = NoStore;
         let mut ids = 0;
-        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none, &mut ids);
+        let mut quiet = NoNotes;
+        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none, &mut ids, &mut quiet);
         let mut p = Echo::default();
         p.on_cmd(Ping(1), &mut cx);
         p.on_msg(A, Ping(1), &mut cx);
@@ -336,7 +341,8 @@ fn composition_works_against_a_non_allocating_sink() {
     {
         let mut none = NoStore;
         let mut ids = 0;
-        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none, &mut ids);
+        let mut quiet = NoNotes;
+        let mut cx = Cx::new(&mut sink, Time::ZERO, &mut r, &mut none, &mut ids, &mut quiet);
         let mut w = Wrapper { child: Echo::default() };
         w.on_cmd(Ping(1), &mut cx);
     }
@@ -354,7 +360,8 @@ fn a_reused_buffer_settles_its_capacity() {
         buf.clear();
         let mut none = NoStore;
         let mut ids = 0;
-        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none, &mut ids);
+        let mut quiet = NoNotes;
+        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none, &mut ids, &mut quiet);
         w.on_cmd(Ping(1), &mut cx);
     }
     let settled = buf.capacity();
@@ -362,7 +369,8 @@ fn a_reused_buffer_settles_its_capacity() {
         buf.clear();
         let mut none = NoStore;
         let mut ids = 0;
-        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none, &mut ids);
+        let mut quiet = NoNotes;
+        let mut cx = Cx::new(&mut buf, Time::ZERO, &mut r, &mut none, &mut ids, &mut quiet);
         w.on_cmd(Ping(1), &mut cx);
     }
     assert_eq!(buf.capacity(), settled, "a reused buffer must not regrow per event");
@@ -403,6 +411,7 @@ impl Protocol for Scoped {
     type Ind = Lapsed;
     type Msg = ();
     type Scope = WindowClosed;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -442,6 +451,7 @@ impl Protocol for Counter {
     type Ind = Total;
     type Msg = ();
     type Scope = Infallible;
+    type Note = core::convert::Infallible;
     /// Rewritten each time; a running total does not accumulate.
     type Meta = Total;
     /// One entry per bump, appended.
@@ -590,6 +600,7 @@ impl Protocol for Bridger {
     type Ind = ();
     type Msg = ();
     type Scope = BridgerScope;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -626,6 +637,7 @@ impl Protocol for Propagator {
     type Ind = MyGuaranteeLapsed;
     type Msg = ();
     type Scope = PropagatorScope;
+    type Note = core::convert::Infallible;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
@@ -713,6 +725,7 @@ impl Protocol for Kept {
     type Ind = u32;
     type Msg = u32;
     type Scope = Infallible;
+    type Note = core::convert::Infallible;
     type Meta = KeptMeta;
     type Entry = Infallible;
 
@@ -755,6 +768,7 @@ impl Protocol for Holder {
     type Ind = u32;
     type Msg = u32;
     type Scope = Infallible;
+    type Note = core::convert::Infallible;
     type Meta = HolderMeta;
     type Entry = Infallible;
 
@@ -863,8 +877,9 @@ fn a_child_writing_first_creates_the_parents_record() {
     let mut sink: Vec<Effect<u32, u32>> = Vec::new();
     let mut r = rng(0);
     let mut timers = 0;
-    let mut cx: Cx<'_, u32, u32, HolderMeta, Infallible> =
-        Cx::new(&mut sink, Time::ZERO, &mut r, &mut st, &mut timers);
+    let mut quiet = NoNotes;
+    let mut cx: Cx<'_, u32, u32, Infallible, HolderMeta, Infallible> =
+        Cx::new(&mut sink, Time::ZERO, &mut r, &mut st, &mut timers, &mut quiet);
     cx.with_durable_child_consuming(core::convert::identity, &mut inbox, CHILD_SLOT, |ccx| {
         child.on_cmd(2, ccx)
     });
@@ -884,4 +899,119 @@ fn a_durable_childs_effects_are_re_wrapped_like_any_other_childs() {
         vec![Effect::Send { to: NodeId::new(9), msg: 3 }, Effect::Indicate(3)],
         "the child's send went out and its indication came back through the parent"
     );
+}
+
+// ------------------------------------------------------------ narration
+
+/// A child's decision reaches the run without the parent restating it.
+///
+/// The point of a note's vocabulary belonging to the run rather than to a layer: composition takes
+/// no mapper for one, exactly as it takes none for a timer, and a parent letting a child's note
+/// through is not endorsing it — the decision was the child's.
+#[test]
+fn a_childs_note_passes_through_composition_untouched() {
+    #[derive(Debug, PartialEq, Eq)]
+    enum Said {
+        Child(u32),
+        Parent(u32),
+    }
+
+    struct Speaker;
+    impl Protocol for Speaker {
+        type Cmd = u32;
+        type Ind = u32;
+        type Msg = u32;
+        type Scope = Infallible;
+        type Note = Said;
+        type Meta = Infallible;
+        type Entry = Infallible;
+        fn on_cmd(&mut self, n: u32, cx: &mut ProtoCx<'_, Self>) {
+            cx.note(Said::Child(n));
+        }
+        fn on_msg(&mut self, _: NodeId, _: u32, _: &mut ProtoCx<'_, Self>) {}
+        fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
+    }
+
+    struct Above {
+        child: Speaker,
+    }
+    impl Protocol for Above {
+        type Cmd = u32;
+        type Ind = u32;
+        type Msg = u32;
+        type Scope = Infallible;
+        type Note = Said;
+        type Meta = Infallible;
+        type Entry = Infallible;
+        fn on_cmd(&mut self, n: u32, cx: &mut ProtoCx<'_, Self>) {
+            cx.note(Said::Parent(n));
+            let child = &mut self.child;
+            let mut inbox = Vec::new();
+            cx.with_child_consuming(core::convert::identity, &mut inbox, |ccx| {
+                child.on_cmd(n, ccx)
+            });
+        }
+        fn on_msg(&mut self, _: NodeId, _: u32, _: &mut ProtoCx<'_, Self>) {}
+        fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
+    }
+
+    let mut effects: Vec<Effect<u32, u32>> = Vec::new();
+    let mut heard: Vec<Said> = Vec::new();
+    let mut r = rng(0);
+    let mut none = NoStore;
+    let mut ids = 0;
+    {
+        let mut cx = Cx::new(&mut effects, Time::ZERO, &mut r, &mut none, &mut ids, &mut heard);
+        Above { child: Speaker }.on_cmd(9, &mut cx);
+    }
+
+    assert_eq!(heard, vec![Said::Parent(9), Said::Child(9)]);
+}
+
+/// Narration is output-only, so no behaviour can depend on it.
+///
+/// A protocol handed a real audience and one handed none must emit the same effects, from the same
+/// state, drawing the same values from the generator. This is what makes a run reproducible whether
+/// or not anybody watched.
+#[test]
+fn a_protocol_cannot_tell_whether_anything_is_listening() {
+    struct Chatty;
+    impl Protocol for Chatty {
+        type Cmd = u32;
+        type Ind = u32;
+        type Msg = u32;
+        type Scope = Infallible;
+        type Note = u32;
+        type Meta = Infallible;
+        type Entry = Infallible;
+        fn on_cmd(&mut self, n: u32, cx: &mut ProtoCx<'_, Self>) {
+            cx.note(n);
+            let drawn = rand::RngCore::next_u32(cx.rng());
+            cx.note(drawn);
+            cx.indicate(drawn);
+            cx.send(A, n);
+        }
+        fn on_msg(&mut self, _: NodeId, _: u32, _: &mut ProtoCx<'_, Self>) {}
+        fn on_timer(&mut self, _: TimerId, _: &mut ProtoCx<'_, Self>) {}
+    }
+
+    let run = |listening: bool| -> Vec<Effect<u32, u32>> {
+        let mut effects = Vec::new();
+        let mut heard: Vec<u32> = Vec::new();
+        let mut quiet = NoNotes;
+        let mut r = rng(7);
+        let mut none = NoStore;
+        let mut ids = 0;
+        {
+            let sink: &mut dyn recon_core::NoteSink<u32> =
+                if listening { &mut heard } else { &mut quiet };
+            let mut cx = Cx::new(&mut effects, Time::ZERO, &mut r, &mut none, &mut ids, sink);
+            Chatty.on_cmd(4, &mut cx);
+        }
+        assert_eq!(heard.is_empty(), !listening);
+        effects
+    };
+
+    assert_eq!(run(true), run(false));
+    assert_eq!(run(true).len(), 2, "and the run being compared is not an empty one");
 }

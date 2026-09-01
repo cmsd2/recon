@@ -43,7 +43,7 @@ use recon_core::{NodeId, Protocol};
 ///     core::time::Duration::from_millis(1),
 /// ));
 /// ```
-pub trait Detector: Protocol {
+pub trait Detector: Protocol<Note = crate::Note> {
     /// Read one of this detector's indications in the port's terms.
     ///
     /// Total, as [`crate::link::Link::classify`] is: every indication a detector raises is either a

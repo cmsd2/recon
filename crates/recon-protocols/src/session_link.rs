@@ -92,6 +92,7 @@ impl<P: Clone> Protocol for SessionLink<P> {
     type Ind = Ind<P>;
     type Msg = Wire<P>;
     type Scope = SessionEvent;
+    type Note = crate::Note;
     /// Keeps nothing durably: a crash loses everything this protocol knows.
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;

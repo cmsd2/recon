@@ -243,6 +243,7 @@ impl<P: Clone + Ord> Protocol for LoggedLink<P> {
     type Ind = Ind<P>;
     type Msg = Wire<P>;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// The send counter: one small value, rewritten before each send. See the module note.
     type Meta = u64;
     /// One log-delivered message; appended, so the write cost is linear rather than quadratic.

@@ -262,6 +262,7 @@ impl<P: Clone + Ord> Protocol for LoggedUniformReliableBroadcast<P> {
     type Ind = Ind<P>;
     type Msg = Data<P>;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     /// Nothing is rewritten; the metadata is written once so a restart finds something.
     type Meta = ();
     /// One record per message seen or log-delivered. `ack` is not among them, by design.

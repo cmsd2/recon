@@ -53,7 +53,7 @@ where
     /// something durably is run with [`Child::run_durable`] instead.
     pub fn run<M, I, Me, En>(
         &mut self,
-        cx: &mut Cx<'_, M, I, Me, En>,
+        cx: &mut Cx<'_, M, I, P::Note, Me, En>,
         wrap: fn(P::Msg) -> M,
         f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>),
     ) -> Vec<P::Ind> {
@@ -73,7 +73,7 @@ where
     /// See [`Cx::with_durable_child_consuming`] for why the write is one and not two.
     pub fn run_durable<M, I, Me, En>(
         &mut self,
-        cx: &mut Cx<'_, M, I, Me, En>,
+        cx: &mut Cx<'_, M, I, P::Note, Me, En>,
         wrap: fn(P::Msg) -> M,
         slot: Slot<Me, P::Meta>,
         f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>),

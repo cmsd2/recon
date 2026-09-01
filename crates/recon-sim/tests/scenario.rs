@@ -5,6 +5,7 @@
 //! demonstration against a defect this project actually had lives in `recon-protocols`, where
 //! that defect is; see `logged_epoch_consensus_shrinking.rs`.
 
+use core::convert::Infallible;
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
 use recon_sim::scenario::{Scenario, Step};
@@ -35,6 +36,7 @@ impl Protocol for Parrot {
     type Ind = Got;
     type Msg = Wire;
     type Scope = core::convert::Infallible;
+    type Note = core::convert::Infallible;
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 
@@ -66,7 +68,7 @@ fn c_got_seven(sim: &Sim<Parrot>) -> bool {
     sim.trace().indications_at(C).any(|g| *g == Got(A, 7))
 }
 
-fn events(sim: &Sim<Parrot>) -> Vec<TraceEvent<Wire, Got>> {
+fn events(sim: &Sim<Parrot>) -> Vec<TraceEvent<Wire, Got, Infallible>> {
     sim.trace().events().to_vec()
 }
 
@@ -140,7 +142,8 @@ fn every_fault_is_a_step() {
 
     let sim = Sim::run_scenario(&s, build);
     let seen = events(&sim);
-    let count = |f: fn(&TraceEvent<Wire, Got>) -> bool| seen.iter().filter(|e| f(e)).count();
+    let count =
+        |f: fn(&TraceEvent<Wire, Got, Infallible>) -> bool| seen.iter().filter(|e| f(e)).count();
 
     assert_eq!(count(|e| matches!(e, TraceEvent::Suspended { .. })), 1);
     assert_eq!(count(|e| matches!(e, TraceEvent::Resumed { .. })), 1);

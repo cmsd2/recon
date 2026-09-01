@@ -20,10 +20,12 @@ pub mod store;
 pub mod time;
 
 pub use child::Child;
-pub use cx::{Cx, EffectSink};
+pub use cx::{Cx, EffectSink, NoNotes, NoteSink};
 pub use effect::{Effect, TimerId, WriteKind};
 pub use node::NodeId;
-pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step, step_in, step_with};
+pub use protocol::{
+    Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step, step_in, step_noting, step_with,
+};
 pub use session::SessionEvent;
 pub use store::{MemStore, NoStore, Position, Slot, Store};
 pub use time::Time;

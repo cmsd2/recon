@@ -359,6 +359,7 @@ impl Protocol for LoggedEpochChange {
     type Ind = Ind;
     type Msg = Wire;
     type Scope = core::convert::Infallible;
+    type Note = crate::Note;
     type Meta = Started;
     /// Nothing accumulates: the epoch entered is one value, rewritten.
     type Entry = core::convert::Infallible;
