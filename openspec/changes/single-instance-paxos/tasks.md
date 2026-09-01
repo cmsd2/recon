@@ -106,11 +106,24 @@
 
 ## 6. The fail-recovery half — logged epoch-change
 
-- [ ] 6.1 Add the module per Algorithm 5.8, and verify the epoch timestamp is durable before any
+- [x] 6.1 Add the module per Algorithm 5.8, and verify the epoch timestamp is durable before any
       message or indication reveals it
-- [ ] 6.2 Verify a restarted process does not reuse a timestamp it or an earlier incarnation used
-- [ ] 6.3 Verify a process that crashes and recovers while leadership is settled rejoins the same
+- [x] 6.2 Verify a restarted process does not reuse a timestamp it or an earlier incarnation used.
+      **It does reuse one, and that is the algorithm.** `ts` is volatile and 5.8 does not store it,
+      so a recovered leader climbs from `rank(self)` again and re-announces candidates it has used.
+      What `startts` being durable buys is that no process ever *enters* a timestamp twice, and that
+      is what the test asserts — with the reuse confirmed rather than assumed away
+- [x] 6.3 Verify a process that crashes and recovers while leadership is settled rejoins the same
       final epoch rather than starting a fresh sequence
+
+      **Departure found while writing this group.** Algorithm 5.8 answers every NEWEPOCH it does not
+      act on with a NACK, and over the stubborn broadcast its own `Uses:` line names, that does not
+      terminate: the broadcast redelivers the announcement every process has just accepted, each
+      redelivery fails `newts > startts`, each refusal makes the leader climb, for ever. Measured at
+      epoch 380 and climbing with leadership settled and nothing faulty. `epoch_change` does not
+      have this because a best-effort broadcast over perfect links delivers once. A repeat of the
+      epoch already entered is now silence rather than a refusal; a stale or untrusted announcement
+      is still refused, and a test pins that the refusal still does its work
 
 ## 7. Logged read/write epoch consensus
 
