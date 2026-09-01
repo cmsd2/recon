@@ -342,3 +342,34 @@ fn a_settled_stack_reports_nothing() {
         .count();
     assert_eq!(reports, 0, "a settled stack sent {reports} reports or refusals");
 }
+
+// ------------------------------------------------- a bridge: epochs settle anyway
+
+#[test]
+fn under_a_bridge_epochs_settle_even_though_leadership_does_not() {
+    // The interesting half of the bridge, and not what I expected before running it. Ω never
+    // converges — `A` trusts `C` while everyone else trusts `D`, and no partition heals because
+    // nothing is broken. Yet the epochs *do* settle: all four sit in one epoch led by `D`, and stay
+    // there.
+    //
+    // Why: `A` trusts `C`, but `C` trusts `D` and so never announces, and `A` starts no epoch of its
+    // own because it is not its own leader. So the disagreement is stable rather than churning —
+    // `EC2`'s condition has lapsed, and what that costs is that `A` follows an epoch led by a
+    // process it no longer trusts, not that epochs run away.
+    let mut s = sync_sim(30);
+    s.run_for(timeout() * 2);
+    s.sever(A, D);
+    s.run_for(timeout() * 20);
+
+    assert!(s.reachable(A, B) && s.reachable(B, D) && !s.reachable(A, D), "a bridge");
+    assert_eq!(s.at(A).trusted(), C, "A trusts the highest it can see");
+    assert_eq!(s.at(D).trusted(), D, "and D still trusts itself");
+
+    let settled: Vec<u64> = ALL.iter().map(|n| s.at(*n).last_timestamp()).collect();
+    assert!(settled.iter().all(|t| *t == settled[0]), "all in one epoch: {settled:?}");
+
+    // Settled, not merely momentarily equal: twenty more timeouts move nothing.
+    s.run_for(timeout() * 20);
+    let later: Vec<u64> = ALL.iter().map(|n| s.at(*n).last_timestamp()).collect();
+    assert_eq!(settled, later, "the epochs are stable under a standing disagreement");
+}

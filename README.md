@@ -127,8 +127,12 @@ which is what TCP or QUIC gives you — reliable and ordered within a session, a
 ends an unknown suffix of what was in flight is simply gone. Sessions re-establish on their own,
 without either process sending, because that is what a reconnecting link does.
 
-Faults: `crash` then `restart` for failure, `suspend` then `resume` for a stall, plus
-`partition`, `heal` and `break_session`. The two pairs are distinct and not interchangeable: a
+Faults: `crash` then `restart` for failure, `suspend` then `resume` for a stall, plus `sever`,
+`reconnect`, `partition`, `heal` and `break_session`. Connectivity is between **pairs**, so
+reachability need not be transitive: `sever(A, C)` on three processes leaves a *bridge* — `A` reaches
+`B`, `B` reaches `C`, `A` does not reach `C`, all three correct and none of them wrong about what it
+can see. `partition` is the special case where the severed pairs are exactly those spanning two
+groups, which is the only case a grouping can express and the easy one. The two pairs are distinct and not interchangeable: a
 crash loses volatile state and takes the startup branch on the way back, while a stall keeps its
 state and is *handed back* every timer, delivery and scope event that came due while it was away —
 dropping one would lose a message inside a session that never ended. What a stall does take is the
@@ -340,7 +344,7 @@ where they meet.
 ```
 protocol track                        evidence track
 ──────────────                        ──────────────
-1. accrual detector                   A. non-transitive partitions
+1. accrual detector                   A. non-transitive partitions        ✓ built
 2. defensive re-announcement          B. per-node clocks, and skew
 3. Stop                               C. invocations in the trace
 4. a replicated-log port              D. indeterminate outcomes
@@ -416,22 +420,18 @@ protocol behind it; a nemesis schedule that breaks one can be replayed against t
 comparison is the point — where they differ is in what they assume, and a shared suite is what makes
 the difference visible rather than asserted.
 
-#### A. Non-transitive partitions
+#### A. Non-transitive partitions — **built**
 
-`Sim::partition` takes groups, so a partition is symmetric **and transitive**: the network is always
-a set of islands. Real ones are not.
+Connectivity is now between pairs, so `sever(A, C)` on three processes leaves a bridge: `A` reaches
+`B`, `B` reaches `C`, `A` does not reach `C`, all three correct. `partition` is the special case
+where the severed pairs span two groups.
 
-```
-    A ←──────→ B        A reaches B
-               │        B reaches C
-               ↕        A does NOT reach C
-               C
-```
-
-`B` sees everyone; `A` and `C` each see a different world and neither is wrong. Quorum intersection
-survives it, but *leader election* does not obviously: this whole stack rests on Ω converging, and Ω
-converges by every process computing `maxrank` of the same set. This is the cheapest new fault to
-add and the likeliest to find something.
+What it found is in [`docs/conditional-guarantees.md`](docs/conditional-guarantees.md): the first
+fault under which this project's chain of conditions lapses link by link — `◇P2`, then `ELD1`, then
+`UC4` for the processes with no majority they can reach — while `UC2`, which is `[always]`, holds
+through a topology whose two majorities intersect in a single process. The stack routes around the
+bridge rather than stalling, which is not what was predicted; the change recorded the question and
+let the run answer it.
 
 #### B. Per-node clocks, and skew
 
@@ -649,7 +649,7 @@ cargo test --workspace -- --nocapture                 # with output
 | Suite | Covers | Tests |
 |---|---|---|
 | [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, and a durable child inside a durable parent | 29 |
-| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event | 83 |
+| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event, severing pairs | 91 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | [`tests/link_port.rs`](crates/recon-protocols/tests/link_port.rs), `foreign_link.rs` | that both links satisfy the port, that a protocol is not a link by accident, and that a link this project never wrote carries the stack up to consensus | 6 / 3 |
 | `tests/alloc_probe.rs` | what one delivery costs in allocations | 2 |
@@ -662,14 +662,14 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 | `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total; a restarted originator's broadcasts delivered, at both layers | 22 / 18 |
 | `tests/probabilistic_broadcast_over_sessions.rs`, `lazy_probabilistic_broadcast_over_sessions.rs` | the real-world set's standard: cost as an identity, silence when idle, a session ending propagated once and repaired by recovery, a restart survived | 6 / 5 |
-| `tests/eventually_perfect_failure_detector.rs`, `detector_port.rs` | ◇P: a suspicion withdrawn, a timeout that moves both ways, and what the cap costs — swept against a latency rather than asserted | 13 / 5 |
-| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time, and that leadership can **return** to a recovered process | 11 / 13 / 19 |
-| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, and progress resuming when a healed partition restores the majority | 15 |
+| `tests/eventually_perfect_failure_detector.rs`, `detector_port.rs` | ◇P: a suspicion withdrawn, a timeout that moves both ways, what the cap costs — swept against a latency rather than asserted — and two correct processes suspecting each other for ever across a bridge | 14 / 5 |
+| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in — each with a test that its send rate is flat in time, that leadership can **return** to a recovered process, and what a bridge does to both | 12 / 14 / 19 |
+| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 
-516 across the suites above, plus nine unit tests inside `recon-core` and four doctests — two
-`compile_fail` on the link and detector ports, two worked examples of a storage slot — 529 in total,
+529 across the suites above, plus nine unit tests inside `recon-core` and four doctests — two
+`compile_fail` on the link and detector ports, two worked examples of a storage slot — 542 in total,
 all in one process, no ports opened.
 
 ## Licence

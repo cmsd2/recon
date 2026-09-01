@@ -454,3 +454,72 @@ fn progress_resumes_when_a_healed_partition_restores_the_majority() {
         "leadership returned to maxrank once suspicions were withdrawn"
     );
 }
+
+// ------------------------------------------------- a bridge: UC2 is [always]
+
+/// Sever `{A,B}` from `{D,E}` entirely, leaving `C` reaching everyone.
+///
+/// The adversarial topology: `{A,B,C}` and `{C,D,E}` are both majorities and they intersect in `C`
+/// alone. If quorum intersection were doing less work than it claims, this is the schedule where two
+/// leaders each assemble a quorum and decide differently.
+fn two_overlapping_quorums(seed: u64) -> Sim<Uc> {
+    let mut s = sync_sim(seed);
+    s.run_for(timeout() * 2);
+    for x in [A, B] {
+        for y in [D, E] {
+            s.sever(x, y);
+        }
+    }
+    for n in ALL {
+        s.command(n, Cmd::Propose(n.0 as u32));
+    }
+    s.run_for(timeout() * 30);
+    s
+}
+
+#[test]
+fn agreement_holds_across_a_bridge_whose_quorums_share_one_process() {
+    // `UC2` is `[always]` where termination is conditional, and a bridge is the schedule that breaks
+    // it if the scope annotations are wrong. Ω never converges under one — `eventual_leader_detector`
+    // pins that — so this runs with the detector permanently disagreeing, by construction rather
+    // than by luck.
+    for seed in 0..20u64 {
+        let s = two_overlapping_quorums(seed);
+        let decisions = all_decisions(&s);
+        assert!(
+            decisions.windows(2).all(|w| w[0] == w[1]),
+            "seed {seed}: two processes decided differently across a bridge: {decisions:?}"
+        );
+    }
+}
+
+#[test]
+fn a_majority_across_the_bridge_decides_while_the_minority_is_left_behind() {
+    // The non-vacuity half, and the answer to the question the change could not settle in advance:
+    // the stack **routes around** the bridge rather than stalling. `C` reaches everyone, so
+    // `{C,D,E}` is a live majority and decides; `A` and `B` are not in it and never do.
+    //
+    // That is `UC4` lapsing exactly where it says it may — no majority is available *to A and B* —
+    // while `UC2` holds for everyone. An agreement assertion over runs where nobody decided would
+    // be satisfied by a protocol that had stopped, which is why this is asserted separately.
+    let mut decided_somewhere = 0;
+    for seed in 0..20u64 {
+        let s = two_overlapping_quorums(seed);
+        assert!(s.reachable(B, C) && s.reachable(C, D), "C bridges the two sides");
+        assert!(!s.reachable(B, D), "and they cannot reach each other");
+
+        if !all_decisions(&s).is_empty() {
+            decided_somewhere += 1;
+            for n in [D, E] {
+                assert_eq!(decided_by(&s, n).len(), 1, "seed {seed}: {n} is in the live majority");
+            }
+            for n in [A, B] {
+                assert!(
+                    decided_by(&s, n).is_empty(),
+                    "seed {seed}: {n} decided without a majority it could reach"
+                );
+            }
+        }
+    }
+    assert_eq!(decided_somewhere, 20, "every run made progress on the side that could");
+}

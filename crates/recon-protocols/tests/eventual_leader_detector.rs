@@ -264,3 +264,36 @@ fn leadership_returning_is_a_property_of_the_detector_not_of_omega() {
         "over a detector that never retracts, leadership cannot return: {trusted:?}"
     );
 }
+
+// ------------------------------------------------- a bridge: ELD1's condition failing
+
+#[test]
+fn under_a_bridge_the_processes_never_agree_on_a_leader() {
+    // `ELD1` is `[eventual]` and inherits the detector's condition. Under a bridge that condition
+    // fails permanently — see `eventually_perfect_failure_detector`'s test of the same name — and
+    // so does this one: `A` suspects `D` and trusts the highest it can still see, while `B` and `C`
+    // suspect nobody and trust `D`.
+    //
+    // Recorded rather than repaired. Three correct processes with three views, none of them wrong,
+    // is exactly what `[eventual]` warns of, and the layer above is obliged to stay safe through it
+    // — which `leader_driven_consensus` is where we check.
+    let mut s = sync_sim(30);
+    s.run_for(timeout() * 2);
+    assert_eq!(final_leaders(&s), vec![Some(D); 4], "everyone trusts maxrank to begin with");
+
+    s.sever(A, D);
+    s.run_for(timeout() * 20);
+
+    assert!(s.reachable(A, B) && s.reachable(B, D), "a bridge, not two islands");
+    assert!(!s.reachable(A, D));
+
+    let leaders = final_leaders(&s);
+    assert_eq!(leaders[0], Some(C), "A cannot see D, so it trusts the highest it can");
+    for (n, seen) in leaders.iter().enumerate().skip(1) {
+        assert_eq!(*seen, Some(D), "{n} still sees D and trusts it");
+    }
+    assert!(
+        leaders.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+        "so the processes disagree, permanently, and that is ELD1's condition failing"
+    );
+}

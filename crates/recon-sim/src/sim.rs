@@ -71,7 +71,13 @@ pub struct Sim<P: Protocol> {
     steps: u64,
     queue: BTreeMap<(Time, u64), Scheduled<P>>,
     nodes: BTreeMap<NodeId, Node<P>>,
-    partitions: Option<Vec<BTreeSet<NodeId>>>,
+    /// Which pairs cannot reach each other, normalised so `(a, b)` and `(b, a)` are one entry.
+    ///
+    /// A set of pairs rather than a grouping, because a grouping makes reachability an equivalence
+    /// relation and real networks do not: `A` may reach `B` and `B` reach `C` while `A` cannot reach
+    /// `C`. [`Sim::partition`] is the special case in which the severed pairs happen to be exactly
+    /// those spanning two groups.
+    severed: BTreeSet<(NodeId, NodeId)>,
     /// Everything that came due for a process while it was suspended, in the order it came due:
     /// timers, deliveries carried by a live session, and scope events.
     ///
@@ -137,7 +143,7 @@ where
             steps: 0,
             queue: BTreeMap::new(),
             nodes: map,
-            partitions: None,
+            severed: BTreeSet::new(),
             deferred: Vec::new(),
             make: Box::new(make),
             sessions: BTreeMap::new(),
@@ -351,17 +357,66 @@ where
     }
 
     /// Split the network into groups. Messages between groups are not delivered.
+    ///
+    /// The special case of [`Sim::sever`] in which the severed pairs are exactly those spanning two
+    /// groups — so reachability *is* transitive here, and a process in a group reaches every other
+    /// member. That is the easy case, and it is not the only one; see `sever`.
+    ///
+    /// Replaces whatever was severed before, so calling this after `sever` discards that severing.
     pub fn partition(&mut self, groups: &[&[NodeId]]) {
-        self.partitions =
-            Some(groups.iter().map(|g| g.iter().copied().collect::<BTreeSet<_>>()).collect());
+        let groups: Vec<BTreeSet<NodeId>> =
+            groups.iter().map(|g| g.iter().copied().collect()).collect();
+        let members: Vec<NodeId> = groups.iter().flatten().copied().collect();
+        self.severed.clear();
+        for (i, a) in members.iter().enumerate() {
+            for b in members.iter().skip(i + 1) {
+                if !groups.iter().any(|g| g.contains(a) && g.contains(b)) {
+                    self.severed.insert(pair(*a, *b));
+                }
+            }
+        }
         if self.config.is_session_based() {
             self.end_severed_sessions();
         }
     }
 
-    /// Remove any partition, restoring full connectivity.
+    /// Cut `a` and `b` off from each other, in both directions, leaving every other pair alone.
+    ///
+    /// This is what a grouping cannot express. Severing one pair of three processes leaves a
+    /// **bridge**: `A` reaches `B` and `B` reaches `C`, but `A` does not reach `C`. All three are
+    /// correct, none of them is wrong about what it can see, and there is no group any of them
+    /// belongs to — which is the case every layer above that depends on processes agreeing about
+    /// who is reachable has never been asked about.
+    ///
+    /// Severing is symmetric. A link that works one way and not the other is a different fault and
+    /// a harder question for the session model, which treats a session as a property of a pair; see
+    /// this change's `design.md`.
+    pub fn sever(&mut self, a: NodeId, b: NodeId) {
+        if a == b {
+            return;
+        }
+        self.severed.insert(pair(a, b));
+        if self.config.is_session_based() {
+            self.end_severed_sessions();
+        }
+    }
+
+    /// Restore connectivity between `a` and `b`, leaving every other severing in place.
+    pub fn reconnect(&mut self, a: NodeId, b: NodeId) {
+        self.severed.remove(&pair(a, b));
+    }
+
+    /// Whether `a` and `b` can currently reach each other.
+    ///
+    /// For asserting the topology a test built rather than assuming it: severing one pair of *four*
+    /// processes is not a bridge, and a test that thinks it is would be testing nothing.
+    pub fn reachable(&self, a: NodeId, b: NodeId) -> bool {
+        self.connected(a, b)
+    }
+
+    /// Restore full connectivity, discarding every severing however it was made.
     pub fn heal(&mut self) {
-        self.partitions = None;
+        self.severed.clear();
     }
 
     /// Process every event scheduled at or before `until`.
@@ -663,10 +718,7 @@ where
     }
 
     fn connected(&self, a: NodeId, b: NodeId) -> bool {
-        match &self.partitions {
-            None => true,
-            Some(groups) => groups.iter().any(|g| g.contains(&a) && g.contains(&b)),
-        }
+        a == b || !self.severed.contains(&pair(a, b))
     }
 
     fn check_codec(&self, msg: &P::Msg) -> Result<P::Msg, CodecError> {

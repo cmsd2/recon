@@ -190,6 +190,45 @@ and its termination is `[always]`; Paxos's agreement is `[always]` and its termi
 `[majority correct ∧ detector settles]`. Both suites assert their own half, and
 `tests/leader_driven_consensus.rs` runs the schedule that splits the first against the second.
 
+## The bridge, where the conditions lapse in order
+
+Most of the faults here end something: a session, an incarnation, a process. A **bridge** ends
+nothing. `A` reaches `B`, `B` reaches `C`, `A` does not reach `C`; every process is correct, and
+none of them is wrong about what it can see. There is no group any of them belongs to and nothing
+to heal, which is exactly why a simulator whose partitions are a *grouping* cannot express it —
+grouping makes reachability an equivalence relation, and this is not one.
+
+It is worth having because it is the first fault under which this document's chain of conditions
+actually lapses, one link at a time, and can be watched doing it:
+
+```
+bridge                          A never hears from C, and C is correct
+  │
+  ├─▶ ◇P2   [Δ ≤ cap ∧ stable]  A suspects C and C suspects A, permanently. The condition is on
+  │                             the network; the detector is behaving exactly as specified
+  │
+  ├─▶ ELD1  [eventual]          Ω inherits it. A trusts the highest it can see; everyone else
+  │                             trusts the highest there is. Three views, none of them wrong
+  │
+  ├─▶ EC2   [detector settles]  epochs settle *anyway* — the disagreement is stable rather than
+  │                             churning, because the process A trusts does not trust itself and
+  │                             so never announces
+  │
+  ├─▶ UC4   [majority ∧ ...]    lapses only for the processes with no majority they can reach
+  │
+  └─▶ UC2   [always]            holds. This is the claim the fault exists to attack
+```
+
+The last two lines are the result. Given `{A,B}` severed from `{D,E}` with `C` reaching everyone,
+`{A,B,C}` and `{C,D,E}` are both majorities intersecting in `C` alone — the schedule on which two
+leaders would each assemble a quorum if intersection were doing less work than it claims. Across
+twenty seeds the majority that can still see itself decides, the minority never does, and nothing
+splits. The stack **routes around** the bridge rather than stalling, which is not what the change
+proposing this fault predicted; it recorded the question and let the run answer it.
+
+That is the shape this document argues for, seen working: a guarantee tagged `[always]` that holds
+through a fault severe enough to lapse every conditional one beneath it.
+
 ## What not to build yet
 
 Nothing here justifies restructuring the three protocols that exist.

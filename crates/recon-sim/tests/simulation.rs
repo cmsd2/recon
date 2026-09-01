@@ -1683,3 +1683,147 @@ fn a_send_in_the_instant_a_session_ended_is_dropped_and_says_so_and_the_next_ins
     assert_eq!(s.trace().delivery_count(), 2, "the next instant's send arrived");
     assert!(s.session_epoch(A, B).expect("a successor is up") > first, "on a new session");
 }
+
+// ------------------------------------------------------- Severing pairs, and non-transitivity
+
+/// Everything `node` was delivered, by sender.
+fn heard_from(s: &Sim<Parrot>, node: NodeId) -> Vec<NodeId> {
+    s.trace().deliveries().filter(|(_, to, _)| *to == node).map(|(from, _, _)| from).collect()
+}
+
+/// Send one message each way between every pair, and settle.
+fn everyone_greets(s: &mut Sim<Parrot>) {
+    for a in [A, B, C] {
+        for b in [A, B, C] {
+            if a != b {
+                s.command(a, Cmd::SendTo(b, 1));
+            }
+        }
+    }
+    s.run_for(Duration::from_millis(100));
+}
+
+#[test]
+fn a_severed_pair_cannot_reach_each_other_in_either_direction() {
+    let mut s = sim(Config::default().seed(1));
+    s.sever(A, C);
+    everyone_greets(&mut s);
+
+    assert!(!heard_from(&s, A).contains(&C), "A heard from C across a severed pair");
+    assert!(!heard_from(&s, C).contains(&A), "C heard from A — severing is symmetric");
+    // And nothing else was touched: B still hears from both, and both from B.
+    assert!(heard_from(&s, B).contains(&A) && heard_from(&s, B).contains(&C), "B hears both");
+    assert!(heard_from(&s, A).contains(&B) && heard_from(&s, C).contains(&B), "both hear B");
+}
+
+#[test]
+fn reachability_need_not_be_transitive() {
+    // The case a grouping cannot express, and the whole reason for the change: A reaches B, B
+    // reaches C, A does not reach C. There is no group any of the three belongs to.
+    let mut s = sim(Config::default().seed(2));
+    s.sever(A, C);
+
+    assert!(s.reachable(A, B), "A reaches B");
+    assert!(s.reachable(B, C), "B reaches C");
+    assert!(!s.reachable(A, C), "and yet A does not reach C");
+
+    everyone_greets(&mut s);
+    assert!(heard_from(&s, B).contains(&A) && heard_from(&s, B).contains(&C));
+    assert!(!heard_from(&s, A).contains(&C) && !heard_from(&s, C).contains(&A));
+}
+
+#[test]
+fn reachable_reflects_severing_partitioning_and_healing() {
+    let mut s = sim(Config::default().seed(3));
+    assert!(s.reachable(A, C), "nothing severed to begin with");
+
+    s.sever(A, C);
+    assert!(!s.reachable(A, C));
+    s.reconnect(A, C);
+    assert!(s.reachable(A, C), "reconnect restores one pair");
+
+    // A grouping is the special case in which the severed pairs span two groups.
+    s.partition(&[&[A, B], &[C]]);
+    assert!(s.reachable(A, B), "same group");
+    assert!(!s.reachable(A, C) && !s.reachable(B, C), "across the boundary");
+
+    s.heal();
+    for (a, b) in [(A, B), (B, C), (A, C)] {
+        assert!(s.reachable(a, b), "heal restores everything");
+    }
+}
+
+#[test]
+fn heal_clears_a_severing_as_well_as_a_partition() {
+    let mut s = sim(Config::default().seed(4));
+    s.sever(A, C);
+    s.heal();
+    assert!(s.reachable(A, C), "heal is not only about partitions");
+
+    everyone_greets(&mut s);
+    assert!(heard_from(&s, A).contains(&C) && heard_from(&s, C).contains(&A));
+}
+
+#[test]
+fn reconnecting_one_pair_leaves_the_others_severed() {
+    let mut s = sim(Config::default().seed(5));
+    s.sever(A, B);
+    s.sever(B, C);
+    s.reconnect(A, B);
+
+    assert!(s.reachable(A, B), "the reconnected pair");
+    assert!(!s.reachable(B, C), "the other severing stands");
+    assert!(s.reachable(A, C), "and an untouched pair is untouched");
+}
+
+#[test]
+fn partitioning_replaces_a_severing_rather_than_adding_to_it() {
+    // `partition` is documented as replacing what was severed before. Stated because the other
+    // reading — that it adds — would make a test that partitions after severing quietly wrong.
+    let mut s = sim(Config::default().seed(6));
+    s.sever(A, B);
+    s.partition(&[&[A, B], &[C]]);
+    assert!(s.reachable(A, B), "the earlier severing was discarded");
+    assert!(!s.reachable(A, C), "and the partition applies");
+}
+
+#[test]
+fn a_pair_severed_mid_run_stops_delivering_from_that_moment() {
+    let mut s =
+        sim(Config::default().seed(7).latency(Duration::from_millis(5), Duration::from_millis(5)));
+    s.command(A, Cmd::SendTo(C, 1));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(heard_from(&s, C), vec![A], "the first message arrived");
+
+    s.sever(A, C);
+    s.command(A, Cmd::SendTo(C, 2));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(heard_from(&s, C), vec![A], "and nothing since");
+    assert!(s.trace().drops_because(DropReason::Partitioned) > 0, "recorded as unreachable");
+}
+
+#[test]
+fn severing_a_pair_ends_its_session_and_leaves_the_others_up() {
+    // The session model follows the connectivity model for free: `end_severed_sessions` asks
+    // `connected`, which now answers per pair. What is new is that only *one* session ends.
+    let mut s = session_sim(8);
+    s.command(A, Cmd::SendTo(B, 1));
+    s.command(A, Cmd::SendTo(C, 1));
+    s.command(B, Cmd::SendTo(C, 1));
+    s.run_for(Duration::from_millis(100));
+    for (a, b) in [(A, B), (A, C), (B, C)] {
+        assert!(s.has_session(a, b), "{a}–{b} is up before the severing");
+    }
+
+    s.sever(A, C);
+    assert!(!s.has_session(A, C), "the severed pair's session ended");
+    assert!(s.has_session(A, B) && s.has_session(B, C), "and no other session did");
+
+    // It comes back on reconnection, at a higher epoch, exactly as a healed partition does.
+    let before = s.session_epoch(A, B).expect("A–B never went away");
+    s.reconnect(A, C);
+    s.command(A, Cmd::SendTo(C, 2));
+    s.run_for(Duration::from_millis(200));
+    assert!(s.has_session(A, C), "the session re-established without being prompted");
+    assert_eq!(s.session_epoch(A, B), Some(before), "and the untouched one was not disturbed");
+}

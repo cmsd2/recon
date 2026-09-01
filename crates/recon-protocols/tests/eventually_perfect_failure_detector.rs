@@ -344,3 +344,30 @@ fn a_bad_network_does_not_lower_the_delay() {
          been eased off every round"
     );
 }
+
+// ------------------------------------------------- a bridge: ◇P2's condition failing
+
+#[test]
+fn under_a_bridge_two_correct_processes_suspect_each_other_for_ever() {
+    // The fault a grouping cannot express: `A` reaches `B`, `B` reaches `C`, `A` does not reach `C`.
+    // All three are correct. `◇P2` says eventually no correct process is suspected — and here that
+    // is false permanently, at both ends of the severed pair, while `B` suspects nobody.
+    //
+    // That is the **network** failing `◇P2`'s stated condition rather than the implementation
+    // failing its guarantee, and it is the first fault this simulator can express under which the
+    // condition is actually reachable. The chain it starts is followed up the stack in
+    // `eventual_leader_detector`, `epoch_change` and `leader_driven_consensus`.
+    let mut s = sync_sim(30, roomy());
+    s.run_for(initial() * 2);
+    s.sever(A, C);
+    s.run_for(initial() * 20);
+
+    // Non-vacuity: the topology really is a bridge, and not three islands or one.
+    assert!(s.reachable(A, B) && s.reachable(B, C), "B bridges the two");
+    assert!(!s.reachable(A, C), "and the ends cannot reach each other");
+
+    assert!(s.at(A).suspects(C), "A suspects C, which is correct");
+    assert!(s.at(C).suspects(A), "and C suspects A, which is correct");
+    assert_eq!(s.at(B).suspected().count(), 0, "B suspects nobody, and B is right");
+    assert!(!s.at(A).suspects(B) && !s.at(C).suspects(B), "neither end doubts the bridge");
+}
