@@ -54,7 +54,7 @@ once the link is deleted.
 
 ## 4. Publishing the documentation
 
-- [ ] 4.1 **Set Settings → Pages → Source to "GitHub Actions".** Manual, once, and nothing in the
+- [x] 4.1 **Set Settings → Pages → Source to "GitHub Actions".** Manual, once, and nothing in the
       repository can do it — the deploy job fails until it is done
 - [x] 4.2 A second job, `needs` the gate and `if: github.ref == 'refs/heads/master'`, building
       `cargo doc --workspace --no-deps`. A pull request builds no documentation and deploys none
