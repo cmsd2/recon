@@ -1,0 +1,69 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>recon — API documentation</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1b1b; --muted: #5a5a5a; --rule: #e3e3e3; --link: #0b5cad;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14161a; --fg: #e6e6e6; --muted: #a2a8b0; --rule: #2b2f36; --link: #7fb2f0; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg); margin: 0 auto; padding: 3rem 1.25rem 5rem;
+    max-width: 44rem; line-height: 1.55;
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+  .sub { color: var(--muted); margin: 0 0 2.5rem; }
+  a { color: var(--link); }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { border-top: 1px solid var(--rule); padding: 1.1rem 0; }
+  li:last-child { border-bottom: 1px solid var(--rule); }
+  .name { font-weight: 600; font-size: 1.05rem; }
+  .name code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .what { color: var(--muted); margin: .3rem 0 0; }
+  footer { color: var(--muted); margin-top: 3rem; font-size: .9rem; }
+</style>
+
+<h1>recon</h1>
+<p class="sub">Distributed message-passing algorithms, written so the code reads as the algorithm.</p>
+
+<p>
+  Three crates, all of them sans-IO: no protocol here opens a socket, reads a clock or reaches for
+  randomness. They are listed in the order they depend on each other, which is also the order they
+  are worth reading in.
+</p>
+
+<ul>
+  <li>
+    <div class="name"><a href="recon_core/index.html"><code>recon_core</code></a></div>
+    <p class="what">
+      The <code>Protocol</code> trait, the effect vocabulary, <code>Cx</code>, time, storage and the
+      composition primitives. Everything else depends on this and it depends on nothing.
+    </p>
+  </li>
+  <li>
+    <div class="name"><a href="recon_sim/index.html"><code>recon_sim</code></a></div>
+    <p class="what">
+      The deterministic simulator. It <em>is</em> the fair-loss network, and it is the project's
+      standard of evidence — seeded, with a virtual clock, fault injection, and a trace that
+      properties are asserted over. A failing run is reproducible from its seed.
+    </p>
+  </li>
+  <li>
+    <div class="name"><a href="recon_protocols/index.html"><code>recon_protocols</code></a></div>
+    <p class="what">
+      The abstractions themselves — links, failure detectors, broadcasts, consensus — each
+      transcribed from Cachin, Guerraoui &amp; Rodrigues with the pseudocode quoted in the module
+      and every departure from the page stated beside it.
+    </p>
+  </li>
+</ul>
+
+<footer>
+  Built from <code>master</code> by <code>cargo doc</code>. The prose that these modules are written
+  against — on bounded space, on conditional guarantees, and the post-mortem that set the ordering —
+  lives in <a href="https://github.com/cmsd2/recon">the repository</a>.
+</footer>

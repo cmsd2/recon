@@ -125,7 +125,10 @@ impl PerfectFailureDetector {
     ///
     /// For strong accuracy, `timeout` must exceed `period` plus the network's delivery bound —
     /// otherwise a live process's heartbeat can arrive after it has already been accused.
-    /// Configure the bound from [`recon_sim::Sim::delivery_bound`] rather than guessing it.
+    /// Configure the bound from the simulator's own `Sim::delivery_bound` rather than guessing
+    /// it. Named rather than linked: `recon-sim` is a dev-dependency of this crate, so the path
+    /// does not exist for a reader of these docs — and it is the right way round, since a protocol
+    /// that depended on the simulator would be the thing constraint 2 forbids.
     pub fn new(
         me: NodeId,
         peers: impl IntoIterator<Item = NodeId>,

@@ -100,8 +100,10 @@
 //!   that round returns to it.
 //! - A second `Propose` from the same process is ignored. The book's model has one proposal per
 //!   process, and Module 5.1 provides one decision per instance.
-//! - `⟨c, Init⟩` is not a separate event. `new` establishes the state, and [`Cmd::Start`] begins
-//!   failure detection, without which no round can ever complete after a crash.
+//! - `⟨c, Init⟩` **is** a separate event: `new` establishes the state, and [`Protocol::on_init`]
+//!   starts the detector beneath, without which no round can ever complete after a crash. It was a
+//!   `Cmd::Start` before the trait had an init event, which is why the only request now is
+//!   [`Cmd::Propose`].
 
 use core::time::Duration;
 use recon_core::{Child, NodeId, ProtoCx, Protocol, TimerId};
@@ -191,7 +193,7 @@ pub struct FloodingConsensus<P: Clone + Ord, L: VolatileLink<Flood<P>> = Perfect
 impl<P: Clone + Ord, L: VolatileLink<Flood<P>>> FloodingConsensus<P, L> {
     /// Consensus among `members`, over a link the caller supplies.
     ///
-    /// The link is anything satisfying [`Link`]; this layer never names an implementation.
+    /// The link is anything satisfying [`crate::link::Link`]; this layer never names an implementation.
     pub fn with_link(
         me: NodeId,
         members: impl IntoIterator<Item = NodeId>,

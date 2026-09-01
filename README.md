@@ -1,5 +1,13 @@
 # recon
 
+[![CI](https://github.com/cmsd2/recon/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/cmsd2/recon/actions/workflows/ci.yml)
+[![API documentation](https://img.shields.io/badge/docs-API%20reference-blue)](https://cmsd2.github.io/recon/)
+
+The first badge is the whole gate, not the tests: it is red if *any* check is failing — clippy, the
+ordered-maps guard, the transport guard, the documentation guard — because "do not commit until
+these are clean" already treats them as one thing. The second is a link rather than a status, and
+stays blue whether or not the last deployment worked.
+
 Distributed message-passing algorithms — links, failure detection, broadcast, eventually consensus
 — written in Rust so that the code reads as the algorithm.
 
@@ -57,6 +65,10 @@ to a session ending — and shows the first leaving a correct process without th
 second cannot. It is the shortest path to seeing what the project is for.
 
 ## The crates
+
+The API documentation is published from `master`: **<https://cmsd2.github.io/recon/>**. Much of what
+is worth reading is in the module documentation — the quoted pseudocode, the departures from the
+page, and the space bound each module claims.
 
 | Crate | What it is |
 |---|---|
@@ -589,9 +601,13 @@ thinking without committing to anything. Project context and per-artifact rules 
 
 ### The gate
 
-`./scripts/check.sh` must pass in full before every commit. A pre-commit hook runs it. Do not
-commit with anything outstanding — warnings accumulate into noise, and noise is how a real
-diagnostic gets missed.
+`./scripts/check.sh` must pass in full before every commit. A pre-commit hook runs it, and CI runs
+the same script on `master` and on every pull request — so the two cannot disagree about what
+"clean" means. Do not commit with anything outstanding — warnings accumulate into noise, and noise
+is how a real diagnostic gets missed.
+
+It aggregates rather than stopping at the first failure, so one run tells you everything that is
+wrong rather than the first thing.
 
 ```bash
 cargo fmt --all                                        # rustfmt.toml is checked in
@@ -611,6 +627,11 @@ at runtime rather than loud — each one is a bug that would otherwise be found 
 | [`check-error-types.sh`](scripts/check-error-types.sh) | `io::Error` for domain failures, and the literal `"json decoding error"` | flattening distinct failures into one string makes them indistinguishable in a running cluster |
 | [`check-no-transport.sh`](scripts/check-no-transport.sh) | sockets, async runtimes, `.await` | constraint 1: algorithms before transport, and this is what keeps it honest |
 | `cargo clippy -D warnings` | any lint | warnings accumulate and hide real diagnostics |
+| `cargo doc -D warnings` | a broken intra-doc link | a docstring naming something that is not there asserts a contract the code does not have, and it fails silently — the link just renders as text. It had already happened four times when the check was added: `Cmd::Start` documented in two modules as the way to begin a broadcast after the command was removed, a deleted `ScopedLink` still explained, and a renamed method still linked |
+
+CI runs the whole of `./scripts/check.sh` on `master` and on every pull request targeting it — the
+script itself, not a reimplementation of it, so adding a guard here puts it in CI with no second
+edit. The badge at the top of this file reports all of it.
 
 `check-no-transport.sh` is meant to be **deleted deliberately**, in the commit that introduces
 transport under constraint 5. Do not weaken it; delete it, or leave it alone.

@@ -49,7 +49,7 @@ use recon_core::{NodeId, Protocol};
 ///
 /// `P` is the payload the layer above sends. A link is free to wrap it — the perfect link adds a
 /// message identifier — which is why [`Link::send`] builds the request rather than the layer above
-/// constructing one, and why [`Link::delivered`] takes the payload back out.
+/// constructing one, and why [`Link::classify`] takes the payload back out.
 ///
 /// Satisfying the port is a decision, not an accident of shape. An earlier draft made it a blanket
 /// impl over every `Protocol` with the right associated types, which meant a protocol became a link

@@ -171,8 +171,8 @@ impl Config {
 /// Gossip: relay to a random few, for a bounded number of rounds.
 ///
 /// `L` is the link beneath and it is a parameter, so this composes over a perfect link, a session
-/// link, or an application's own. It bounds on [`Link`] rather than anything narrower because
-/// gossip needs nothing of a scope boundary beyond passing it upward.
+/// link, or an application's own. It bounds on [`crate::link::Link`] rather than anything narrower
+/// because gossip needs nothing of a scope boundary beyond passing it upward.
 #[derive(Debug)]
 pub struct ProbabilisticBroadcast<P: Clone, L: VolatileLink<Carried<P>> = FairLossLink<Gossip<P>>> {
     me: NodeId,

@@ -1,0 +1,114 @@
+# The gate, and the published documentation.
+#
+# The build step is `./scripts/check.sh` and nothing that reimplements it. That script is the
+# definition of "clean" for this project — `CLAUDE.md` names it as the gate for every commit, and
+# `README.md`'s guard table describes its contents. A workflow listing `cargo fmt`, `cargo clippy`,
+# … separately would be a second definition that can disagree with the first, silently, in the
+# direction that matters: CI passing something a developer's run would have caught, or the reverse.
+# Running the script means the two are the same thing by construction, and adding a check to the
+# gate puts it in CI with no second edit here.
+#
+# It also reports more than a step-per-check workflow would. `check.sh` uses `set -uo pipefail`
+# *without* `-e`, so it runs every check after one fails and prints PASS/FAIL for each. One run
+# therefore names every problem, where separate steps would stop at the first.
+#
+# Nothing is installed that the runner does not already have: `ubuntu-latest` ships rustup with a
+# current stable toolchain including clippy and rustfmt, so the third-party actions here are
+# checkout and the cache, and no more. Every action in a workflow is someone else's code running
+# with a token, and that is worth minimising where it is cheap.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Superseded runs on the same ref are pointless. The docs job overrides this — see there.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Current stable rather than a pinned version. The trade is deliberate and recorded in the
+      # change's design: the code always builds on current stable, and in exchange a clippy or
+      # rustdoc release can turn a green commit red with no change to this repository. If that
+      # becomes tiresome, `rust-toolchain.toml` is the one-file fix.
+      - name: Use current stable
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustc --version && cargo clippy --version && cargo fmt --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The gate. Correctness may not depend on the cache above: a cold one is slower and a stale
+      # one is a rebuild, never a different verdict.
+      - name: Run the gate
+        run: ./scripts/check.sh
+
+  docs:
+    name: API documentation
+    needs: check
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Scoped to this job, so the gate above keeps `contents: read` and nothing more.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    # The opposite of the gate's: cancelling a deployment part-way leaves a half-written site,
+    # where cancelling a superseded test run costs nothing.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use current stable
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `--no-deps` because the dependencies' documentation is already on docs.rs and building it
+      # is most of the time. Public items only: `--document-private-items` would expose a great
+      # deal of internal reasoning that the module documentation already summarises deliberately,
+      # and the summary is the better artifact.
+      #
+      # Warnings are denied by `check.sh`, which has already passed for this commit, so a broken
+      # intra-doc link cannot reach the published site.
+      - name: Build the documentation
+        run: cargo doc --workspace --no-deps
+
+      # `cargo doc` writes no landing page. Redirecting to one crate would be picking a favourite,
+      # and how the three relate is itself worth saying on the way in.
+      - name: Write the landing page
+        run: cp .github/pages/index.html target/doc/index.html
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+      - id: deployment
+        uses: actions/deploy-pages@v4

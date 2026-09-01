@@ -61,8 +61,9 @@
 //! - Two children both send, so this layer's wire type is an enum distinguishing a broadcast
 //!   payload from a heartbeat. It is the first multiplexing in the stack, and it is typed: a
 //!   mis-wiring is a compile error rather than a silently undelivered message.
-//! - `⟨urb, Init⟩` is not a separate event. `new` establishes the state, and [`Cmd::Start`] begins
-//!   failure detection.
+//! - `⟨urb, Init⟩` **is** a separate event: `new` establishes the state, and
+//!   [`Protocol::on_init`] starts the detector beneath. It was a `Cmd::Start` before the trait had
+//!   an init event, which is why the only request now is [`Cmd::Broadcast`].
 //! - Neither `ack` nor `pending` is garbage collected, as in the book. Long runs grow.
 //!
 //! # Over a link that reports scope boundaries

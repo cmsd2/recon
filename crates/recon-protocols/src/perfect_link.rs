@@ -174,14 +174,21 @@ impl<P: Clone> Protocol for PerfectLink<P> {
     }
 }
 
-/// The perfect link satisfies the link port, and only its unscoped half.
+/// The perfect link satisfies the link port, and reports no scope boundary.
 ///
-/// It deliberately does not implement [`crate::link::ScopedLink`]: PL2's no-duplication holds
-/// within one incarnation of the recipient, and the link has no means of observing that
-/// incarnation ending. A link that reported a boundary it cannot see would be asserting something
-/// it does not know — which `docs/scope-annotated-modules.md` forbids by Definition 2a. A layer
-/// that needs to be told about a boundary therefore cannot be composed over this link, and the
-/// compiler says so.
+/// [`Link::classify`](crate::link::Link::classify) here never yields
+/// [`LinkInd::Boundary`](crate::link::LinkInd::Boundary): PL2's no-duplication holds within one
+/// incarnation of the recipient, and this link has no means of observing that incarnation ending. A
+/// link that reported a boundary it cannot see would be asserting something it does not know, which
+/// `docs/scope-annotated-modules.md` forbids by Definition 2a.
+///
+/// **Nothing in the type system enforces that**, and [`crate::link`] records why: a `ScopedLink`
+/// marker trait existed for exactly this and was deleted for want of a consumer — the one layer
+/// that should have bounded on it could not, because its resend lives in the `Link` impl and the
+/// tighter bound would have fallen on every link. What keeps it honest instead is the
+/// classification itself, and `tests/link_port.rs` pins both halves: that this link's
+/// classification never yields a boundary, and that the session link's yields one for each variant
+/// that reports it.
 impl<P> crate::link::Link<P> for PerfectLink<P>
 where
     P: Clone,
