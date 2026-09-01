@@ -14,7 +14,7 @@
       - 5.6 Read/Write Epoch Consensus: `PerfectPointToPointLinks`, `BestEffortBroadcast`
       - 5.5 also settles the timestamp question: `ts := rank(self)` advanced by `ts := ts + N`, so
         each process draws from its own residue class and no two can mint the same timestamp
-- [ ] 1.3 Transcribe Algorithms 5.8, 5.9, 5.10 and 5.11, and verify what 5.9 stores and at which
+- [x] 1.3 Transcribe Algorithms 5.8, 5.9, 5.10 and 5.11, and verify what 5.9 stores and at which
       point, since the durable-before-visible ordering is stated by the placement of `store` in the
       handler rather than by prose
 
@@ -153,29 +153,20 @@
 
 ## 8. Logged leader-driven consensus
 
-> **Blocked, and the blocker is in the core rather than in the algorithm.** `Cx::with_child` and
-> `Cx::with_child_consuming` hand a child `NoStore`, so a protocol that keeps durable state cannot
-> compose a child that keeps durable state — `crates/recon-core/src/store.rs` says so explicitly:
-> "scoping one store into two is a design nothing yet needs". Algorithm 5.10 needs it. It keeps
-> `(ets, ℓ, decision)` of its own, uses `logged_epoch_change` (which keeps `(startts, start)`) and
-> `logged_epoch_consensus` (which keeps `(valts, val)` and `epochdecision`), and its `Recovery`
-> handler reads its children's records directly: `retrieve(startts, start) of instance lec` and
-> `retrieve(epochdecision) of instance lep.ets`.
->
-> Groups 6 and 7 were not blocked, because each stores at the top of a stack of volatile children,
-> and both are done. Group 8 cannot be written without either scoping the store — a change to
-> `recon-core` with its own proposal — or building 5.10 over the *volatile* 5.5 and 5.6, which
-> would discard exactly what the logged halves buy. This change's own design says steps 5 to 7 can
-> be abandoned without touching 1 to 4; stopping before step 7's successor is the same call.
+Blocked when this group was reached, and the blocker was in the core rather than in the algorithm:
+`Cx::with_child` hands a child `NoStore`, so a durable parent could not compose a durable child, and
+`store.rs` said scoping a store was "a design nothing yet needs". Algorithm 5.10 needs it. Group 0
+below is that change; it landed first and this group then went ahead unaltered.
 
-- [ ] 8.1 Add the module per Algorithms 5.10 and 5.11, and verify a run with crashes and recoveries
+- [x] 8.1 Add the module per Algorithms 5.10 and 5.11, and verify a run with crashes and recoveries
       decides everywhere once a majority is back
-- [ ] 8.2 Verify a process that has decided still holds that decision after a crash and recovery
-- [ ] 8.3 Verify agreement under all three faults at once — crashes, recoveries, and a detector
+- [x] 8.2 Verify a process that has decided still holds that decision after a crash and recovery
+- [x] 8.3 Verify agreement under all three faults at once — crashes, recoveries, and a detector
       suspecting correct processes
-- [ ] 8.4 Verify that run really contained all three, by confirming from the trace at least one
-      crash, at least one recovery, and more than one acting leader
-- [ ] 8.5 Verify progress resumes when a lost majority is restored by recovery, and that no decision
+- [x] 8.4 Verify that run really contained all three, by confirming from the trace at least one
+      crash, at least one recovery, and more than one acting leader — the last as a fraction of the
+      seeds rather than once in twenty-five
+- [x] 8.5 Verify progress resumes when a lost majority is restored by recovery, and that no decision
       is reached while no majority exists
 
 ## 9. What this dates
@@ -189,3 +180,25 @@
 - [x] 9.4 Check whether `CLAUDE.md`'s note that everything rests on a perfect failure detector is
       still true, and correct it if not
 - [x] 9.5 Run `./scripts/check.sh` and verify it passes in full
+
+## 0. Scoping the store — the core change group 8 was blocked on
+
+Added after the fact, and numbered zero because it had to land first.
+
+- [x] 0.1 Add `recon_core::Slot`, naming where a child's durable record lives inside its parent's,
+      as two `fn` pointers so a slot cannot capture
+- [x] 0.2 Add `Cx::with_durable_child_consuming`, handing a child a store backed by a slot. The
+      child's `set` is a read-modify-write of the parent's record — **one write, not two**, so a
+      crash cannot land between a parent's record and its child's
+- [x] 0.3 Constrain the child's `Entry` to be uninhabited, and say why in `Slot`'s own
+      documentation: the sequence half needs the parent's `Entry` to be a sum and the child's
+      positions to survive filtering, and nothing needs it. `logged_uniform_reliable_broadcast` is
+      the only protocol here that appends and nothing composes over it, so building it would be the
+      framework before its second consumer. The signature enforces this, not a comment
+- [x] 0.4 Verify a durable child writes through its slot and the parent reads its own part back
+- [x] 0.5 Verify neither erases the other across repeated writes — the silent failure this exists
+      to prevent, which shows up only when a recovery reads back half of what it wrote
+- [x] 0.6 Verify a child whose slot is empty reads nothing rather than reading the parent's record,
+      and that a child writing before its parent creates the parent's record from its default
+- [x] 0.7 Verify a durable child's sends and indications are re-wrapped exactly as
+      `with_child_consuming` does them — the store is the only thing that changes

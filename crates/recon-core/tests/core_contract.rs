@@ -5,8 +5,8 @@ use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use recon_core::{
-    Cx, Effect, EffectSink, Event, MemStore, NoStore, NodeId, Position, ProtoCx, Protocol, Store,
-    Time, TimerId, step, step_in, step_with,
+    Cx, Effect, EffectSink, Event, MemStore, NoStore, NodeId, Position, ProtoCx, Protocol, Slot,
+    Store, Time, TimerId, step, step_in, step_with,
 };
 
 const A: NodeId = NodeId::new(1);
@@ -693,4 +693,195 @@ fn scope_endings_route_downward_like_messages() {
         );
     }
     assert_eq!(p.child.lapses, 3);
+}
+
+// ------------------------------------------------- a durable child inside a durable parent
+
+/// A child that keeps a record of its own, and is composed by one that does too.
+#[derive(Debug, Default)]
+struct Kept {
+    seen: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct KeptMeta {
+    seen: u32,
+}
+
+impl Protocol for Kept {
+    type Cmd = u32;
+    type Ind = u32;
+    type Msg = u32;
+    type Scope = Infallible;
+    type Meta = KeptMeta;
+    type Entry = Infallible;
+
+    fn on_cmd(&mut self, add: u32, cx: &mut ProtoCx<'_, Self>) {
+        self.seen += add;
+        cx.storage().set(KeptMeta { seen: self.seen });
+        cx.send(NodeId::new(9), self.seen);
+        cx.indicate(self.seen);
+    }
+
+    fn on_msg(&mut self, _from: NodeId, _msg: u32, _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _cx: &mut ProtoCx<'_, Self>) {}
+
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.seen = cx.storage().get().map(|m| m.seen).unwrap_or(0);
+    }
+}
+
+/// What the parent keeps: something of its own, and the child's slot.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct HolderMeta {
+    mine: u32,
+    child: Option<KeptMeta>,
+}
+
+const CHILD_SLOT: Slot<HolderMeta, KeptMeta> = Slot {
+    read: |p| p.child.as_ref(),
+    write: |p, c| HolderMeta { child: Some(c), ..p.cloned().unwrap_or_default() },
+};
+
+#[derive(Debug, Default)]
+struct Holder {
+    mine: u32,
+    child: Kept,
+    inbox: Vec<u32>,
+}
+
+impl Protocol for Holder {
+    type Cmd = u32;
+    type Ind = u32;
+    type Msg = u32;
+    type Scope = Infallible;
+    type Meta = HolderMeta;
+    type Entry = Infallible;
+
+    fn on_cmd(&mut self, add: u32, cx: &mut ProtoCx<'_, Self>) {
+        // The parent writes its own part first, then the child writes through the slot. Neither
+        // erases the other, which is the whole point of the slot.
+        self.mine += add;
+        let kept = cx.storage().get().and_then(|m| m.child.clone());
+        cx.storage().set(HolderMeta { mine: self.mine, child: kept });
+
+        let mut inbox = core::mem::take(&mut self.inbox);
+        {
+            let child = &mut self.child;
+            cx.with_durable_child_consuming(
+                core::convert::identity,
+                &mut inbox,
+                CHILD_SLOT,
+                |ccx| child.on_cmd(add, ccx),
+            );
+        }
+        for seen in inbox.drain(..) {
+            cx.indicate(seen);
+        }
+        self.inbox = inbox;
+    }
+
+    fn on_msg(&mut self, _from: NodeId, _msg: u32, _cx: &mut ProtoCx<'_, Self>) {}
+    fn on_timer(&mut self, _: TimerId, _cx: &mut ProtoCx<'_, Self>) {}
+
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.mine = cx.storage().get().map(|m| m.mine).unwrap_or(0);
+        let mut inbox = core::mem::take(&mut self.inbox);
+        {
+            let child = &mut self.child;
+            cx.with_durable_child_consuming(
+                core::convert::identity,
+                &mut inbox,
+                CHILD_SLOT,
+                |ccx| child.on_recovery(ccx),
+            );
+        }
+        inbox.clear();
+        self.inbox = inbox;
+    }
+}
+
+#[test]
+fn a_durable_child_writes_through_its_slot() {
+    let mut st = MemStore::default();
+    let mut p = Holder::default();
+    step_in(&mut p, Event::Cmd(3), Time::ZERO, &mut rng(0), &mut st);
+
+    assert_eq!(
+        st.get(),
+        Some(&HolderMeta { mine: 3, child: Some(KeptMeta { seen: 3 }) }),
+        "one record holding both parts"
+    );
+}
+
+#[test]
+fn neither_the_parent_nor_the_child_erases_the_other() {
+    // The failure this exists to prevent: two protocols sharing one store, each `set` overwriting
+    // the other's record, and nothing saying so until a recovery reads back half of what it wrote.
+    let mut st = MemStore::default();
+    let mut p = Holder::default();
+    for n in 1..=4 {
+        step_in(&mut p, Event::Cmd(n), Time::ZERO, &mut rng(0), &mut st);
+    }
+    assert_eq!(st.get(), Some(&HolderMeta { mine: 10, child: Some(KeptMeta { seen: 10 }) }));
+}
+
+#[test]
+fn a_child_reads_back_what_it_wrote_and_the_parent_reads_back_its_own() {
+    let mut st = MemStore::default();
+    step_in(&mut Holder::default(), Event::Cmd(7), Time::ZERO, &mut rng(0), &mut st);
+
+    // A fresh pair, recovering from that record.
+    let mut recovered = Holder::default();
+    step_in(&mut recovered, Event::Recovery, Time::ZERO, &mut rng(0), &mut st);
+    assert_eq!(recovered.mine, 7, "the parent read its own part back");
+    assert_eq!(recovered.child.seen, 7, "the child read its own part back");
+}
+
+#[test]
+fn a_child_whose_slot_is_empty_reads_nothing() {
+    // A parent may write before its child ever does, and the child must not read the parent's
+    // record as though it were its own.
+    let mut st: MemStore<HolderMeta, Infallible> = MemStore::default();
+    st.set(HolderMeta { mine: 5, child: None });
+
+    let mut p = Holder::default();
+    step_in(&mut p, Event::Recovery, Time::ZERO, &mut rng(0), &mut st);
+    assert_eq!(p.mine, 5);
+    assert_eq!(p.child.seen, 0, "the child had written nothing and found nothing");
+}
+
+#[test]
+fn a_child_writing_first_creates_the_parents_record() {
+    // `Slot::write` takes an `Option` because the child may be the first thing in the run to
+    // write. What it writes has to be a whole parent record, built from the parent's default.
+    let mut st: MemStore<HolderMeta, Infallible> = MemStore::default();
+    assert!(st.get().is_none());
+
+    let mut child = Kept::default();
+    let mut inbox = Vec::new();
+    let mut sink: Vec<Effect<u32, u32>> = Vec::new();
+    let mut r = rng(0);
+    let mut timers = 0;
+    let mut cx: Cx<'_, u32, u32, HolderMeta, Infallible> =
+        Cx::new(&mut sink, Time::ZERO, &mut r, &mut st, &mut timers);
+    cx.with_durable_child_consuming(core::convert::identity, &mut inbox, CHILD_SLOT, |ccx| {
+        child.on_cmd(2, ccx)
+    });
+
+    assert_eq!(st.get(), Some(&HolderMeta { mine: 0, child: Some(KeptMeta { seen: 2 }) }));
+}
+
+#[test]
+fn a_durable_childs_effects_are_re_wrapped_like_any_other_childs() {
+    // The store is the only thing that changes. Sends still travel out through the mapper and
+    // indications are still collected, exactly as `with_child_consuming` does them.
+    let mut st = MemStore::default();
+    let mut p = Holder::default();
+    let fx = step_in(&mut p, Event::Cmd(3), Time::ZERO, &mut rng(0), &mut st);
+    assert_eq!(
+        fx,
+        vec![Effect::Send { to: NodeId::new(9), msg: 3 }, Effect::Indicate(3)],
+        "the child's send went out and its indication came back through the parent"
+    );
 }

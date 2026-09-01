@@ -103,6 +103,42 @@ also make the guarantee conditional on a runtime setting rather than on the type
 mode — a deployment that believes it is durable and is not — is exactly the silent kind this project
 takes mechanical measures against elsewhere.
 
+### A durable parent composes durable children through a slot — `recon_core::Slot`
+
+**Not anticipated when this change was planned, and discovered by trying to write Algorithm 5.10.**
+`Cx::with_child` and `Cx::with_child_consuming` hand a child `NoStore`, and `store.rs` said in as
+many words that "scoping one store into two is a design nothing yet needs". Algorithm 5.10 needs it:
+it keeps `(ets, ℓ, decision)` of its own, composes two children that each keep a record, and its
+`Recovery` reads its children's records by name — `retrieve(startts, start) of instance lec` and
+`retrieve(epochdecision) of instance lep.ets`.
+
+`Slot { read: fn(&Parent) -> Option<&Child>, write: fn(Option<&Parent>, Child) -> Parent }` names
+the part of a parent's record that belongs to a child, and
+`Cx::with_durable_child_consuming(msg, collected, slot, f)` hands the child a store backed by it.
+The child's `set` becomes a read-modify-write of the parent's record: **one write, not two**, so a
+crash cannot land between a parent's record and its child's. `fn` pointers rather than closures, for
+the same reason the composition mappers are: a slot names a fixed place in a type.
+
+*Alternative considered — a keyed store, with sub-stores addressed by a child index.* It would
+handle the sequence as well as the metadata, and it would reach into `Store`, `MemStore`, the
+simulator and the trace. Nothing needs the sequence half: `logged_uniform_reliable_broadcast` is the
+only protocol here that appends and nothing composes over it, so building it would be the framework
+before its second consumer. The child's `Entry` is therefore uninhabited — a child that appends
+cannot be composed, and the *signature* says so rather than a comment. `Slot`'s documentation
+records the shape the sequence half would take.
+
+*Alternative considered — build 5.10 over the volatile 5.5 and 5.6.* It compiles today and discards
+exactly what the logged halves buy.
+
+### One slot for a child that is replaced every epoch
+
+The book gives each `lep.ts` its own record. There is one slot here, holding whichever instance is
+live, and that is not a loss: the only instance ever read back is `lep.ets`, and `ets` is in the
+same record. A crash can land between the parent's `store(ets, ℓ)` and the new instance's own `Init`
+write, and both outcomes are safe — before it, recovery reads the previous epoch's `epochdecision`
+against the new `ets`, which lock-in makes the same value; after it, recovery reads a fresh record
+and has simply not decided yet.
+
 ### Safety is asserted where two leaders actually coexist, with a non-vacuity half
 
 Every agreement assertion in the fail-noisy suite is paired with a check that the run genuinely

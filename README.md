@@ -227,6 +227,7 @@ restart.
 | Logged uniform reliable broadcast | [`logged_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/logged_uniform_reliable_broadcast.rs) | Module 3.6, Alg. 3.8 | transcription | unbounded, **on disk** |
 | Logged epoch-change | [`logged_epoch_change.rs`](crates/recon-protocols/src/logged_epoch_change.rs) | Module 5.6, Alg. 5.8 | **implementation** | bounded by membership, plus what the stubborn children hold |
 | Logged read/write epoch consensus | [`logged_epoch_consensus.rs`](crates/recon-protocols/src/logged_epoch_consensus.rs) | Module 5.7, Alg. 5.9 | **implementation** | bounded by membership, plus what the stubborn children hold |
+| Logged leader-driven consensus — Paxos | [`logged_leader_driven_consensus.rs`](crates/recon-protocols/src/logged_leader_driven_consensus.rs) | Module 5.5, Alg. 5.10–5.11 | **implementation** | bounded by membership, plus what the stubborn children hold |
 
 Two things change besides the indication. **Startup becomes a branch** — a process with nothing in
 storage is initialised, one with something is recovered, exactly one runs, and both can emit
@@ -293,23 +294,31 @@ minority simply waits.
 Termination is stated as conditional and tested that way — a correct majority and a detector that
 eventually settles — which is what FLP requires and what flooding consensus pretends away.
 
-The fail-recovery halves, Algorithms 5.8 and 5.9, are built too: the epoch a process has entered
-and the value it has accepted are durable before anything reveals them, and a process that dies
-inside the write comes back either having accepted or not, never having promised without a record.
+The fail-recovery version, Algorithms 5.8 to 5.11, is built too: the epoch a process has entered,
+the value it has accepted and the decision it reached are durable before anything reveals them, and a
+process that dies inside the write comes back either having accepted or not, never having promised
+without a record. Its suite runs crashes, recoveries and a lying detector in the same run, with a
+non-vacuity half asserting all three actually happened.
+
+That stack is the first here in which a protocol keeping durable state composes children that keep
+durable state, and it needed a core change: `recon_core::Slot` names the part of a parent's record
+that belongs to a child, and `Cx::with_durable_child_consuming` hands the child a store backed by it.
+The child's write becomes a read-modify-write of the parent's record — **one write, not two**, so a
+crash cannot land between a parent's record and its child's. Only the metadata is scoped; a child
+that *appends* still cannot be composed, and the signature says so rather than a comment.
 
 ### Next
 
-Algorithms 5.10–5.11, the logged leader-driven consensus that composes the two logged halves above.
-It is blocked on one thing, and it is in the core rather than in the algorithm: `Cx::with_child`
-hands a child `NoStore`, so a durable parent cannot compose a durable child. Algorithm 5.10 keeps
-`(ets, ℓ, decision)` of its own *and* uses two children that keep state of theirs, and it reads
-its children's records directly on recovery. Scoping one store into two is the change that unblocks
-it.
+Eventually perfect failure detection (Module 2.8, `◇P`) — whose `Restore` turns the set of
+believed-correct processes from a monotone shrinking one into a set that can grow again, which every
+guard written against it will need re-reading for, and which would let Ω rest on what the book
+actually specifies rather than on the stronger `P` it currently derives from. That matters more here
+than it did before: in the fail-recovery model a crashed process comes *back*, and a detector whose
+accusations never retract will not trust it again.
 
-Beyond that, eventually perfect failure detection (Module 2.8, `◇P`) — whose `Restore` turns the set
-of believed-correct processes from a monotone shrinking one into a set that can grow again, which
-every guard written against it will need re-reading for, and which would let Ω rest on what the book
-actually specifies rather than on the stronger `P` it currently derives from.
+After that, `Stop`. Every logged protocol here inherits an unbounded outstanding set from the
+stubborn children, because nothing ever retires a transmission — see
+[`docs/bounded-space.md`](docs/bounded-space.md).
 
 ## Examples
 
@@ -429,7 +438,7 @@ cargo test --workspace -- --nocapture                 # with output
 
 | Suite | Covers | Tests |
 |---|---|---|
-| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism | 23 |
+| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, and a durable child inside a durable parent | 29 |
 | [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles | 80 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | [`tests/link_port.rs`](crates/recon-protocols/tests/link_port.rs), `foreign_link.rs` | that both links satisfy the port, that a protocol is not a link by accident, and that a link this project never wrote carries the stack up to consensus | 6 / 3 |
@@ -445,9 +454,11 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in | 7 / 8 / 18 |
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half confirming leadership really was disputed | 13 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, and what a restart must find | 8 / 10 |
+| [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three | 10 |
 
-445 across the suites above, plus nine unit tests inside `recon-core` and one `compile_fail`
-doctest on the link port — 455 in total, all in one process, no ports opened.
+461 across the suites above, plus nine unit tests inside `recon-core` and two doctests — one
+`compile_fail` on the link port, one worked example of a storage slot — 472 in total, all in one
+process, no ports opened.
 
 ## Licence
 

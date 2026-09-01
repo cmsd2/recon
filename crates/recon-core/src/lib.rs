@@ -23,5 +23,5 @@ pub use effect::{Effect, TimerId, WriteKind};
 pub use node::NodeId;
 pub use protocol::{Event, ProtoCx, ProtoEffect, ProtoEvent, Protocol, step, step_in, step_with};
 pub use session::SessionEvent;
-pub use store::{MemStore, NoStore, Position, Store};
+pub use store::{MemStore, NoStore, Position, Slot, Store};
 pub use time::Time;

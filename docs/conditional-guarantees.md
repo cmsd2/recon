@@ -152,10 +152,17 @@ entry sequence; what was written through it is read back in `on_recovery`, and
 The logged variants that could not be written then are written now, up to and including a logged
 epoch consensus whose acceptances survive a restart.
 
-One limit remains, and it is a limit of composition rather than of storage. `Cx::with_child` hands
-a child `NoStore`, so a durable parent cannot compose a durable child: scoping one store into two
-is a design nothing needed until Algorithm 5.10, which stores its own `(ets, ℓ, decision)` *and*
-uses two children that store. That is where the fail-recovery stack currently stops.
+Composition follows. `Cx::with_child` hands a child `NoStore`, which was the right default until
+Algorithm 5.10 — a protocol that stores its own `(ets, ℓ, decision)` *and* composes two children
+that store, and whose recovery reads its children's records by name. `recon_core::Slot` names the
+part of a parent's record that belongs to a child, and `Cx::with_durable_child_consuming` hands the
+child a store backed by it; the child's write is a read-modify-write of the parent's whole record.
+
+**One write, not two**, and that is not tidiness. Two writes have an interval between them, and a
+crash lands in intervals. A parent's record and its child's that could be separately durable would
+be a scope boundary with no event to mark it — exactly what this document forbids everywhere else.
+Only the metadata is scoped; a child that appends to a sequence still cannot be composed, and the
+signature says so rather than a comment.
 
 ## A detector's accuracy is a scope, and a layer can bridge its ending
 

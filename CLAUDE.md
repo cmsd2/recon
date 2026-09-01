@@ -165,6 +165,14 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
   `Cx::with_child`; transforming layers use `Cx::with_child_consuming`, which collects the child's
   indications for the parent to handle after the child call returns. Neither takes a timer mapper:
   a timer has nothing in it belonging to one layer.
+- **A durable child is composed through a `Slot`.** Both forms above hand the child a `NoStore`,
+  which is right whenever the child keeps nothing. A parent that keeps durable state *and* composes
+  a child that does uses `Cx::with_durable_child_consuming`, passing a `recon_core::Slot` naming
+  where the child's record lives inside the parent's. The child's write becomes a read-modify-write
+  of the parent's whole record — **one write, not two**, because two writes have an interval between
+  them and a crash lands in intervals. Only the metadata is scoped: a child that *appends* cannot be
+  composed, and the signature enforces that rather than a comment. `Slot`'s documentation says what
+  the sequence half would look like, and why it is not built.
 - **A timer is a handle, not a type.** `Cx::set_timer` returns a `TimerId` the driver issued, and
   the same handle comes back to `on_timer`. So a layer that registers no timer declares nothing
   about timers, and inserting a layer leaves the timers beneath it alone. The price is that the

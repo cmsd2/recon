@@ -64,6 +64,7 @@ everything under it. `logged_epoch_change` has no such ending, and says so.
 | `leader_driven_consensus` | one epoch consensus, replaced not accumulated | **membership** ✅ |
 | `logged_epoch_change` | `(startts, start)` — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
 | `logged_epoch_consensus` | `(valts, val)` and `epochdecision` — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
+| `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the
 second problem and no longer do: the durable state was one blob rewritten on every change, so a

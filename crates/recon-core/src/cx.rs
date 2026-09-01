@@ -1,6 +1,6 @@
 //! Where a protocol's effects go, and how it is told the time.
 
-use crate::store::{NoStore, Store};
+use crate::store::{NoStore, Slot, SlotStore, Store};
 use crate::{Effect, NodeId, Time, TimerId};
 use core::convert::Infallible;
 use core::time::Duration;
@@ -175,6 +175,40 @@ impl<'a, M, I, Me, En> Cx<'a, M, I, Me, En> {
             now: self.now,
             rng: &mut *self.rng,
             store: &mut none,
+            next_timer: &mut *self.next_timer,
+        };
+        f(&mut child);
+    }
+
+    /// [`Cx::with_child_consuming`], for a child that keeps durable state of its own.
+    ///
+    /// The child is handed a view of `slot` — the part of this protocol's record that belongs to
+    /// it. Its `get` projects, and its `set` reads this record back, replaces the child's part, and
+    /// writes the whole thing down again. **That is one write, not two**, which is what stops a
+    /// crash landing between a parent's record and its child's.
+    ///
+    /// Prefer [`Cx::with_child_consuming`] wherever the child keeps nothing: it hands a
+    /// [`NoStore`], and a child that cannot write is one fewer thing to reason about. This exists
+    /// because Algorithm 5.10 needs it — a protocol that keeps `(ets, ℓ, decision)` of its own and
+    /// composes two children that each keep a record too, and whose recovery reads its children's
+    /// records by name.
+    ///
+    /// The child's `Entry` is uninhabited: a child that *appends* cannot be composed. [`Slot`]
+    /// documents why, and what the sequence half would look like if something needed it.
+    pub fn with_durable_child_consuming<CM, CI, CMe>(
+        &mut self,
+        msg: fn(CM) -> M,
+        collected: &mut Vec<CI>,
+        slot: Slot<Me, CMe>,
+        f: impl FnOnce(&mut Cx<'_, CM, CI, CMe, Infallible>),
+    ) {
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg };
+        let mut store = SlotStore { parent: &mut *self.store, slot };
+        let mut child = Cx {
+            sink: &mut sink,
+            now: self.now,
+            rng: &mut *self.rng,
+            store: &mut store,
             next_timer: &mut *self.next_timer,
         };
         f(&mut child);
