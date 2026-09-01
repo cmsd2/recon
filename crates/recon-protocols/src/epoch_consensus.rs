@@ -67,8 +67,8 @@
 //! `upon event ⟨ ep, Abort ⟩ … halt;  // stop operating when aborted`. An instance that kept
 //! answering after being abandoned would be a second leader for its epoch under another name: it
 //! could still collect a quorum and decide, while the epoch that replaced it decided something
-//! else. [`EpochConsensus::aborted`] is checked at the top of every handler, and the suite delivers
-//! a message to an aborted instance and asserts that nothing at all comes out.
+//! else. The flag [`EpochConsensus::is_aborted`] reports is checked at the top of every handler, and
+//! the suite delivers a message to an aborted instance and asserts that nothing at all comes out.
 //!
 //! # Departure: directed replies travel by directed broadcast
 //!
