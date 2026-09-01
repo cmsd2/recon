@@ -2,7 +2,8 @@
 //!
 //! **Status: implementation. Space: bounded by membership.**
 //!
-//! Cachin, Guerraoui & Rodrigues, Algorithm 5.7 ("Leader-Driven Consensus"), quoted from the book:
+//! Cachin, Guerraoui & Rodrigues, Module 5.2 (`UniformConsensus`) and Algorithm 5.7
+//! ("Leader-Driven Consensus"), quoted from the book:
 //!
 //! ```text
 //! Algorithm 5.7: Leader-Driven Consensus

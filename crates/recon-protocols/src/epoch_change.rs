@@ -2,7 +2,7 @@
 //!
 //! **Status: implementation. Space: bounded by membership.**
 //!
-//! Cachin, Guerraoui & Rodrigues, Module 5.5 and Algorithm 5.5 ("Leader-Based Epoch-Change"),
+//! Cachin, Guerraoui & Rodrigues, Module 5.3 and Algorithm 5.5 ("Leader-Based Epoch-Change"),
 //! quoted from the book:
 //!
 //! ```text

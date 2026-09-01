@@ -3,8 +3,8 @@
 //! **Status: implementation. Space: bounded by membership, plus what the stubborn children hold
 //! outstanding — which nothing here retires. See the departure on `Stop`.**
 //!
-//! Cachin, Guerraoui & Rodrigues, Algorithm 5.9 ("Logged Read/Write Epoch Consensus"), quoted from
-//! the book:
+//! Cachin, Guerraoui & Rodrigues, Module 5.7 (`LoggedEpochConsensus`) and Algorithm 5.9 ("Logged
+//! Read/Write Epoch Consensus"), quoted from the book:
 //!
 //! ```text
 //! Algorithm 5.9: Logged Read/Write Epoch Consensus

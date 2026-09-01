@@ -3,8 +3,8 @@
 //! **Status: implementation. Space: bounded by membership, plus what the stubborn children hold
 //! outstanding — which nothing here retires, so see the departure on `Stop` below.**
 //!
-//! Cachin, Guerraoui & Rodrigues, Algorithm 5.8 ("Logged Leader-Based Epoch-Change"), quoted from
-//! the book:
+//! Cachin, Guerraoui & Rodrigues, Module 5.6 (`LoggedEpochChange`) and Algorithm 5.8 ("Logged
+//! Leader-Based Epoch-Change"), quoted from the book:
 //!
 //! ```text
 //! Algorithm 5.8: Logged Leader-Based Epoch-Change

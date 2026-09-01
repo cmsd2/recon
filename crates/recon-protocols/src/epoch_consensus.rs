@@ -2,7 +2,7 @@
 //!
 //! **Status: implementation. Space: bounded by membership.**
 //!
-//! Cachin, Guerraoui & Rodrigues, Module 5.6 and Algorithm 5.6 ("Read/Write Epoch Consensus"),
+//! Cachin, Guerraoui & Rodrigues, Module 5.4 and Algorithm 5.6 ("Read/Write Epoch Consensus"),
 //! quoted from the book:
 //!
 //! ```text

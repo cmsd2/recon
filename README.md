@@ -148,6 +148,7 @@ The bottom abstraction, fair-loss links, is not a module: it is what the simulat
 
 | Abstraction | Module | Book | Status | Space |
 |---|---|---|---|---|
+| Fair-loss link | [`fair_loss_link.rs`](crates/recon-protocols/src/fair_loss_link.rs) | Module 2.1 | the simulator's own guarantee, named | none |
 | Stubborn link | [`stubborn_link.rs`](crates/recon-protocols/src/stubborn_link.rs) | Module 2.2, Alg. 2.1 | academic | unbounded |
 | Perfect link | [`perfect_link.rs`](crates/recon-protocols/src/perfect_link.rs) | Module 2.3, Alg. 2.2 | academic as written | unbounded |
 | Perfect failure detector | [`perfect_failure_detector.rs`](crates/recon-protocols/src/perfect_failure_detector.rs) | Module 2.6, Alg. 2.5 | deployable where synchrony is real | bounded by membership |
@@ -158,6 +159,10 @@ The bottom abstraction, fair-loss links, is not a module: it is what the simulat
 | Flooding consensus | [`flooding_consensus.rs`](crates/recon-protocols/src/flooding_consensus.rs) | Module 5.1, Alg. 5.1 | academic, fail-stop | bounded by membership and rounds |
 | Probabilistic broadcast | [`probabilistic_broadcast.rs`](crates/recon-protocols/src/probabilistic_broadcast.rs) | Module 3.7, Alg. 3.9 | **implementation** | bounded by a retention window |
 | Lazy probabilistic broadcast | [`lazy_probabilistic_broadcast.rs`](crates/recon-protocols/src/lazy_probabilistic_broadcast.rs) | Module 3.7, Alg. 3.10–3.11 | **implementation** | bounded by a retention window |
+| Eventual leader detector, Ω | [`eventual_leader_detector.rs`](crates/recon-protocols/src/eventual_leader_detector.rs) | Module 2.9, Alg. 2.8 | **implementation** | bounded by membership |
+| Epoch-change | [`epoch_change.rs`](crates/recon-protocols/src/epoch_change.rs) | Module 5.3, Alg. 5.5 | **implementation** | bounded by membership |
+| Read/write epoch consensus | [`epoch_consensus.rs`](crates/recon-protocols/src/epoch_consensus.rs) | Module 5.4, Alg. 5.6 | **implementation** | bounded by membership |
+| Leader-driven consensus — Paxos | [`leader_driven_consensus.rs`](crates/recon-protocols/src/leader_driven_consensus.rs) | Module 5.2, Alg. 5.7 | **implementation** | bounded by membership |
 
 ### Over session links — what a deployment would run
 
@@ -220,6 +225,8 @@ restart.
 | Logged perfect link | [`logged_link.rs`](crates/recon-protocols/src/logged_link.rs) | Module 2.4, Alg. 2.3 | transcription | unbounded, **on disk** |
 | Stubborn broadcast | [`stubborn_broadcast.rs`](crates/recon-protocols/src/stubborn_broadcast.rs) | §3.5 | deployable | bounded by membership |
 | Logged uniform reliable broadcast | [`logged_uniform_reliable_broadcast.rs`](crates/recon-protocols/src/logged_uniform_reliable_broadcast.rs) | Module 3.6, Alg. 3.8 | transcription | unbounded, **on disk** |
+| Logged epoch-change | [`logged_epoch_change.rs`](crates/recon-protocols/src/logged_epoch_change.rs) | Module 5.6, Alg. 5.8 | **implementation** | bounded by membership, plus what the stubborn children hold |
+| Logged read/write epoch consensus | [`logged_epoch_consensus.rs`](crates/recon-protocols/src/logged_epoch_consensus.rs) | Module 5.7, Alg. 5.9 | **implementation** | bounded by membership, plus what the stubborn children hold |
 
 Two things change besides the indication. **Startup becomes a branch** — a process with nothing in
 storage is initialised, one with something is recovered, exactly one runs, and both can emit
@@ -268,12 +275,41 @@ still standing — because a decision is irrevocable and both were taken before 
 That is what a perfect failure detector is worth, and it is why the algorithms that get deployed
 are built the other way round.
 
+### Paxos, and what it does instead
+
+`leader_driven_consensus` is that other way round, and the pair with flooding consensus is the point
+of having written both. Ω elects a leader, epoch-change turns leadership into a numbered sequence of
+epochs, and each epoch is one abortable read/write consensus: the leader reads from a majority,
+adopts the highest-timestamped value anyone had already accepted, writes to a majority, and decides.
+Two majorities intersect, so a value decided in one epoch is what every later epoch reads back.
+
+The detector is allowed to be **wrong**. Two processes may each believe they lead, in overlapping
+epochs, and the suite runs mostly in exactly that condition — with a companion test confirming
+leadership really was disputed, because an agreement assertion over a run with one unchallenged
+leader proves nothing. What an inaccurate detector costs here is termination, not agreement:
+`tests/leader_driven_consensus.rs` runs the partition that splits flooding consensus and the
+minority simply waits.
+
+Termination is stated as conditional and tested that way — a correct majority and a detector that
+eventually settles — which is what FLP requires and what flooding consensus pretends away.
+
+The fail-recovery halves, Algorithms 5.8 and 5.9, are built too: the epoch a process has entered
+and the value it has accepted are durable before anything reveals them, and a process that dies
+inside the write comes back either having accepted or not, never having promised without a record.
+
 ### Next
 
-Eventually perfect failure detection (Module 2.8, `◇P`) and eventual leader election (`Ω`), then
-the leader-driven family. Stable storage was the blocker and is now in place, so what remains is
-`◇P` — whose `Restore` turns the set of believed-correct processes from a monotone shrinking one
-into a set that can grow again, which every guard written against it will need re-reading for.
+Algorithms 5.10–5.11, the logged leader-driven consensus that composes the two logged halves above.
+It is blocked on one thing, and it is in the core rather than in the algorithm: `Cx::with_child`
+hands a child `NoStore`, so a durable parent cannot compose a durable child. Algorithm 5.10 keeps
+`(ets, ℓ, decision)` of its own *and* uses two children that keep state of theirs, and it reads
+its children's records directly on recovery. Scoping one store into two is the change that unblocks
+it.
+
+Beyond that, eventually perfect failure detection (Module 2.8, `◇P`) — whose `Restore` turns the set
+of believed-correct processes from a monotone shrinking one into a set that can grow again, which
+every guard written against it will need re-reading for, and which would let Ω rest on what the book
+actually specifies rather than on the stronger `P` it currently derives from.
 
 ## Examples
 
@@ -406,9 +442,12 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/logged_link.rs`, `stubborn_broadcast.rs`, `logged_uniform_reliable_broadcast.rs` | the fail-recovery model: durable logs, recovery, what a restart forgets, and what recovery must put back | 15 / 7 / 18 |
 | [`tests/flooding_consensus.rs`](crates/recon-protocols/tests/flooding_consensus.rs) | consensus, what a false suspicion costs it, and that a layer ignores another layer's timer | 23 |
 | `tests/probabilistic_broadcast.rs`, `lazy_probabilistic_broadcast.rs` | gossip and its recovery phase — coverage asserted over many seeds against a stated threshold, and asserted **not** to be total | 21 / 15 |
+| `tests/eventual_leader_detector.rs`, `epoch_change.rs`, `epoch_consensus.rs` | Ω, the epochs it drives, and the quorum core Paxos's safety argument lives in | 7 / 8 / 18 |
+| [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half confirming leadership really was disputed | 13 |
+| `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, and what a restart must find | 8 / 10 |
 
-381 across the suites above, plus nine unit tests inside `recon-core` and one `compile_fail`
-doctest on the link port — 391 in total, all in one process, no ports opened.
+445 across the suites above, plus nine unit tests inside `recon-core` and one `compile_fail`
+doctest on the link port — 455 in total, all in one process, no ports opened.
 
 ## Licence
 

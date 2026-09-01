@@ -4,7 +4,7 @@
       Guerraoui & Rodrigues, and verify it against the book rather than a recollection. Done, and it
       corrected this change's own proposal: the page says `maxrank`, the **highest**-ranked process
       not suspected, where the proposal had written lowest
-- [ ] 1.1b Transcribe Modules 5.5 and 5.6 and the consensus module into their module docstrings,
+- [x] 1.1b Transcribe Modules 5.5 and 5.6 and the consensus module into their module docstrings,
       once those modules exist
 - [x] 1.2 Transcribe Algorithms 5.5, 5.6 and 5.7 into their module docstrings. **The `Uses:` lines
       are already verified against the book** — the line that was wrong last time and decided which
@@ -153,6 +153,21 @@
 
 ## 8. Logged leader-driven consensus
 
+> **Blocked, and the blocker is in the core rather than in the algorithm.** `Cx::with_child` and
+> `Cx::with_child_consuming` hand a child `NoStore`, so a protocol that keeps durable state cannot
+> compose a child that keeps durable state — `crates/recon-core/src/store.rs` says so explicitly:
+> "scoping one store into two is a design nothing yet needs". Algorithm 5.10 needs it. It keeps
+> `(ets, ℓ, decision)` of its own, uses `logged_epoch_change` (which keeps `(startts, start)`) and
+> `logged_epoch_consensus` (which keeps `(valts, val)` and `epochdecision`), and its `Recovery`
+> handler reads its children's records directly: `retrieve(startts, start) of instance lec` and
+> `retrieve(epochdecision) of instance lep.ets`.
+>
+> Groups 6 and 7 were not blocked, because each stores at the top of a stack of volatile children,
+> and both are done. Group 8 cannot be written without either scoping the store — a change to
+> `recon-core` with its own proposal — or building 5.10 over the *volatile* 5.5 and 5.6, which
+> would discard exactly what the logged halves buy. This change's own design says steps 5 to 7 can
+> be abandoned without touching 1 to 4; stopping before step 7's successor is the same call.
+
 - [ ] 8.1 Add the module per Algorithms 5.10 and 5.11, and verify a run with crashes and recoveries
       decides everywhere once a majority is back
 - [ ] 8.2 Verify a process that has decided still holds that decision after a crash and recovery
@@ -165,12 +180,12 @@
 
 ## 9. What this dates
 
-- [ ] 9.1 Add a protocol table row and a suite row per module to `README.md`, and verify the counts
+- [x] 9.1 Add a protocol table row and a suite row per module to `README.md`, and verify the counts
       and claimed statuses against what `cargo test --workspace` prints and what the modules say
-- [ ] 9.2 Update `docs/bounded-space.md`'s audit table with each module's state and what bounds it,
+- [x] 9.2 Update `docs/bounded-space.md`'s audit table with each module's state and what bounds it,
       and verify the claim matches what the modules state
-- [ ] 9.3 Update `docs/conditional-guarantees.md` where it discusses what a failure detector's
+- [x] 9.3 Update `docs/conditional-guarantees.md` where it discusses what a failure detector's
       accuracy costs, now that there is an abstraction here which survives losing it
-- [ ] 9.4 Check whether `CLAUDE.md`'s note that everything rests on a perfect failure detector is
+- [x] 9.4 Check whether `CLAUDE.md`'s note that everything rests on a perfect failure detector is
       still true, and correct it if not
-- [ ] 9.5 Run `./scripts/check.sh` and verify it passes in full
+- [x] 9.5 Run `./scripts/check.sh` and verify it passes in full

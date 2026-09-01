@@ -217,8 +217,12 @@ proportional to everything ever sent is unbounded even if each item is small. Th
 mode that hides, and this repository currently has it — the stubborn link re-sends everything it
 has ever sent on every tick, because nothing calls its `Stop`.
 
-Everything above the failure detector is presently a transcription and violates the rule. The
-audit, the measurements, and the mechanisms that fix each are in `docs/bounded-space.md`.
+The **broadcast** family above the failure detector is still a transcription and still violates the
+rule. The leader-driven family does not: Ω, epoch-change, both epoch consensuses and Paxos are
+bounded by membership, and the two logged ones keep one rewritten value each. What they inherit is
+the stubborn children's outstanding set, because nothing calls `Stop` — bounded in practice by the
+epoch ending, except in `logged_epoch_change`, which has no ending and says so. The audit, the
+measurements, and the mechanisms that fix each are in `docs/bounded-space.md`.
 
 Three practices follow:
 

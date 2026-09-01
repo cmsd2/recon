@@ -145,10 +145,43 @@ measurements it made honestly and cannot trust — see
 `crates/recon-protocols/src/perfect_failure_detector.rs`, which accuses every peer in exactly that
 case and says why that is the synchrony assumption failing rather than a bug.
 
-What is still missing is the other half — **nothing survives a crash**, because there is no stable
-storage. An abstraction that must remember an epoch, a promise or a decision across an incarnation has
-nowhere to put it, so the logged variants of these abstractions cannot be written at all. That is
-the gap to close before anything in the fail-recovery model.
+The other half — that **nothing survives a crash** — was the gap when this was written, and it is
+closed. `Cx::storage` is a synchronous `Store` with one rewritten metadata value and an appended
+entry sequence; what was written through it is read back in `on_recovery`, and
+`Sim::crash_on_next_write` models dying inside the write with the seed deciding whether it landed.
+The logged variants that could not be written then are written now, up to and including a logged
+epoch consensus whose acceptances survive a restart.
+
+One limit remains, and it is a limit of composition rather than of storage. `Cx::with_child` hands
+a child `NoStore`, so a durable parent cannot compose a durable child: scoping one store into two
+is a design nothing needed until Algorithm 5.10, which stores its own `(ets, ℓ, decision)` *and*
+uses two children that store. That is where the fail-recovery stack currently stops.
+
+## A detector's accuracy is a scope, and a layer can bridge its ending
+
+The scopes named so far are sessions, incarnations and cancellations — things a transport or a
+process supplies. A failure detector's **accuracy** is another one, and it behaves the same way.
+While it holds, "the processes I believe correct" means something; when it lapses, that belief is
+no longer a fact about the world, and everything derived from it is scoped to the interval in which
+it held.
+
+`flooding_consensus` is the layer that cannot bridge that ending and does not propagate it. Its
+agreement rests on strong accuracy by name — the book's own proof invokes it — and one false
+suspicion splits the decision permanently, with no event anywhere saying a guarantee lapsed. Two
+correct processes decide differently and nothing detects or repairs it. That is the cardinal sin of
+this document, committed by an algorithm from the page rather than by a mistake in transcribing it.
+
+`leader_driven_consensus` is the layer that **can** bridge it, and the redundancy that lets it is
+the one this document names third: other processes survive this one being wrong. A quorum is a fact
+about the deployment rather than a moment-to-moment belief about the network, so two majorities
+still intersect while the detector is telling two processes they each lead. What the ending costs is
+termination, not agreement — the layer waits instead of splitting — and waiting is repairable where
+a split decision is not.
+
+So the trade is legible in the notation: `flooding_consensus`'s agreement is `[detector accurate]`
+and its termination is `[always]`; Paxos's agreement is `[always]` and its termination is
+`[majority correct ∧ detector settles]`. Both suites assert their own half, and
+`tests/leader_driven_consensus.rs` runs the schedule that splits the first against the second.
 
 ## What not to build yet
 

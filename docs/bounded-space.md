@@ -30,7 +30,17 @@ small.
 
 ## Where this repository actually stands
 
-Every protocol above the failure detector violates the rule.
+Every protocol above the failure detector violated the rule when this was written. The gossip pair
+and then the leader-driven family were built the other way round, so the table is now mixed rather
+than uniformly bad.
+
+The two logged consensus modules carry a warning rather than a cross, and the distinction is worth
+stating precisely. Their **own** state is bounded by membership and their durable record is one
+value rewritten — an epoch, or one accepted `(valts, val)` — so neither grows with messages handled.
+What is not bounded is what the stubborn link and stubborn broadcast beneath them hold outstanding,
+because nothing calls `Stop`. That is the stubborn link's problem below, inherited rather than
+introduced, and it is bounded in practice by the epoch ending: `Abort` retires the instance and
+everything under it. `logged_epoch_change` has no such ending, and says so.
 
 | Protocol | State | Bounded by |
 |---|---|---|
@@ -48,6 +58,12 @@ Every protocol above the failure detector violates the rule.
 | `fair_loss_link` | nothing at all | **nothing** ✅ |
 | `probabilistic_broadcast` | `delivered` | **a retention window** ✅ |
 | `lazy_probabilistic_broadcast` | `stored`, `pending`, `next` | **a retention window, and membership** ✅ |
+| `eventual_leader_detector` | `suspected`, `peers` (plus its child) | **membership** ✅ |
+| `epoch_change` | `trusted`, `lastts`, `ts`, `peers` | **membership** ✅ |
+| `epoch_consensus` | `states`, `accepted`, one `(valts, val)` | **membership** ✅ |
+| `leader_driven_consensus` | one epoch consensus, replaced not accumulated | **membership** ✅ |
+| `logged_epoch_change` | `(startts, start)` — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
+| `logged_epoch_consensus` | `(valts, val)` and `epochdecision` — **in stable storage**, one value rewritten | **membership**, plus what the stubborn children hold ⚠️ |
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the
 second problem and no longer do: the durable state was one blob rewritten on every change, so a
@@ -122,6 +138,10 @@ deployment the transport has already constructed it.
 | reliable broadcast | **deployed**, once `delivered` is windowed |
 | uniform reliable broadcast | **deployed**, once `pending`, `ack` and `delivered` are collected |
 | perfect failure detector | **deployed only where synchrony is real.** Otherwise ◇P |
+| eventual leader detector, Ω | **deployed.** Derived here from P, which is stronger than the book's ◇P |
+| epoch-change and epoch consensus | **deployed.** Both bounded by membership, and both tested where the detector is wrong |
+| leader-driven consensus | **deployed.** This is the shape that ships, and `flooding_consensus` is not |
+| the logged pair | **deployed**, once something calls `Stop` on the stubborn children |
 
 The stubborn and perfect links are how you obtain a perfect link when you have nothing but a lossy
 datagram service. That is the simulator's situation and not production's. They stay — everything
