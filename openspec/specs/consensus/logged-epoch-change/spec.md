@@ -36,3 +36,19 @@ holding across a crash and recovery rather than only within one incarnation.
 
 - **WHEN** a process crashes and recovers while the leader detector is settled
 - **THEN** it rejoins the same final epoch rather than starting a new sequence
+
+### Requirement: Work is bounded by membership, not by time
+
+The messages a process sends per unit time SHALL not grow with how long it has been running. A
+redelivered announcement that was already refused SHALL not be refused again: one refusal per
+distinct announcement per peer, which is bounded by membership.
+
+#### Scenario: The send rate is flat once leadership has settled
+
+- **WHEN** leadership has settled and the run continues for several more timeouts
+- **THEN** the number of messages sent per window of time does not increase from window to window
+
+#### Scenario: A stale announcement is refused once
+
+- **WHEN** an announcement a process has already refused is delivered to it again
+- **THEN** no second refusal is sent
