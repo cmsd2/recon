@@ -207,8 +207,12 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
 - **Sequence tests by event, not by duration.** `Sim::command` schedules; it does not run. To
   act on a state such as "sent but not yet delivered", call `Sim::step_now()` — everything due at
   the current instant is dispatched and the clock stays put — rather than `run_for` with a
-  duration guessed shorter than the latency. A test that depends on a duration being short is a
-  test that depends on the latency configuration, silently.
+  duration guessed shorter than the latency. To search for a state one event creates and the
+  next may destroy — "exactly one process has decided" — loop on `Sim::step()`, one event at a
+  time, rather than `run_for(1 ms)`, which can hold two. A test that depends on a duration being
+  short is a test that depends on the latency configuration, silently. No suite uses the old
+  idiom for sequencing any more; a duration is still right for "any later instant", which is a
+  different thing and says so where it occurs.
 - **A fault knob nobody spends is a claim nobody tested.** When the simulator gains a fault —
   `crash_on_next_write`, suspension, session breaks — every protocol whose stated guarantee that
   fault threatens gets a test injecting it, in that protocol's own suite, not only in the

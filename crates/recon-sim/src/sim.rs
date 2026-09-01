@@ -403,6 +403,24 @@ where
         }
     }
 
+    /// Dispatch the next scheduled event, moving the clock to it. `false` when there is nothing
+    /// left to dispatch, or the step budget is spent.
+    ///
+    /// For a test searching for a state that one event creates and the next may destroy — "exactly
+    /// one process has decided" — stepping by event cannot skip it, where `run_for(1 ms)` can when
+    /// two events fall inside the millisecond.
+    pub fn step(&mut self) -> bool {
+        if self.steps >= self.config.max_steps {
+            return false;
+        }
+        let Some((&key, _)) = self.queue.iter().next() else { return false };
+        let item = self.queue.remove(&key).expect("key just observed");
+        self.now = key.0;
+        self.steps += 1;
+        self.dispatch(item);
+        true
+    }
+
     pub fn run_for(&mut self, d: Duration) {
         self.run_until(self.now + d);
     }
@@ -590,10 +608,12 @@ where
 
         if self.config.is_session_based() {
             if !self.ensure_session(from, to) {
+                // `connected` was checked above, so a refusal here is either a crashed recipient
+                // or the instant of an ending — not a partition, and the trace must not say so.
                 let reason = if self.crashed(to) {
                     DropReason::RecipientCrashed
                 } else {
-                    DropReason::Partitioned
+                    DropReason::NoSession
                 };
                 self.trace.push(TraceEvent::Dropped { at, from, to, msg, reason });
                 return;

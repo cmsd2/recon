@@ -155,7 +155,7 @@ fn a_message_lost_to_a_session_ending_is_not_retried() {
         let mut s = sim(seed);
         s.run_for(Duration::from_millis(50));
         s.command(A, Cmd::Broadcast(1));
-        s.run_for(Duration::from_millis(1)); // in flight
+        s.step_now(); // the command runs; its sends are in flight
         s.break_session(A, D);
         s.run_for(Duration::from_millis(1500)); // ample time for any retry to happen
         (delivered(&s, D).len(), session_reports(&s, D))

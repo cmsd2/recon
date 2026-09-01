@@ -465,7 +465,7 @@ cargo test --workspace -- --nocapture                 # with output
 | Suite | Covers | Tests |
 |---|---|---|
 | [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, and a durable child inside a durable parent | 29 |
-| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event | 81 |
+| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event | 83 |
 | [`recon-protocols/tests/method.rs`](crates/recon-protocols/tests/method.rs) | how a property is asserted so it cannot pass vacuously | 10 |
 | [`tests/link_port.rs`](crates/recon-protocols/tests/link_port.rs), `foreign_link.rs` | that both links satisfy the port, that a protocol is not a link by accident, and that a link this project never wrote carries the stack up to consensus | 6 / 3 |
 | `tests/alloc_probe.rs` | what one delivery costs in allocations | 2 |
@@ -483,8 +483,8 @@ cargo test --workspace -- --nocapture                 # with output
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 
-488 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
-`compile_fail` on the link port, two worked examples of a storage slot — 500 in total, all in one
+490 across the suites above, plus nine unit tests inside `recon-core` and three doctests — one
+`compile_fail` on the link port, two worked examples of a storage slot — 502 in total, all in one
 process, no ports opened.
 
 ## Licence

@@ -85,9 +85,9 @@ fn a_process_that_log_delivers_and_then_crashes_for_ever_does_not_split_the_rest
             LoggedUniformReliableBroadcast::new(me, ALL, interval())
         });
         s.command(A, Cmd::Broadcast(1));
+        // One event at a time, so a lone first log-delivery cannot be stepped over.
         let mut steps = 0;
-        while steps < 300 {
-            s.run_for(Duration::from_millis(1));
+        while steps < 20_000 && s.step() {
             steps += 1;
             let who: Vec<NodeId> =
                 ALL.iter().copied().filter(|n| !log_of(&s, *n).is_empty()).collect();
@@ -408,7 +408,7 @@ fn recovery_reads_re_announces_and_re_broadcasts_with_nothing_in_between() {
     // tell the layer above, and put back on the wire what was still pending.
     let mut s = sim(10);
     s.command(A, Cmd::Broadcast(2));
-    s.run_for(Duration::from_micros(1)); // A has it pending; nothing has arrived anywhere
+    s.step_now(); // A has it pending; nothing has arrived anywhere
     assert_eq!(log_of(&s, A), vec![], "not yet log-delivered");
 
     let at = s.now();

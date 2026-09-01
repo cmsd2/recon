@@ -17,6 +17,9 @@ pub enum DropReason {
     RecipientCrashed,
     /// The session carrying it ended before it arrived.
     SessionEnded,
+    /// Sent in the instant a session ended, before its successor could open. A transport does
+    /// not reopen a connection in the instant it closed one; the next instant's send does.
+    NoSession,
     /// The sender had crashed before the message left.
     SenderCrashed,
 }

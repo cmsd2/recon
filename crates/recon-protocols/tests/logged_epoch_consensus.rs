@@ -209,7 +209,7 @@ fn dying_inside_the_write_never_leaves_an_acceptance_announced_without_a_record(
     for seed in 0..40u64 {
         let mut s = sim(seed);
         // Past the `Init` write, so the armed one is the acceptance.
-        s.run_for(Duration::from_millis(1));
+        s.step_now();
         s.crash_on_next_write(D);
         s.command(E, Cmd::Propose(9));
         s.run_for(Duration::from_millis(60));

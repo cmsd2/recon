@@ -811,7 +811,7 @@ fn break_with_traffic(seed: u64) -> (usize, Vec<u32>) {
     for i in 0..40u32 {
         s.command(A, Cmd::SendTo(B, i));
     }
-    s.run_for(Duration::from_millis(1)); // messages are now in flight
+    s.step_now(); // the commands run; the messages are in flight
     s.break_session(A, B);
     s.run_until(Time::from_millis(2000));
     assert_eq!(s.trace().session_ends(), 1);
@@ -829,7 +829,7 @@ fn nothing_is_delivered_on_a_session_after_it_has_ended() {
         for i in 0..40u32 {
             s.command(A, Cmd::SendTo(B, i));
         }
-        s.run_for(Duration::from_millis(1));
+        s.step_now(); // the commands run; the messages are in flight
         s.break_session(A, B);
         s.run_until(Time::from_millis(2000));
 
@@ -897,7 +897,7 @@ fn the_lost_suffix_is_genuinely_unknown() {
         for i in 0..12u32 {
             s.command(A, Cmd::SendTo(B, i));
         }
-        s.run_for(Duration::from_millis(1));
+        s.step_now(); // the commands run; the messages are in flight
         s.break_session(A, B);
         s.run_until(Time::from_millis(2000));
         sizes.insert(s.trace().suffix_losses());
@@ -929,7 +929,7 @@ fn ordering_restarts_with_the_new_session() {
     for i in 0..10u32 {
         s.command(A, Cmd::SendTo(B, i));
     }
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // the commands run; the messages are in flight
     s.break_session(A, B);
     s.run_for(Duration::from_millis(200));
     let before = arrivals(&s, B).len();
@@ -975,7 +975,7 @@ fn the_trace_records_session_events_distinguishably() {
     for i in 0..20u32 {
         s.command(A, Cmd::SendTo(B, i));
     }
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // the commands run; the messages are in flight
     s.break_session(A, B);
     s.run_until(Time::from_millis(1000));
 
@@ -1351,7 +1351,7 @@ fn nothing_is_dispatched_between_a_restart_and_recovery_returning() {
     s.run_for(Duration::from_millis(10));
 
     s.command(B, LedgerCmd::TellOnly(A));
-    s.run_for(Duration::from_micros(1)); // B has sent; the message has not arrived
+    s.step_now(); // B has sent; the message has not arrived
     assert_eq!(s.protocol(A).unwrap().events_handled, 1);
 
     s.crash(A);
@@ -1533,7 +1533,7 @@ fn two_layers_of_one_process_are_given_different_handles() {
     // A source owned per protocol, or begun afresh for each event, would hand both the same
     // identity — and each would then accept the other's expiry as its own.
     let mut s = two_timers(Config::default().seed(3));
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // both layers have armed their timers
 
     let a = s.protocol(A).expect("A exists");
     let (slow, fast) = (a.slow.expect("slow armed"), a.fast.expect("fast armed"));
@@ -1545,7 +1545,7 @@ fn handles_are_distinct_across_every_layer_of_every_process() {
     // Distinctness is a property of the run, not of a layer: A's handles and B's must not
     // collide either, or a trace entry would not say whose timer it names.
     let mut s = two_timers(Config::default().seed(3));
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // both layers have armed their timers
 
     let mut seen = std::collections::BTreeSet::new();
     for node in [A, B] {
@@ -1563,7 +1563,7 @@ fn the_trace_names_which_timer_fired() {
     // *which* of them fired — by the handle the registering layer was given, which that layer
     // still holds. Before this it said only that "a timer" fired.
     let mut s = two_timers(Config::default().seed(3));
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // both layers have armed their timers
     let slow_first = s.protocol(A).expect("A exists").slow.expect("slow armed");
 
     // Far enough for the fast timer to have fired repeatedly and the slow one exactly once.
@@ -1631,4 +1631,55 @@ fn step_now_dispatches_this_instant_and_leaves_the_clock_where_it_is() {
 
     s.run_for(Duration::from_millis(20));
     assert_eq!(s.trace().delivery_count(), 1);
+}
+
+#[test]
+fn step_dispatches_one_event_and_moves_the_clock_to_it() {
+    let mut s =
+        sim(Config::default().seed(1).latency(Duration::from_millis(5), Duration::from_millis(5)));
+    s.command(A, Cmd::SendTo(B, 7));
+    s.command(A, Cmd::SendTo(C, 8));
+
+    assert!(s.step(), "the first command");
+    assert_eq!(s.now(), Time::ZERO);
+    assert_eq!(s.trace().send_count(), 1, "one event, one send");
+    assert!(s.step(), "the second command");
+    assert_eq!(s.trace().send_count(), 2);
+
+    assert!(s.step(), "the first delivery");
+    assert_eq!(s.now(), Time::ZERO + Duration::from_millis(5), "the clock moved to the event");
+    assert_eq!(s.trace().delivery_count(), 1, "one delivery, not both");
+
+    while s.step() {}
+    assert_eq!(s.trace().delivery_count(), 2, "stepping to exhaustion finishes the run");
+}
+
+#[test]
+fn a_send_in_the_instant_a_session_ended_is_dropped_and_says_so_and_the_next_instant_opens_anew() {
+    // The answer to "is a message right after a session comes up lost?": no. What is lost is a send
+    // in the very instant the session ended — there is no session then and none opens in that
+    // instant — and it is recorded as exactly that. The next instant's send opens the successor and
+    // is delivered.
+    let mut s = sim(Config::default()
+        .seed(1)
+        .sessions()
+        .latency(Duration::from_millis(5), Duration::from_millis(5)));
+    s.command(A, Cmd::SendTo(B, 1));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.trace().delivery_count(), 1, "the first send opened the session and arrived");
+    let first = s.session_epoch(A, B).expect("a session is up");
+
+    s.break_session(A, B);
+    s.command(A, Cmd::SendTo(B, 2));
+    s.step_now(); // the same instant as the ending
+    assert_eq!(s.trace().drops_because(DropReason::NoSession), 1, "dropped, and named");
+    assert_eq!(s.trace().drops_because(DropReason::Partitioned), 0, "not called a partition");
+
+    // Any later instant will do — this is not a duration guessed shorter than a latency, it is
+    // "not the instant of the ending", which is the one thing the sim refuses.
+    s.run_for(Duration::from_millis(1));
+    s.command(A, Cmd::SendTo(B, 3));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.trace().delivery_count(), 2, "the next instant's send arrived");
+    assert!(s.session_epoch(A, B).expect("a successor is up") > first, "on a new session");
 }

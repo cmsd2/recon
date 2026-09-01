@@ -402,10 +402,10 @@ fn a_decider_crashing_immediately_afterwards_does_not_split_the_rest() {
     let split = (0..40u64).find_map(|seed| {
         let mut s = sim(seed);
         propose_all(&mut s, [7, 3, 9, 5]);
-        // Advance until exactly one process has decided, then crash it.
+        // Advance one event at a time until exactly one process has decided, then crash it. A
+        // decision is one event, so stepping by event cannot skip that state; a millisecond can.
         let mut steps = 0;
-        while steps < 400 {
-            s.run_for(Duration::from_millis(1));
+        while steps < 20_000 && s.step() {
             steps += 1;
             let decided: Vec<NodeId> =
                 ALL.iter().copied().filter(|n| decision(&s, *n).is_some()).collect();

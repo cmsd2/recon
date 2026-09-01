@@ -164,9 +164,10 @@ fn uniform_agreement_holds_when_a_process_delivers_then_crashes() {
         let mut s = sim(seed);
         s.run_for(Duration::from_millis(50));
         s.command(A, Cmd::Broadcast(1));
+        // One event at a time: a delivery is one event, so the state "exactly one has delivered"
+        // cannot be stepped over, where a millisecond could hold two.
         let mut steps = 0;
-        while steps < 400 {
-            s.run_for(Duration::from_millis(1));
+        while steps < 20_000 && s.step() {
             steps += 1;
             let who: Vec<NodeId> =
                 ALL.iter().copied().filter(|n| !delivered(&s, *n).is_empty()).collect();
@@ -193,7 +194,7 @@ fn a_lost_suffix_is_repaired_by_the_resend_and_nothing_is_attempted_on_the_endin
     let mut s = sim(3);
     s.run_for(Duration::from_millis(50));
     s.command(A, Cmd::Broadcast(1));
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // the command runs; its sends are in flight
     for peer in [C, D, E] {
         s.break_session(A, peer);
         s.break_session(B, peer);

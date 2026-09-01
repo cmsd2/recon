@@ -227,9 +227,9 @@ fn uniform_agreement_holds_when_a_process_delivers_then_crashes() {
     let found = (0..40u64).find_map(|seed| {
         let mut s = sim(seed);
         s.command(A, Cmd::Broadcast(1));
+        // One event at a time, so a lone first deliverer cannot be stepped over.
         let mut steps = 0;
-        while steps < 300 {
-            s.run_for(Duration::from_millis(1));
+        while steps < 20_000 && s.step() {
             steps += 1;
             let who: Vec<NodeId> =
                 ALL.iter().copied().filter(|n| !delivered(&s, *n).is_empty()).collect();

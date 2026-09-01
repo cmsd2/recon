@@ -218,7 +218,7 @@ fn urb_resends_on_re_establishment_with_the_peer_still_correct() {
     let mut s = urb_sim(3);
     s.run_for(Duration::from_millis(50));
     s.command(A, surb::Cmd::Broadcast(1));
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // the command runs; its sends are in flight
     s.break_session(A, D);
     s.break_session(B, D);
     s.break_session(C, D);
@@ -267,7 +267,7 @@ fn urb_liveness_does_not_need_the_layer_above_to_send() {
     let mut s = urb_sim(5);
     s.run_for(Duration::from_millis(50));
     s.command(A, surb::Cmd::Broadcast(1));
-    s.run_for(Duration::from_millis(1));
+    s.step_now(); // the command runs; its sends are in flight
     s.partition(&[&[A, B, C], &[D]]);
     s.run_for(Duration::from_millis(60)); // inside the detection timeout
     s.heal();

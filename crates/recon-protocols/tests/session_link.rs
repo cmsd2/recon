@@ -167,7 +167,7 @@ fn a_lost_suffix_is_never_reported_as_delivered() {
         for i in 0..30u32 {
             s.command(A, Cmd::Send { to: B, msg: i });
         }
-        s.run_for(Duration::from_millis(1));
+        s.step_now(); // the commands run; thirty sends are in flight
         s.break_session(A, B);
         s.run_until(Time::from_millis(2000));
         (s.trace().suffix_losses(), delivered(&s, B))
@@ -235,7 +235,7 @@ fn a_dead_session_is_not_reported_as_current() {
     let live = s.protocol(A).unwrap().epoch(B).expect("a session with B is up");
 
     s.break_session(A, B);
-    s.run_for(Duration::from_micros(1)); // the ending reaches the layer, nothing has reconnected
+    s.step_now(); // the ending reaches the layer; nothing has reconnected
     assert_eq!(s.protocol(A).unwrap().epoch(B), None, "no session, so no epoch in force");
 
     s.run_for(Duration::from_millis(500));
