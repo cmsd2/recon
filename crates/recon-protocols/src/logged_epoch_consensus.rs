@@ -254,6 +254,9 @@ pub struct LoggedEpochConsensus<V: Clone> {
     state_sent: bool,
     /// Whether this follower has answered the leader's `WRITE`. Likewise.
     accept_sent: bool,
+    /// Test-only: answer *every* redelivery, which is what this module did before the two flags
+    /// above were added. See [`LoggedEpochConsensus::with_reply_per_redelivery_defect`].
+    reply_per_redelivery: bool,
     /// `halt`. Every handler returns immediately once this is set.
     aborted: bool,
     /// Names the next stubborn transmission. Volatile, and so is what it keys.
@@ -295,6 +298,7 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             decided: false,
             state_sent: false,
             accept_sent: false,
+            reply_per_redelivery: false,
             aborted: false,
             next_send: 0,
             next_broadcast: 0,
@@ -311,6 +315,24 @@ impl<V: Clone> LoggedEpochConsensus<V> {
     /// Whether this instance has been abandoned.
     pub fn is_aborted(&self) -> bool {
         self.aborted
+    }
+
+    /// **Put a fixed defect back.** Answer every redelivered `READ` and `WRITE` on a fresh
+    /// stubborn transmission, as this module did before `state_sent` and `accept_sent` existed.
+    ///
+    /// The consequence is not a wrong decision: it is work that grows with how long the run has
+    /// been going rather than with membership — 12.6k, 28.6k, 44.6k, 60.6k, 76.6k sends in
+    /// successive 400 ms windows, because each answer joins a stubborn set that is never emptied.
+    /// `the_send_rate_does_not_grow_after_the_epoch_has_decided` is the test that holds it fixed.
+    ///
+    /// It exists so that the scenario shrinker can be demonstrated against a defect this project
+    /// actually had rather than against a toy; `shrinking_a_real_defect.rs` is the only caller, and
+    /// a test asserts that reintroducing it does break the bound. Nothing else may call it: a
+    /// process built this way violates the module's own stated space bound on purpose.
+    #[doc(hidden)]
+    pub fn with_reply_per_redelivery_defect(mut self) -> Self {
+        self.reply_per_redelivery = true;
+        self
     }
 
     /// `(valts, val)` — what this process has accepted.
@@ -362,7 +384,7 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             // `upon event ⟨ sbeb, Deliver | ℓ, [READ] ⟩`. Idempotent: the reply says what this
             // process has accepted, which a repeat does not change.
             Announce::Read => {
-                if self.state_sent {
+                if self.state_sent && !self.reply_per_redelivery {
                     return;
                 }
                 self.state_sent = true;
@@ -378,7 +400,7 @@ impl<V: Clone> LoggedEpochConsensus<V> {
             // **The write precedes the acceptance, here in this handler.** The ACCEPT is a promise
             // to a quorum, and a promise with no record behind it is how `EPC4` fails silently.
             Announce::Write { val } => {
-                if self.accept_sent {
+                if self.accept_sent && !self.reply_per_redelivery {
                     return;
                 }
                 if self.durable.state.valts != self.ets {

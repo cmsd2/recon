@@ -50,6 +50,14 @@ refuses each distinct announcement once per peer. Every module claiming a member
 test that its send rate is flat across a run several times longer than the work takes, and the two
 logged consensus ones fail it without the guards.
 
+For `logged_epoch_consensus` that last sentence is no longer an assertion about a version nobody can
+run: `LoggedEpochConsensus::with_reply_per_redelivery_defect` puts the missing guard back out, and
+`crates/recon-protocols/tests/shrinking_a_real_defect.rs` requires the growth to appear with it and
+not without. It exists so the scenario shrinker could be demonstrated against a defect this project
+actually had; what it incidentally buys is that the claim above is now checked. Reducing a run that
+exhibits it turned up something the original investigation missed — **one process suffices**, with no
+peers at all, because a process is its own peer and answers its own redelivered broadcast.
+
 What the stubborn children hold outstanding is still never retired, because nothing calls `Stop`.
 For the consensus that is one reply per follower per epoch and the epoch's own three announcements
 — bounded, and retired by `Abort`. For `logged_epoch_change`, which has no ending, it is one

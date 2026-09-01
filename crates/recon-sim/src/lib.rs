@@ -7,9 +7,13 @@
 
 pub mod codec;
 pub mod config;
+pub mod scenario;
+pub mod shrink;
 pub mod sim;
 pub mod trace;
 
 pub use config::Config;
+pub use scenario::{Scenario, Step};
+pub use shrink::{Reduction, shrink};
 pub use sim::Sim;
 pub use trace::{DropReason, Trace, TraceEvent};

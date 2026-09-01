@@ -150,8 +150,15 @@ state and is *handed back* every timer, delivery and scope event that came due w
 dropping one would lose a message inside a session that never ended. What a stall does take is the
 clock. Properties are asserted over `s.trace()`, never over protocol internals.
 
+The same run can also be held as a value — a `Scenario` is a configuration with its seed, a
+membership, timed `Step`s and a horizon — and `shrink` reduces a failing one against a predicate
+until nothing more comes out, rendering the result as Rust to paste. That is for the searching kind
+of test, where the failing input was discovered rather than chosen; the imperative form above is
+clearer for a test that provokes one named condition, and none of the suites were converted.
+
 Files: [`sim.rs`](crates/recon-sim/src/sim.rs) · [`config.rs`](crates/recon-sim/src/config.rs) ·
-[`trace.rs`](crates/recon-sim/src/trace.rs) · [`codec.rs`](crates/recon-sim/src/codec.rs)
+[`trace.rs`](crates/recon-sim/src/trace.rs) · [`codec.rs`](crates/recon-sim/src/codec.rs) ·
+[`scenario.rs`](crates/recon-sim/src/scenario.rs) · [`shrink.rs`](crates/recon-sim/src/shrink.rs)
 
 ## The protocols
 
@@ -360,7 +367,7 @@ protocol track                        evidence track
 2. defensive re-announcement          B. per-node clocks, and skew
 3. Stop                               C. invocations in the trace
 4. a replicated-log port              D. indeterminate outcomes
-5. multi-Paxos ┐                      E. shrinking
+5. multi-Paxos ┐                      E. shrinking                        ✓ built
    ZAB         ├── over it ───┐       F. logging and tracing
    VR, Raft…   ┘              │       G. a concurrent workload
                               └───────┴──▶  H. a checker, written once
@@ -481,17 +488,42 @@ models it as *nothing happened*, which is a claim the code is not entitled to ma
 well be sitting in a quorum's `pending`. A checker fed that history would be reasoning from a false
 premise. Needs an operation identity spanning invocation and outcome, so it follows `C`.
 
-#### E. Shrinking
+#### E. Shrinking ✓ built
 
 The thing this project can do that Jepsen cannot. Jepsen hands you a ten-thousand-operation history
-and a failure and you read it; it cannot reliably reproduce, so it cannot minimise. A seeded
-deterministic simulator can bisect the fault schedule, the operations and the run length until what
-is left is a counterexample somebody can read.
+and a failure and you read it; it cannot reliably reproduce, so it cannot minimise. Here a run is a
+function of its inputs, so a candidate reduction can be *run* and the question "does it still fail?"
+answered rather than estimated.
 
-Every diagnosis in these notes was reached by hand-writing a throwaway probe and printing a trace:
-the epoch that climbed to 647,309, the send rate that grew 12.6k → 76.6k per window, the leader
-trusted by everyone that announced nothing. A shrinker would have handed those over. It needs
-nothing that does not already exist, and it improves every suite already written.
+`recon_sim::Scenario` is a run as data — a configuration with its seed, a membership, timed `Step`s
+and a horizon — and `shrink` reduces a failing one against a predicate: the horizon by binary search,
+the steps by delta-debugging, a partition by merging its groups, the membership last, to a fixed
+point. What comes back is rendered as Rust to paste. A reduced scenario is a **different run that
+also fails**, not a prefix of the original: removing a step changes what every later draw takes from
+the generator, which is why every candidate is re-run rather than reasoned about.
+
+**This section used to claim more than it could deliver, and correcting it was part of the change
+that built it.** It said the three diagnoses in these notes — the epoch that climbed to 647,309, the
+send rate that grew 12.6k → 76.6k per window, the leader trusted by everyone that announced nothing
+— were ones "a shrinker would have handed over". It would have handed over none of them. The first
+needed to *see* `ets`, and was already a one-crash run with nothing to minimise. The second was a
+measurement, not a failure. The third needed bisection across the **stack** — Paxos, then
+epoch-change, then Ω, then ◇P — not across a schedule. All three are `F`.
+
+What it does buy was measured rather than assumed.
+[`shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) puts the
+send-rate defect back behind a test-only switch and reduces a scenario exhibiting it from nine faults
+across five processes to **one `Propose` and one process**, in fifty candidate runs and half a second.
+The one-process result was new: the defect needs no peers at all. It said nothing about *why*, and it
+cost two wrong predicates to get there — one returned a 17 ms scenario the *sound* stack satisfied
+too, because a run that short is all startup, and the next an 80 ms one that failed the same way,
+because an epoch consensus is supposed to send more as it works through `READ`, `WRITE` and
+`DECIDED`. The shrinker did not mislead; it exposed a predicate naming a symptom rather than a
+property, which is a service — but the cost of fixing the predicate was about the cost of the probe
+it was meant to replace.
+
+So a shrinker answers *when* and *with how little*. `F` is what answers *why*, and on this evidence
+it is the one to build next.
 
 #### F. Logging and tracing
 
@@ -688,10 +720,14 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
+| [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
+| [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-529 across the suites above, plus nine unit tests inside `recon-core` and four doctests — two
-`compile_fail` on the link and detector ports, two worked examples of a storage slot — 542 in total,
-all in one process, no ports opened.
+547 across the suites above, plus nine unit tests inside `recon-core` and four doctests — two
+`compile_fail` on the link and detector ports, two worked examples of a storage slot — 560 in total,
+all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
+`rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
+compares its committed output against the renderer.
 
 ## Licence
 

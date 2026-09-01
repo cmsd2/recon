@@ -6,7 +6,7 @@ use core::time::Duration;
 ///
 /// Every knob is consulted through the run's seeded generator, so a configuration plus a seed
 /// determines a run completely.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     /// Seed for every random decision in the run — faults, latency, and protocol randomness.
     pub seed: u64,
