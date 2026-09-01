@@ -35,15 +35,18 @@
 
 ## 3. Epoch-change
 
-- [ ] 3.1 Add the module over Ω per Algorithm 5.5, and verify a run with a steady leader starts one
+- [x] 3.1 Add the module over Ω per Algorithm 5.5, and verify a run with a steady leader starts one
       epoch and no more
-- [ ] 3.2 Verify timestamps strictly increase at each process, and that two processes starting an
+- [x] 3.2 Verify timestamps strictly increase at each process, and that two processes starting an
       epoch with the same timestamp name the same leader
-- [ ] 3.3 Verify a leadership change starts a new epoch, and that nothing else does — no timer, no
-      ordinary message traffic
-- [ ] 3.4 Verify epochs settle: once the leader detector stops changing its mind, every correct
+- [x] 3.3 Verify a leadership change starts a new epoch, and that nothing else does — no timer, no
+      ordinary message traffic. **It starts more than one**, and that is the algorithm: while `Trust`
+      propagates, a process still trusting the old leader NACKs the new one's announcement, so the
+      new leader climbs. A test asserting exactly two failed. The churn is pinned as finite by
+      `the_churn_after_a_leadership_change_is_finite`
+- [x] 3.4 Verify epochs settle: once the leader detector stops changing its mind, every correct
       process reaches the same final epoch and starts no further one
-- [ ] 3.5 Verify processes may legitimately be in different epochs meanwhile, so that the settling
+- [x] 3.5 Verify processes may legitimately be in different epochs meanwhile, so that the settling
       assertion above is not read as a claim that they never differ
 
 ## 4. Read/write epoch consensus, tested before anything composes over it

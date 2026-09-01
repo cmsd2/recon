@@ -7,6 +7,7 @@
 //! The bottom abstraction, fair-loss links, is not here: it is what the simulator provides.
 
 pub mod best_effort_broadcast;
+pub mod epoch_change;
 pub mod eventual_leader_detector;
 pub mod fair_loss_link;
 pub mod flooding_consensus;
