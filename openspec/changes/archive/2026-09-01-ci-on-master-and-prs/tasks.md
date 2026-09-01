@@ -44,6 +44,16 @@ once the link is deleted.
 
 ## 3. Prove the gate fails
 
+**Not done, and archived that way rather than quietly ticked.** A commit deliberately breaking
+formatting and a doc link was pushed to the branch, but it landed *after* PR #1 was merged, so the
+`pull_request` event no longer fired for that branch and no run was ever produced. It sits on
+`origin/ci-on-master-and-prs` for whenever this is picked up; `master` never contained it.
+
+What *is* evidenced: the pre-commit hook — which runs the same script — refused that commit and
+printed `FAIL: cargo fmt --check` beside the other checks' results, so the aggregation works and the
+gate catches both defects. That is the local half of 3.1 and 3.2. The CI half, and all of 3.3, are
+untested, and a workflow that has only ever passed is a workflow nobody has tested.
+
 - [ ] 3.1 Open a pull request that deliberately breaks one check — a formatting violation is the
       cheapest — and confirm CI goes red and the log names which check failed
 - [ ] 3.2 Confirm a run reports **every** failing check rather than stopping at the first: break two
@@ -68,9 +78,13 @@ once the link is deleted.
 - [x] 4.5 `concurrency: group: pages, cancel-in-progress: false` — the opposite of the gate's,
       because cancelling a deployment part-way leaves a half-written site where cancelling a
       superseded test run costs nothing
-- [ ] 4.6 Verify the published site: the three crates reachable from the landing page, a module's
+- [x] 4.6 Verify the published site: the three crates reachable from the landing page, a module's
       quoted pseudocode rendering as intended, and the intra-doc links resolving now that 1.1–1.6
-      are fixed
+      are fixed. All three confirmed against <https://cmsd2.github.io/recon/>: the landing page
+      links each crate and each returns 200, `epoch_consensus`'s quoted `⟨ ep, Propose ⟩` and
+      `⟨ ep, Abort ⟩ … halt` render inside the code block, and the repaired link resolves to
+      `struct.EpochConsensus.html#method.is_aborted`. The stronger evidence is that the deploy ran
+      at all: `check.sh` denies doc warnings and passed, so every link resolved at build time
 
 ## 5. What this dates
 
@@ -83,6 +97,7 @@ once the link is deleted.
 - [x] 5.3 The build instructions, which present `./scripts/check.sh` as something to remember to run
 - [x] 5.4 Point at the published API documentation where the README introduces the crates, since
       that is where a reader wanting it will be
-- [ ] 5.5 `./scripts/check.sh` passes locally — including its new check — and the workflow passes on
-      a pull request. The two being the same run is the point of the change.
-      **Local half done**: all eight checks pass. The CI half needs the workflow on GitHub
+- [x] 5.5 `./scripts/check.sh` passes locally — including its new check — and the workflow passes on
+      a pull request. The two being the same run is the point of the change. Both halves confirmed:
+      eight checks pass locally, and PR #1 ran green in 1m6s, with the merge to `master` green in
+      1m50s once the documentation job joined it
