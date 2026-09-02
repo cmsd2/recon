@@ -6,7 +6,7 @@
 
 use crate::config::Config;
 use crate::narrate::{Render, render};
-use crate::trace::{DropReason, Trace, TraceEvent};
+use crate::trace::{DropReason, NotBegun, OpId, ProtoTrace, ProtoTraceEvent, Trace, TraceEvent};
 use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -34,6 +34,9 @@ enum Scheduled<P: Protocol> {
     Command {
         node: NodeId,
         cmd: P::Cmd,
+        /// Names this operation in the trace. Carried so that whether it was handled or discarded,
+        /// the record says which operation it was.
+        op: OpId,
     },
     ScopeEvent {
         node: NodeId,
@@ -108,7 +111,9 @@ pub struct Sim<P: Protocol> {
     storage: BTreeMap<NodeId, MemStore<P::Meta, P::Entry>>,
     /// Processes whose next write is fatal — dying mid-`fsync`.
     doomed: BTreeSet<NodeId>,
-    trace: Trace<P::Msg, P::Ind, P::Note>,
+    trace: ProtoTrace<P>,
+    /// One source of operation identities for the whole run, as `next_timer` is for timers.
+    next_op: u64,
     /// What the current handler narrated, flushed into the trace when it returns. Empty, and never
     /// written to, unless the run was asked to record notes.
     notes: Vec<P::Note>,
@@ -121,12 +126,13 @@ pub struct Sim<P: Protocol> {
     codec_check: Option<CodecCheck<P::Msg>>,
     /// Renders each event as it is recorded. Absent unless the run was asked for it, exactly as
     /// the codec check is.
-    render: Option<Render<P::Msg, P::Ind, P::Note>>,
+    render: Option<Render<P>>,
 }
 
 impl<P> Sim<P>
 where
     P: Protocol,
+    P::Cmd: Clone,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Meta: Clone,
@@ -163,6 +169,7 @@ where
             storage: BTreeMap::new(),
             doomed: BTreeSet::new(),
             trace: Trace::default(),
+            next_op: 0,
             notes: Vec::new(),
             record_notes: false,
             effects: Vec::new(),
@@ -197,7 +204,7 @@ where
     }
 
     /// The record of what has happened so far.
-    pub fn trace(&self) -> &Trace<P::Msg, P::Ind, P::Note> {
+    pub fn trace(&self) -> &ProtoTrace<P> {
         &self.trace
     }
 
@@ -214,7 +221,7 @@ where
     ///
     /// Rendered *as* it is recorded rather than by a later walk over the trace, because a run that
     /// fails to terminate is one of the things worth reading.
-    fn record(&mut self, event: TraceEvent<P::Msg, P::Ind, P::Note>) {
+    fn record(&mut self, event: ProtoTraceEvent<P>) {
         if let Some(render) = self.render {
             render(&event);
         }
@@ -242,14 +249,21 @@ where
         self.nodes.keys().copied()
     }
 
-    /// Hand `cmd` to `node` at the current time.
-    pub fn command(&mut self, node: NodeId, cmd: P::Cmd) {
-        self.schedule(self.now, Scheduled::Command { node, cmd });
+    /// Hand `cmd` to `node` at the current time, and take an identity naming that operation.
+    ///
+    /// The identity is a return value rather than a parameter, so a caller with no interest in it
+    /// carries on as before. It names the operation in the trace: [`Trace::invoked_at`] says when
+    /// the process handled it, and [`Trace::why_not_begun`] says why it never did.
+    pub fn command(&mut self, node: NodeId, cmd: P::Cmd) -> OpId {
+        self.command_at(node, Duration::ZERO, cmd)
     }
 
-    /// Hand `cmd` to `node` after `after` has elapsed.
-    pub fn command_at(&mut self, node: NodeId, after: Duration, cmd: P::Cmd) {
-        self.schedule(self.now + after, Scheduled::Command { node, cmd });
+    /// Hand `cmd` to `node` after `after` has elapsed, and take an identity naming that operation.
+    pub fn command_at(&mut self, node: NodeId, after: Duration, cmd: P::Cmd) -> OpId {
+        let op = OpId(self.next_op);
+        self.next_op += 1;
+        self.schedule(self.now + after, Scheduled::Command { node, cmd, op });
+        op
     }
 
     /// Arm the next write by `node` to be the one it dies inside.
@@ -522,10 +536,18 @@ where
 
     fn dispatch(&mut self, item: Scheduled<P>) {
         match item {
-            Scheduled::Command { node, cmd } => {
-                if self.stopped(node) {
+            Scheduled::Command { node, cmd, op } => {
+                // Discarded rather than held when the process is not running, and recorded either
+                // way. A command is a call from the layer above, on this process — a stalled
+                // process's layer above is stalled with it, so there is nothing to delay. What was
+                // wrong before was the silence, not the discarding.
+                if let Some(why) = self.why_not_begun(node) {
+                    let at = self.now;
+                    self.record(TraceEvent::NotInvoked { at, node, op, cmd, why });
                     return;
                 }
+                let at = self.now;
+                self.record(TraceEvent::Invoked { at, node, op, cmd: cmd.clone() });
                 self.run_handler(node, |p, cx| p.on_cmd(cmd, cx));
             }
             Scheduled::Reconnect => {
@@ -602,6 +624,18 @@ where
     }
 
     /// Not handling events, for either reason.
+    /// Why an operation given to `node` cannot begin, or `None` if it can.
+    fn why_not_begun(&self, node: NodeId) -> Option<NotBegun> {
+        match self.nodes.get(&node) {
+            None => Some(NotBegun::NotAProcess),
+            Some(n) => match n.liveness {
+                Liveness::Running => None,
+                Liveness::Suspended => Some(NotBegun::Stalled),
+                Liveness::Crashed => Some(NotBegun::Crashed),
+            },
+        }
+    }
+
     fn stopped(&self, node: NodeId) -> bool {
         self.nodes.get(&node).map(|n| n.liveness != Liveness::Running).unwrap_or(true)
     }
@@ -778,6 +812,7 @@ where
 impl<P> Sim<P>
 where
     P: Protocol,
+    P::Cmd: Clone,
     P::Msg: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
     P::Ind: Clone,
     P::Meta: Clone,
@@ -799,6 +834,7 @@ where
     P::Msg: Clone + PartialEq + core::fmt::Debug,
     P::Ind: Clone + core::fmt::Debug,
     P::Note: core::fmt::Debug,
+    P::Cmd: Clone + core::fmt::Debug,
     P::Meta: Clone,
     P::Entry: Clone,
 {
@@ -812,7 +848,7 @@ where
     /// to them; without it the rendering shows the run, which is what the trace showed before this
     /// existed.
     pub fn enable_tracing(&mut self) {
-        self.render = Some(render::<P::Msg, P::Ind, P::Note>);
+        self.render = Some(render::<P>);
     }
 }
 
@@ -823,6 +859,7 @@ fn pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
 impl<P> Sim<P>
 where
     P: Protocol,
+    P::Cmd: Clone,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Meta: Clone,
@@ -1007,6 +1044,7 @@ where
 impl<P> Sim<P>
 where
     P: Protocol,
+    P::Cmd: Clone,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Meta: Clone,

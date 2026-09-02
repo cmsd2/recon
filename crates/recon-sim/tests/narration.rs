@@ -7,7 +7,7 @@
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
-use recon_sim::{Config, Sim, TraceEvent};
+use recon_sim::{Config, ProtoTraceEvent, Sim, TraceEvent};
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -86,7 +86,7 @@ fn a_narrated_decision_reaches_the_trace_with_the_process_and_the_instant() {
     s.command(A, Cmd::Offer(7));
     s.step_now();
 
-    let said: Vec<&TraceEvent<Wire, Got, Note>> =
+    let said: Vec<&ProtoTraceEvent<Picky>> =
         s.trace().events().iter().filter(|e| matches!(e, TraceEvent::Said { .. })).collect();
     assert_eq!(said.len(), 1);
     let TraceEvent::Said { at: said_at, node, note } = said[0] else { unreachable!() };
@@ -131,7 +131,7 @@ fn a_decision_to_do_nothing_leaves_only_its_note() {
 /// that fail, and every diagnosis reached by reading one would be a diagnosis of a different run.
 #[test]
 fn narrating_does_not_change_the_run() {
-    let strip = |s: &Sim<Picky>| -> Vec<TraceEvent<Wire, Got, Note>> {
+    let strip = |s: &Sim<Picky>| -> Vec<ProtoTraceEvent<Picky>> {
         s.trace()
             .events()
             .iter()

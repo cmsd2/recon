@@ -74,13 +74,18 @@ impl<C> Step<C> {
     where
         P: Protocol<Cmd = C>,
         C: Clone,
+        P::Cmd: Clone,
         P::Msg: Clone + PartialEq,
         P::Ind: Clone,
         P::Meta: Clone,
         P::Entry: Clone,
     {
         match self {
-            Step::Command { node, cmd } => sim.command(*node, cmd.clone()),
+            Step::Command { node, cmd } => {
+                // The identity is for a caller who wants to find the operation again; a scenario
+                // step is replayed rather than followed, so it has no use for one.
+                let _ = sim.command(*node, cmd.clone());
+            }
             Step::Crash(n) => sim.crash(*n),
             Step::Restart(n) => sim.restart(*n),
             Step::Suspend(n) => sim.suspend(*n),

@@ -20,24 +20,38 @@
 //! A run that fails to terminate is one of the things worth reading, and a renderer that walked a
 //! finished trace would have nothing to show for it.
 
-use crate::trace::TraceEvent;
+use crate::trace::{ProtoTraceEvent, TraceEvent};
 use core::fmt::Debug;
+use recon_core::Protocol;
 
 /// Renders one recorded event. A function pointer rather than a closure so that the simulator can
 /// hold it without acquiring `Debug` bounds it does not otherwise need — the same shape as the
 /// codec check.
-pub(crate) type Render<M, I, N> = fn(&TraceEvent<M, I, N>);
+pub(crate) type Render<P> = fn(&ProtoTraceEvent<P>);
 
 /// Emit one recorded event to whatever subscriber is installed.
 ///
 /// `at` is the run's virtual time on every event, and `node` names the process wherever the event
 /// has one. Everything the simulator does to a run is `DEBUG`; what a protocol *says* is `INFO`,
 /// because that is the half a reader is usually after and the half that is rare.
-pub(crate) fn render<M: Debug, I: Debug, N: Debug>(event: &TraceEvent<M, I, N>) {
+pub(crate) fn render<P>(event: &ProtoTraceEvent<P>)
+where
+    P: Protocol,
+    P::Msg: Debug,
+    P::Ind: Debug,
+    P::Note: Debug,
+    P::Cmd: Debug,
+{
     let at = event.at().as_offset();
     match event {
         TraceEvent::Said { node, note, .. } => {
             tracing::info!(target: "recon_sim", ?at, node = %node, ?note, "said");
+        }
+        TraceEvent::Invoked { node, op, cmd, .. } => {
+            tracing::info!(target: "recon_sim", ?at, node = %node, %op, ?cmd, "invoked");
+        }
+        TraceEvent::NotInvoked { node, op, cmd, why, .. } => {
+            tracing::info!(target: "recon_sim", ?at, node = %node, %op, ?cmd, ?why, "not invoked");
         }
         TraceEvent::Sent { from, to, msg, .. } => {
             tracing::debug!(target: "recon_sim", ?at, node = %from, %to, ?msg, "sent");

@@ -324,6 +324,7 @@ fn uniform_agreement_holds_through_partition_and_healing() {
 fn figure_3_3<Pr, F>(seed: u64, make: F, broadcast: impl FnOnce(&mut Sim<Pr>)) -> Vec<usize>
 where
     Pr: recon_core::Protocol,
+    Pr::Cmd: Clone,
     Pr::Msg: Clone + PartialEq,
     Pr::Ind: Clone,
     Pr::Meta: Clone,
@@ -348,7 +349,9 @@ fn reliable_broadcast_does_violate_uniform_agreement_under_the_same_test() {
         let c = figure_3_3(
             *seed,
             |me| ReliableBroadcast::new(me, ALL, retransmit()),
-            |s| s.command(A, rb::Cmd::Broadcast(1)),
+            |s| {
+                s.command(A, rb::Cmd::Broadcast(1));
+            },
         );
         c.iter().any(|x| *x > 0) && c.contains(&0)
     });

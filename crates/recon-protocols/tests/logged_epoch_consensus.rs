@@ -10,7 +10,7 @@ use recon_core::{Event, MemStore, NodeId, Time, step_with};
 use recon_protocols::logged_epoch_consensus::{
     Announce, Cmd, Ind, LoggedEpochConsensus, Reply, State, Tagged, Wire,
 };
-use recon_sim::{Config, Sim, TraceEvent};
+use recon_sim::{Config, ProtoTraceEvent, Sim, TraceEvent};
 
 mod common;
 use common::*;
@@ -51,17 +51,11 @@ fn all_decisions(s: &Sim<Lep>) -> Vec<u32> {
 }
 
 /// The index in the trace of the first event matching `f`.
-fn first_index(
-    s: &Sim<Lep>,
-    f: impl Fn(&TraceEvent<Wire<u32>, Ind<u32>, recon_protocols::Note>) -> bool,
-) -> Option<usize> {
+fn first_index(s: &Sim<Lep>, f: impl Fn(&ProtoTraceEvent<Lep>) -> bool) -> Option<usize> {
     s.trace().events().iter().position(f)
 }
 
-fn is_accept_from(
-    e: &TraceEvent<Wire<u32>, Ind<u32>, recon_protocols::Note>,
-    node: NodeId,
-) -> bool {
+fn is_accept_from(e: &ProtoTraceEvent<Lep>, node: NodeId) -> bool {
     matches!(
         e,
         TraceEvent::Sent { from, msg: Wire::Reply(t), .. }

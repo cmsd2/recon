@@ -17,4 +17,4 @@ pub use config::Config;
 pub use scenario::{Scenario, Step};
 pub use shrink::{Reduction, shrink};
 pub use sim::Sim;
-pub use trace::{DropReason, Trace, TraceEvent};
+pub use trace::{DropReason, NotBegun, OpId, ProtoTrace, ProtoTraceEvent, Trace, TraceEvent};

@@ -158,6 +158,11 @@ state and is *handed back* every timer, delivery and scope event that came due w
 dropping one would lose a message inside a session that never ended. What a stall does take is the
 clock. Properties are asserted over `s.trace()`, never over protocol internals.
 
+`command` and `command_at` return an `OpId` naming the operation, and the trace records it when the
+process handles it — or records that it never did, and why. Those are the left-hand ends of the
+intervals a checker reads; pairing them to completions waits for a port whose operations have
+replies.
+
 What protocols *say* goes into the same trace as what happened to them, once `record_notes()` asks
 for it, and `enable_tracing()` renders every recorded event to a `tracing` subscriber as it is
 recorded — with the process and the run's own virtual time, neither of which a global subscriber
@@ -380,7 +385,7 @@ protocol track                        evidence track
 ──────────────                        ──────────────
 1. accrual detector                   A. non-transitive partitions        ✓ built
 2. defensive re-announcement          B. per-node clocks, and skew
-3. bounding what grows                C. invocations in the trace
+3. bounding what grows                C. invocations in the trace          ✓ built
 4. a replicated-log port              D. indeterminate outcomes
 5. multi-Paxos ┐                      E. shrinking                        ✓ built
    ZAB         ├── over it ───┐       F. logging and tracing              ✓ built
@@ -531,25 +536,55 @@ The failure detector is *entirely* about time, and the accrual detector above de
 from measured intervals — so this is the fault that stack is most exposed to and least tested
 against. It is a real change to the simulator rather than a knob.
 
-#### C. Invocations in the trace
+#### C. Invocations in the trace ✓ built
 
-The foundational one, and small. `Sim::command` schedules an operation and never records it, and
-`TraceEvent` has `Indicated` but nothing for the invocation. So the trace holds completions without
-the instants that began them:
+The trace held completions without the instants that began them. `Sim::command` scheduled an
+operation and recorded nothing, so a run could say what a process *concluded* and never what it was
+*asked*:
 
 ```
-Jepsen history               this trace
-──────────────               ──────────
+Jepsen history               this trace, before
+──────────────               ──────────────────
 {:invoke :read  …}           (nothing)
 {:ok     :read 3}            Indicated { at, node, ind }
      ▲         ▲
      └─────────┴─ an interval        an instant
 ```
 
-Linearizability is *defined* over the interval `[invoke, complete]` — an operation may take effect
-anywhere inside it — so no checker is possible without this, whatever else is built. It pays for
-itself immediately regardless: no test can currently ask how long an operation took, or whether two
-of them overlapped.
+`Sim::command` and `command_at` now mint an `OpId` and return it, and `TraceEvent::Invoked` records
+the operation **when the handler ran** — not when the command was scheduled. A handler's effects
+cannot precede the handler, so that is a valid left-hand end of the interval containing the effect
+and a tighter one than the moment the caller asked; suites here routinely schedule a batch at time
+zero, and recording *that* would show every operation overlapping every other.
+
+A test can now ask when an operation began, how long it took, and whether two of them overlapped.
+None of that was possible before.
+
+**What it does not do is pair a completion to its invocation**, and that is deliberate rather than
+deferred work. The pairing does not exist in the algorithms here: every correct process raises
+`Ind::Decide`, including processes that proposed nothing, and the value need not be the proposer's; a
+broadcast's `Deliver` is an event arriving at a process rather than a reply to anything it asked.
+Marking indications with the operation they complete would be fiction for twenty-five of twenty-six
+modules, and fiction a checker would trust. It would also oblige every protocol to hold a
+driver-assigned identity across a crash, which is the defect the 2026-08 audit found three times.
+Pairing belongs to `4`, the replicated-log port, where an operation has a caller waiting for a
+result. Tests pair by hand meanwhile, knowing their own protocol — which is honest, because they do
+know and the simulator does not.
+
+**An operation can also no longer vanish.** A command to a process that is not running was discarded
+in silence; it is now recorded, with why — crashed, stalled, or not a process in this run. Asked-for
+and never-begun is a different fact from never-asked-for, and a record that cannot tell them apart is
+one a checker reasons from falsely.
+
+The stalled case is the interesting one, and the answer is not the obvious one. The simulator holds
+timers, deliveries and scope events for a suspended process, so holding commands looks like the
+missing case — but that rule is about network traffic inside a live session, where a message
+discarded with no `SessionEnded` to announce it is loss nobody is told of. A command is not that. A
+`Deliver` crosses into a stalled process from outside and waits in a receive buffer, which is a real
+thing; a `Cmd` comes from the layer *above*, on that same process, which is stalled with it. There is
+nothing between an application and its protocol to hold anything. So the discard was right and the
+silence was wrong, and only the silence is fixed — which also leaves *certainly did not happen*
+available as a fact, distinct from the *may or may not have happened* that `D` is about.
 
 #### D. Indeterminate outcomes
 
@@ -821,13 +856,14 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
+| [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded at the instant it was handled rather than scheduled, what a test can now ask that it could not, and an operation that never began recorded with why — crashed, stalled, or not a process | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-561 across the suites above, plus nine unit tests inside `recon-core` and five doctests — three
+571 across the suites above, plus nine unit tests inside `recon-core` and five doctests — three
 `compile_fail`, on the link and detector ports and on narrating without a vocabulary, and two worked
-examples of a storage slot — 575 in total,
+examples of a storage slot — 585 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.

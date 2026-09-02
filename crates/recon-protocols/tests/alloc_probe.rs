@@ -38,6 +38,7 @@ fn probe<P: recon_core::Protocol>(
     mut build: impl FnMut() -> Sim<P>,
     mut drive: impl FnMut(&mut Sim<P>, u32),
 ) where
+    P::Cmd: Clone,
     P::Msg: Clone + PartialEq,
     P::Ind: Clone,
     P::Meta: Clone,
@@ -91,7 +92,9 @@ fn measure() {
                 )
             })
         },
-        |s, i| s.command(ALL[0], urb::Cmd::Broadcast(i)),
+        |s, i| {
+            s.command(ALL[0], urb::Cmd::Broadcast(i));
+        },
     );
 
     use recon_protocols::best_effort_broadcast as beb;
@@ -103,7 +106,9 @@ fn measure() {
                 beb::BestEffortBroadcast::<u32>::new(me, ALL, Duration::from_millis(10))
             })
         },
-        |s, i| s.command(ALL[0], beb::Cmd::Broadcast(i)),
+        |s, i| {
+            s.command(ALL[0], beb::Cmd::Broadcast(i));
+        },
     );
 
     use recon_protocols::logged_uniform_reliable_broadcast as lurb;
@@ -115,7 +120,9 @@ fn measure() {
                 lurb::LoggedUniformReliableBroadcast::<u32>::new(me, ALL, Duration::from_millis(10))
             })
         },
-        |s, i| s.command(ALL[0], lurb::Cmd::Broadcast(i)),
+        |s, i| {
+            s.command(ALL[0], lurb::Cmd::Broadcast(i));
+        },
     );
 }
 

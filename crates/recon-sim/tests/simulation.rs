@@ -1,10 +1,9 @@
 //! Verifies the simulation contract using a deliberately trivial protocol, so that anything
 //! observed is the simulator's behaviour and not a protocol's.
 
-use core::convert::Infallible;
 use core::time::Duration;
 use recon_core::{NodeId, Position, ProtoCx, Protocol, Store, Time, TimerId};
-use recon_sim::{Config, DropReason, Sim, TraceEvent};
+use recon_sim::{Config, DropReason, ProtoTraceEvent, Sim, TraceEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -1382,7 +1381,7 @@ fn recovery_reads_and_acts_within_the_handler() {
     s.crash(A);
     s.restart(A);
 
-    let after: Vec<&TraceEvent<u32, Ledger, Infallible>> = s
+    let after: Vec<&ProtoTraceEvent<Keeper>> = s
         .trace()
         .events()
         .iter()

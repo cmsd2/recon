@@ -4,7 +4,38 @@
 //! was sent, what arrived, what was lost, and what each protocol claimed to deliver, which is
 //! exactly the vocabulary the guarantees are written in.
 
-use recon_core::{NodeId, Time, TimerId, WriteKind};
+use recon_core::{NodeId, Protocol, Time, TimerId, WriteKind};
+
+/// Names one operation given to a process, so a caller can find in the trace the thing it just
+/// asked for.
+///
+/// Minted by the run, like [`recon_core::TimerId`], and for the same reason: one source per run
+/// means two operations cannot share an identity. Unlike a timer handle it never reaches a
+/// protocol — commands are unchanged, and nothing above the simulator sees one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OpId(pub u64);
+
+impl core::fmt::Display for OpId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "op{}", self.0)
+    }
+}
+
+/// Why an operation never reached the process it was given to.
+///
+/// Carried rather than flattened away, because the next thing built on this has to tell these
+/// apart: an operation refused by a stall certainly did not happen, where one lost to a crash may
+/// have been half-done by the incarnation that died.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotBegun {
+    /// The process had crashed and not restarted. Its volatile state went with it.
+    Crashed,
+    /// The process was stalled. A command is a call from the layer above, on that process, so a
+    /// stalled process's layer above is stalled with it — there was nothing to make the call.
+    Stalled,
+    /// There is no such process in this run.
+    NotAProcess,
+}
 
 /// Why a message never arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +57,7 @@ pub enum DropReason {
 
 /// One thing that happened, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceEvent<M, I, N> {
+pub enum TraceEvent<M, I, N, C> {
     /// A protocol asked for a message to be transmitted.
     Sent { at: Time, from: NodeId, to: NodeId, msg: M },
     /// A message was handed to the recipient protocol.
@@ -62,6 +93,20 @@ pub enum TraceEvent<M, I, N> {
     /// deliberately not recorded: the point of the fault is that nobody knows until the recovered
     /// process reads its storage back.
     DiedWriting { at: Time, node: NodeId },
+    /// A process was given an operation, and handled it.
+    ///
+    /// Recorded when the handler ran, not when the command was scheduled. A handler's effects
+    /// cannot precede the handler, so this is a valid left-hand end of the interval containing the
+    /// operation's effect, and a tighter one than the moment the caller asked — which matters,
+    /// because a suite that schedules several commands at one instant would otherwise show them all
+    /// overlapping each other.
+    Invoked { at: Time, node: NodeId, op: OpId, cmd: C },
+    /// A process was given an operation and never handled it.
+    ///
+    /// Recorded rather than discarded silently: an operation asked for and never begun is not the
+    /// same as one never asked for, and a record that cannot tell them apart is one a checker would
+    /// reason from falsely.
+    NotInvoked { at: Time, node: NodeId, op: OpId, cmd: C, why: NotBegun },
     /// A process narrated a decision it took.
     ///
     /// The one event here that is not something that *happened to* a process. It is in the same
@@ -77,7 +122,7 @@ pub enum TraceEvent<M, I, N> {
     Recovered { at: Time, node: NodeId, had_state: bool },
 }
 
-impl<M, I, N> TraceEvent<M, I, N> {
+impl<M, I, N, C> TraceEvent<M, I, N, C> {
     pub fn at(&self) -> Time {
         match self {
             TraceEvent::Sent { at, .. }
@@ -97,6 +142,8 @@ impl<M, I, N> TraceEvent<M, I, N> {
             | TraceEvent::Wrote { at, .. }
             | TraceEvent::DiedWriting { at, .. }
             | TraceEvent::Said { at, .. }
+            | TraceEvent::Invoked { at, .. }
+            | TraceEvent::NotInvoked { at, .. }
             | TraceEvent::Recovered { at, .. } => *at,
         }
     }
@@ -104,23 +151,56 @@ impl<M, I, N> TraceEvent<M, I, N> {
 
 /// An ordered log of everything a run did.
 #[derive(Debug, Clone)]
-pub struct Trace<M, I, N> {
-    events: Vec<TraceEvent<M, I, N>>,
+pub struct Trace<M, I, N, C> {
+    events: Vec<TraceEvent<M, I, N, C>>,
 }
 
-impl<M, I, N> Default for Trace<M, I, N> {
+impl<M, I, N, C> Default for Trace<M, I, N, C> {
     fn default() -> Self {
         Trace { events: Vec::new() }
     }
 }
 
-impl<M, I, N> Trace<M, I, N> {
-    pub(crate) fn push(&mut self, e: TraceEvent<M, I, N>) {
+impl<M, I, N, C> Trace<M, I, N, C> {
+    pub(crate) fn push(&mut self, e: TraceEvent<M, I, N, C>) {
         self.events.push(e);
     }
 
-    pub fn events(&self) -> &[TraceEvent<M, I, N>] {
+    pub fn events(&self) -> &[TraceEvent<M, I, N, C>] {
         &self.events
+    }
+
+    /// Every operation that was handled, in order: which process, its identity, and the command.
+    ///
+    /// The left-hand ends of the intervals a checker needs. Pairing them with the indications that
+    /// completed them is not something the trace does — see the `simulation` capability.
+    pub fn invocations(&self) -> impl Iterator<Item = (NodeId, OpId, &C)> {
+        self.events.iter().filter_map(|e| match e {
+            TraceEvent::Invoked { node, op, cmd, .. } => Some((*node, *op, cmd)),
+            _ => None,
+        })
+    }
+
+    /// When `op` was handled, if it was.
+    pub fn invoked_at(&self, op: OpId) -> Option<Time> {
+        self.events.iter().find_map(|e| match e {
+            TraceEvent::Invoked { at, op: o, .. } if *o == op => Some(*at),
+            _ => None,
+        })
+    }
+
+    /// Every operation that never reached the process it was given to, and why.
+    pub fn not_begun(&self) -> impl Iterator<Item = (NodeId, OpId, NotBegun)> {
+        self.events.iter().filter_map(|e| match e {
+            TraceEvent::NotInvoked { node, op, why, .. } => Some((*node, *op, *why)),
+            _ => None,
+        })
+    }
+
+    /// Why `op` never began, if it did not. `None` covers both "it began" and "no such operation",
+    /// which [`Trace::invocations`] distinguishes.
+    pub fn why_not_begun(&self, op: OpId) -> Option<NotBegun> {
+        self.not_begun().find(|(_, o, _)| *o == op).map(|(_, _, why)| why)
     }
 
     /// Every decision narrated, in order, with the process that narrated it.
@@ -267,3 +347,19 @@ impl<M, I, N> Trace<M, I, N> {
         self.events.iter().filter(|e| matches!(e, TraceEvent::Indicated { .. })).count()
     }
 }
+
+/// The trace type for a given protocol.
+///
+/// A trace names all four of a protocol's outward vocabularies — what it was asked, what crossed
+/// the wire, what it concluded, what it said — so writing them out is four associated types every
+/// time. The same shape as `recon_core::ProtoCx`, and for the same reason.
+pub type ProtoTrace<P> =
+    Trace<<P as Protocol>::Msg, <P as Protocol>::Ind, <P as Protocol>::Note, <P as Protocol>::Cmd>;
+
+/// One event of a given protocol's trace.
+pub type ProtoTraceEvent<P> = TraceEvent<
+    <P as Protocol>::Msg,
+    <P as Protocol>::Ind,
+    <P as Protocol>::Note,
+    <P as Protocol>::Cmd,
+>;
