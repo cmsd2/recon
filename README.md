@@ -778,9 +778,10 @@ openspec/specs/
 │                                      majority-ack, the logged ones, and the
 │                                      two probabilistic ones
 └── consensus/                         flooding consensus, epoch-change, epoch
-                                       consensus, leader-driven consensus, and
-                                       the logged version of each of the last
-                                       three
+                                       consensus, leader-driven consensus, the
+                                       logged version of each of the last three,
+                                       the total-order log port and its two
+                                       members
 ```
 
 Work is proposed, applied and archived through OpenSpec. In Claude Code these are slash commands
@@ -890,16 +891,16 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
-| [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, and a non-vacuity half requiring the run to have contained overlapping operations | 17 |
-| [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart, a restarted process agrees with one that never failed, dying inside a write recovers consistently, that a recovered process settles rather than re-sending for ever, and that the growing halves are appended rather than rewritten | 6 |
+| [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, the survivors still ordering after a process crashes for good, and a non-vacuity half requiring the run to have contained overlapping operations | 19 |
+| [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart **from its own storage** — the restarted process is cut off from the network first, because the retransmission backlog can silently rebuild it and a durability test that allows that asserts nothing — agrees with a process that never failed, recovers consistently from dying inside a write, settles rather than re-sending for ever, appends something *new* after recovering, and appends the growing halves rather than rewriting them | 7 |
 | [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded at the instant it was handled rather than scheduled, what a test can now ask that it could not, and an operation that never began recorded with why — crashed, stalled, or not a process | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-594 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
+597 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
 `compile_fail`, on the link, detector and total-order-log ports and on narrating without a
-vocabulary, and two worked examples of a storage slot — 609 in total,
+vocabulary, and two worked examples of a storage slot — 612 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.

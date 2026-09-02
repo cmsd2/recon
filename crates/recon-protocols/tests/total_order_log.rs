@@ -12,25 +12,29 @@ use recon_protocols::total_order_log::{LogInd, TotalOrderLog};
 use recon_sim::{Config, Sim};
 
 mod common;
-use common::{A, ALL, B, BOUND, C, assert_send_rate_flat, timing};
+use common::{A, ALL, B, BOUND, C, D, E, assert_send_rate_flat, timing};
 
 type Tob = ConsensusBasedTotalOrderBroadcast<u32>;
 type Lutob = LoggedUniformTotalOrderBroadcast<u32>;
 
+// The step budget is raised for the same reason the fail-recovery member's own suite raises it:
+// a transcription's stubborn children retransmit for ever, the crash property runs two settle
+// windows, and `run_for` stops dispatching at the budget without saying so.
 fn crash_stop(seed: u64) -> Sim<Tob> {
-    Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, |me| {
-        Tob::new(me, ALL, timing())
-    })
+    let config = Config::default().seed(seed).synchronous(BOUND).max_steps(10_000_000);
+    Sim::new(config, &ALL, |me| Tob::new(me, ALL, timing()))
 }
 
 fn fail_recovery(seed: u64) -> Sim<Lutob> {
-    Sim::new(Config::default().seed(seed).synchronous(BOUND), &ALL, |me| {
-        Lutob::new(me, ALL, timing())
-    })
+    let config = Config::default().seed(seed).synchronous(BOUND).max_steps(10_000_000);
+    Sim::new(config, &ALL, |me| Lutob::new(me, ALL, timing()))
 }
 
 fn settle<P: Log>(s: &mut Sim<P>) {
-    s.run_for(Duration::from_millis(6000));
+    // Any later instant, not a sequencing device: rounds decide within ~300ms and detection takes
+    // 120ms, so this is still generous — while the idle churn beneath a settle is the stubborn
+    // children resending everything ever sent every tick, which is what makes a long window cost.
+    s.run_for(Duration::from_millis(2000));
 }
 
 /// The bounds every property below needs, written once. `Log` is the port; the rest is what the
@@ -219,6 +223,33 @@ fn prop_the_run_contained_overlapping_operations<P: Log>(mut s: Sim<P>) {
     assert!(!ordered_at(&s, A).is_empty());
 }
 
+/// Tolerating a crash is the algorithm's reason to exist — Algorithm 6.1 assumes fail-stop with a
+/// perfect failure detector, and the logged member a majority of correct processes — so a suite
+/// that only ever runs fault-free tests a protocol that consensus was not needed for. One process
+/// crashes for good, and the survivors must order an entry appended *after* the crash.
+fn prop_the_survivors_keep_ordering_after_a_crash<P: Log>(mut s: Sim<P>) {
+    s.command(A, P::append(1));
+    settle(&mut s);
+    assert!(!ordered_at(&s, A).is_empty(), "nothing was ordered before the crash");
+
+    s.crash(E);
+    s.command(B, P::append(2));
+    settle(&mut s);
+
+    let survivors = [A, B, C, D];
+    for node in survivors {
+        let seq = ordered_at(&s, node);
+        assert!(
+            seq.contains(&2),
+            "{node} never ordered the entry appended after the crash: {seq:?}"
+        );
+    }
+    let seqs: Vec<Vec<u32>> = survivors.iter().map(|n| ordered_at(&s, *n)).collect();
+    for seq in &seqs {
+        assert_eq!(*seq, seqs[0], "the survivors diverged: {seqs:?}");
+    }
+}
+
 /// The transcription's space statement, checked where it can be: what a run sends per window must
 /// not grow once the rounds have decided. The collections do grow with entries handled — that is
 /// the page, and both modules say so — but nothing re-sends more as time passes.
@@ -269,6 +300,10 @@ macro_rules! suite {
             #[test]
             fn the_send_rate_does_not_grow() {
                 prop_the_send_rate_does_not_grow($build(12));
+            }
+            #[test]
+            fn the_survivors_keep_ordering_after_a_crash() {
+                prop_the_survivors_keep_ordering_after_a_crash($build(7));
             }
         }
     };

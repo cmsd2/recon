@@ -92,9 +92,22 @@
 //!   rounds executed before the crash and executes the same consensus instances once more. *(We
 //!   assume that the runtime environment re-instantiates all instances of consensus that had been
 //!   dynamically initialized before the crash.)*" There is no such runtime here — a crash rebuilds
-//!   a process from its constructor and nothing else survives but storage — so the recovery branch
-//!   re-creates each round's instance as it re-proposes for it. The same shape of departure as the
-//!   conditional event handler: a facility the book assumes, discharged in the module.
+//!   a process from its constructor and nothing else survives but storage — so `on_recovery`
+//!   re-creates every instance the durable record names and runs each one's own recovery, all of
+//!   them before any decision is acted on: a decided instance announces its decision again from its
+//!   record, and an undecided one must have read its state back before recovery re-proposes into
+//!   it. The same shape of departure as the conditional event handler: a facility the book assumes,
+//!   discharged in the module.
+//!
+//! - **The decided prefix is replayed from the record, not re-decided.** The page rebuilds
+//!   `delivered` by running every round again, which is what its runtime's re-instantiated
+//!   instances are for. The appended `Record::Ordered` entries already hold the sequence in order,
+//!   so recovery replays them directly and the walk over re-announced decisions advances `round`
+//!   without appending or announcing anything twice — the same guard that makes duplicate decisions
+//!   harmless in a live run makes the replay idempotent. Each replayed entry *is* announced again,
+//!   once, for the reason [`crate::logged_leader_driven_consensus`] gives for re-announcing a
+//!   decision: the layer above may have crashed with this process and never seen the first
+//!   indication. Positions make the re-announcement idempotent for a client.
 //!
 //! - **The child that appends is composed through a sequence slot.** `logged_uniform_reliable_
 //!   broadcast` keeps an appended record of its own, and until this module nothing composed over a
@@ -376,6 +389,11 @@ impl<V: Clone + Ord> LoggedUniformTotalOrderBroadcast<V> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut Consensus<V>, &mut ProtoCx<'_, Consensus<V>>),
     ) {
+        // "Initialize a new instance luc.round" — an event, run before whatever provoked the
+        // creation; the crash-stop member's departures say what skipping it cost. An instance
+        // re-created by `on_recovery` takes the recovery branch there instead, and this path then
+        // finds it present.
+        let created = !self.consensus.contains_key(&r);
         self.consensus.entry(r).or_insert_with(|| {
             Child::new(LoggedLeaderDrivenConsensus::new(self.me, self.peers.clone(), self.timing))
         });
@@ -385,7 +403,12 @@ impl<V: Clone + Ord> LoggedUniformTotalOrderBroadcast<V> {
             move |m| Wire::Consensus { round: r, msg: m },
             round_slot::<V>(),
             r,
-            f,
+            |c, ccx| {
+                if created {
+                    c.on_init(ccx);
+                }
+                f(c, ccx)
+            },
         );
         for luc::Ind::Decide(decided) in inds.drain(..) {
             self.decisions.entry(r).or_insert(decided);
@@ -438,6 +461,98 @@ impl<V: Clone + Ord> Protocol for LoggedUniformTotalOrderBroadcast<V> {
 
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
         self.through_lurb(cx, |b, ccx| b.on_init(ccx));
+    }
+
+    /// `upon event ⟨ Recovery ⟩`, with the two facilities the page assumes discharged here: the
+    /// runtime that re-instantiates consensus instances, and the buffering behind `such that`.
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.recovering = true;
+
+        // `retrieve(proposals)` — and the ordered entries, which the page rebuilds by re-running
+        // every round and this module replays from its appended record instead; the departures say
+        // why, and why each replayed entry is announced again.
+        let records: Vec<Record<V>> =
+            cx.storage().read_from(Position::START).into_iter().cloned().collect();
+        for record in records {
+            match record {
+                Record::Ordered((from, value)) => {
+                    if self.ordered.contains(&(from, value.clone())) {
+                        continue;
+                    }
+                    let position = Position(self.delivered.len() as u64);
+                    self.delivered.push((from, value.clone()));
+                    self.ordered.insert((from, value.clone()));
+                    cx.indicate(Ind::Ordered { position, from, value });
+                }
+                Record::Proposed { round, batch } => {
+                    self.proposals.insert(round, batch);
+                }
+                // The child's, replayed by the child below through its own filtered view.
+                Record::Broadcast(_) => {}
+            }
+        }
+
+        // The broadcast re-announces its log — which rebuilds `unordered` — and re-sends what was
+        // still pending. `recovering` holds the proposal this would otherwise trigger.
+        self.through_lurb(cx, |b, ccx| b.on_recovery(ccx));
+
+        // Re-instantiate every consensus instance the durable record names, and recover all of
+        // them before acting on any decision. Not `through_consensus`: that drains after each
+        // instance, and the walk's re-proposal must never reach an instance that has not read its
+        // record back — a process that proposed and then forgot is the exact failure the durable
+        // proposal exists to prevent.
+        let rounds: Vec<u64> =
+            cx.storage().get().map(|d| d.rounds.keys().copied().collect()).unwrap_or_default();
+        for r in rounds {
+            self.consensus.entry(r).or_insert_with(|| {
+                Child::new(LoggedLeaderDrivenConsensus::new(
+                    self.me,
+                    self.peers.clone(),
+                    self.timing,
+                ))
+            });
+            let child = self.consensus.get_mut(&r).expect("just inserted");
+            let mut inds = child.run_keyed(
+                cx,
+                move |m| Wire::Consensus { round: r, msg: m },
+                round_slot::<V>(),
+                r,
+                |c, ccx| c.on_recovery(ccx),
+            );
+            for luc::Ind::Decide(decided) in inds.drain(..) {
+                self.decisions.entry(r).or_insert(decided);
+            }
+            if let Some(child) = self.consensus.get_mut(&r) {
+                child.reclaim(inds);
+            }
+        }
+
+        // Walk the re-announced decisions forward. Replayed entries are already in `ordered`, so
+        // the walk advances `round` without appending or announcing anything twice, and its
+        // recovering branch re-proposes for a round that was proposed and never decided.
+        let before = self.round;
+        self.drain_decisions(cx);
+
+        // The page's own Recovery handler: `if proposals[1] ≠ ⊥ then trigger ⟨ luc.1, Propose ⟩`.
+        // Needed only when the walk did not run — no round had decided — since the walk's
+        // recovering branch otherwise made this same choice at the round it stopped at. No recorded
+        // proposal means the crash landed before this process proposed anything still undecided,
+        // and recovery is over.
+        if self.recovering && self.round == before {
+            match self.proposals.get(&self.round).cloned() {
+                Some(batch) => {
+                    let round = self.round;
+                    self.through_consensus(round, cx, |c, ccx| {
+                        c.on_cmd(luc::Cmd::Propose(batch), ccx)
+                    });
+                }
+                None => {
+                    self.recovering = false;
+                    self.wait = false;
+                    self.maybe_propose(cx);
+                }
+            }
+        }
     }
 }
 

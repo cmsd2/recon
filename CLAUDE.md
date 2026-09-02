@@ -223,6 +223,32 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
   and the processes observing it — an accusation has an accuser and an accused, a stall has a
   staller and its peers. The audits found analyses that covered exactly one side, and the bug
   was on the other.
+- **A redundancy claim is tested with the other redundancies removed.** A restarted process can be
+  rebuilt by its own storage, by its peers, or by the retransmission backlog in flight at the crash
+  instant — a same-instant `crash` then `restart` leaves that backlog intact, and the stubborn
+  children keep a full replayable copy of the run in it. A durability test that leaves the network
+  up cannot say which mechanism it proved: the fail-recovery total-order broadcast shipped with no
+  `on_recovery` at all and its restart suite passed. Crash, drain the backlog against the dead
+  process, partition, then restart; only then does surviving state mean storage.
+- **A non-vacuity check has a place in the sequence, not only a presence in the test.** Asserting
+  `deaths_in_writes() > 0` after crash-and-restart once counted a death that happened *after* the
+  recovery it was meant to justify. Assert the fault occurred before the step that depends on it.
+- **A protocol constructed at run time is owed exactly one of `on_init` and `on_recovery` before
+  its first event.** The book's "Initialize a new instance" is an event its runtime delivers;
+  creating a child with `or_insert_with` and handing it a message skips it, and what goes missing
+  is whatever `on_init` would have started — detector timers, the first durable write. Nothing
+  fails until a fault needs the detector, which is the fault-knob rule's corollary: every composed
+  detector gets at least one test in which it must act. Both total-order members had this bug, and
+  the shared crash property is what caught it.
+- **A quiet window proves quiescence only if the step budget was not the reason.** `Sim::run_for`
+  returns normally once `max_steps` is spent, so a test's later phases can silently do nothing — a
+  post-recovery append once vanished this way. Raise the budget where a suite needs the room, and
+  treat an unexplained quiet window as suspect before treating it as settled.
+- **Assert the property, not a correlate.** "Appends outnumber rewrites" stood in for "the growing
+  halves are appended" and broke the moment detectors legitimately began rewriting their bounded
+  records. When the direct property is enforced by the types or invisible to the trace, say so in
+  the test and assert the minimal implication — a non-vacuity floor — rather than a ratio that
+  encodes an assumption about everything else's write cadence.
 
 ## The real-world set
 

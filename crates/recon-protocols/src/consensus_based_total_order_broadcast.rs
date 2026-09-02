@@ -59,7 +59,11 @@
 //!   `⟨ c.r, Decide ⟩`, so instances are a family addressed by round; the book's runtime routes to
 //!   them and this one does not. They are created on demand — including for a round this process has
 //!   not reached, which is what lets a peer that is ahead make progress — and never pruned, as the
-//!   page has them.
+//!   page has them. Creation runs the instance's `⟨ Init ⟩` before the event that provoked it:
+//!   "Initialize a new instance c.round" is an event the book's runtime delivers, and skipping it
+//!   leaves the instance's failure detector without its timers — which no fault-free run notices,
+//!   because deciding under the initial epoch never consults the detector. A crash is then never
+//!   detected and the survivors stall, which is what the suite's crash property caught.
 //!
 //! - **The conditional event handler is discharged here.** `such that r = round` is not a guard that
 //!   discards. The book states its meaning: "An algorithm that uses conditional event handlers
@@ -312,6 +316,9 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> ConsensusBasedTotalOrderBroadc
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut Consensus<V>, &mut ProtoCx<'_, Consensus<V>>),
     ) {
+        // "Initialize a new instance c.round of consensus" — an event, which runs before whatever
+        // provoked the creation. See the module's departures for what skipping it cost.
+        let created = !self.consensus.contains_key(&r);
         let entry = self.consensus.entry(r).or_insert_with(|| {
             Child::new(FloodingConsensus::new(
                 self.me,
@@ -321,7 +328,16 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> ConsensusBasedTotalOrderBroadc
                 self.timing.detect_after,
             ))
         });
-        let mut inds = entry.run(cx, |m| Wire::Consensus { round: r, msg: m }, f);
+        let mut inds = entry.run(
+            cx,
+            |m| Wire::Consensus { round: r, msg: m },
+            |c, ccx| {
+                if created {
+                    c.on_init(ccx);
+                }
+                f(c, ccx)
+            },
+        );
         for fc::Ind::Decide(decided) in inds.drain(..) {
             self.decisions.entry(r).or_insert(decided);
         }

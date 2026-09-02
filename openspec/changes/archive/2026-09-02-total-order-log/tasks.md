@@ -86,3 +86,31 @@ what is built.
       instance's outstanding set **is** released — by the child being replaced, not by `Stop` — which
       an edit of 2026-09-02 overstated
 - [x] 5.4 `./scripts/check.sh` passes in full
+
+## 6. The recovery that was not there, found by taking the network away
+
+- [x] 6.1 An audit found 4.2 checked and not built: no `on_recovery` existed, `recovering` was
+      never set true, the recovery branch in `drain_decisions` was dead code, and every durable
+      record was write-only. The restart tests passed anyway, because a crash and restart in the
+      same instant is rebuilt by the retransmission backlog in flight — the network's redundancy,
+      not storage's. Proven by partitioning the restarted process and draining the backlog against
+      the dead one first: it came back holding nothing
+- [x] 6.2 The restart tests now isolate: crash, drain, partition, then restart, so what survives
+      came from storage alone. The write-death test asserts the death preceded the restart — the
+      earlier form counted deaths over the whole run, and the one it counted came after the
+      recovery it was meant to justify. A recovered process also appends something new, per the
+      convention the suite had skipped
+- [x] 6.3 `on_recovery` implemented: replay the appended record — announcing each entry again, as
+      the logged consensus re-announces its decision — recover the broadcast child, re-instantiate
+      every consensus instance the durable record names before acting on any decision, then walk
+      the decisions forward and re-propose for the round that never decided
+- [x] 6.4 A shared crash property, and what it caught in **both** members: a dynamically created
+      consensus instance never received `⟨ Init ⟩`, so its failure detector had no timers. No
+      fault-free run notices, because deciding under the initial epoch never consults the
+      detector. Survivors could not detect a crash and stalled; a recovered process, hearing no
+      heartbeats, trusted itself and climbed epochs for ever with a linearly growing send rate.
+      Creation now runs the instance's `on_init` before the event that provoked it
+- [x] 6.5 Both suites raise `max_steps`: `run_for` stops dispatching at the budget without saying
+      so, and a post-recovery append silently vanished. That silent stop is the simulator
+      absorbing something without raising the event that says so, and is left here as an open
+      question for the sim rather than fixed in passing
