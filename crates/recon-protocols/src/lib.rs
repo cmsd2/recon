@@ -7,6 +7,7 @@
 //! The bottom abstraction, fair-loss links, is not here: it is what the simulator provides.
 
 pub mod best_effort_broadcast;
+pub mod consensus_based_total_order_broadcast;
 pub mod detector;
 pub mod epoch_change;
 pub mod epoch_consensus;
@@ -22,6 +23,7 @@ pub mod logged_epoch_consensus;
 pub mod logged_leader_driven_consensus;
 pub mod logged_link;
 pub mod logged_uniform_reliable_broadcast;
+pub mod logged_uniform_total_order_broadcast;
 pub mod majority_ack_uniform_reliable_broadcast;
 pub mod note;
 pub mod perfect_failure_detector;
@@ -33,9 +35,11 @@ pub mod stacks;
 pub mod stubborn_broadcast;
 pub mod stubborn_link;
 pub mod timing;
+pub mod total_order_log;
 pub mod uniform_reliable_broadcast;
 
 pub use best_effort_broadcast::BestEffortBroadcast;
+pub use consensus_based_total_order_broadcast::ConsensusBasedTotalOrderBroadcast;
 pub use detector::{Detector, DetectorInd};
 pub use eventually_perfect_failure_detector::EventuallyPerfectFailureDetector;
 pub use fair_loss_link::FairLossLink;
@@ -45,6 +49,7 @@ pub use logged_epoch_consensus::LoggedEpochConsensus;
 pub use logged_leader_driven_consensus::LoggedLeaderDrivenConsensus;
 pub use logged_link::LoggedLink;
 pub use logged_uniform_reliable_broadcast::LoggedUniformReliableBroadcast;
+pub use logged_uniform_total_order_broadcast::LoggedUniformTotalOrderBroadcast;
 pub use majority_ack_uniform_reliable_broadcast::MajorityAckUniformReliableBroadcast;
 pub use note::{Note, Refusal};
 pub use perfect_failure_detector::PerfectFailureDetector;
@@ -54,4 +59,5 @@ pub use session_link::SessionLink;
 pub use stubborn_broadcast::StubbornBroadcast;
 pub use stubborn_link::StubbornLink;
 pub use timing::Timing;
+pub use total_order_log::{LogInd, TotalOrderLog};
 pub use uniform_reliable_broadcast::UniformReliableBroadcast;

@@ -90,6 +90,8 @@ residual warning in the table.
 | `leader_driven_consensus` | one epoch consensus, replaced not accumulated | **membership** ✅ |
 | `logged_epoch_change` | `(startts, start)` — **in stable storage**, one value rewritten; `nacked`, per peer | **membership** for state and for work; the stubborn children's outstanding set grows with distinct announcements, not with time ⚠️ |
 | `logged_epoch_consensus` | `(valts, val)` and `epochdecision` — **in stable storage**, one value rewritten | **membership** for state and for work; the stubborn children hold one reply per follower per epoch ✅ |
+| `consensus_based_total_order_broadcast` | `unordered`, `delivered`, and one consensus instance per round | entries handled ❌ — **the page**, and the module says so |
+| `logged_uniform_total_order_broadcast` | the same three, and `delivered` and `proposals` **in stable storage** | entries handled ❌❌ — the page again |
 | `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership** for state and for work; inherits `logged_epoch_change`'s ⚠️ |
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the

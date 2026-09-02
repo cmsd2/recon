@@ -11,7 +11,7 @@
 //! or another child — and a borrow held across that would not compile. [`Child::reclaim`] puts the
 //! allocation back so it is reused across events, which is what `tests/alloc_probe.rs` measures.
 
-use crate::store::Slot;
+use crate::store::{KeyedSlot, SeqSlot, Slot};
 use crate::{Cx, ProtoCx, Protocol};
 use core::convert::Infallible;
 use core::ops::{Deref, DerefMut};
@@ -54,7 +54,7 @@ where
     pub fn run<M, I, Me, En>(
         &mut self,
         cx: &mut Cx<'_, M, I, P::Note, Me, En>,
-        wrap: fn(P::Msg) -> M,
+        wrap: impl Fn(P::Msg) -> M,
         f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>),
     ) -> Vec<P::Ind> {
         let mut inbox = core::mem::take(&mut self.inbox);
@@ -74,13 +74,53 @@ where
     pub fn run_durable<M, I, Me, En>(
         &mut self,
         cx: &mut Cx<'_, M, I, P::Note, Me, En>,
-        wrap: fn(P::Msg) -> M,
+        wrap: impl Fn(P::Msg) -> M,
         slot: Slot<Me, P::Meta>,
         f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>),
     ) -> Vec<P::Ind> {
         let mut inbox = core::mem::take(&mut self.inbox);
         let proto = &mut self.proto;
         cx.with_durable_child_consuming(wrap, &mut inbox, slot, |ccx| f(proto, ccx));
+        inbox
+    }
+}
+
+impl<P: Protocol> Child<P> {
+    /// [`Child::run_durable`], for one member of a family of durable children.
+    ///
+    /// See [`Cx::with_keyed_durable_child_consuming`].
+    pub fn run_keyed<M, I, Me, En, K>(
+        &mut self,
+        cx: &mut Cx<'_, M, I, P::Note, Me, En>,
+        wrap: impl Fn(P::Msg) -> M,
+        slot: KeyedSlot<Me, P::Meta, K>,
+        key: K,
+        f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>),
+    ) -> Vec<P::Ind>
+    where
+        P: Protocol<Entry = Infallible>,
+    {
+        let mut inbox = core::mem::take(&mut self.inbox);
+        let proto = &mut self.proto;
+        cx.with_keyed_durable_child_consuming(wrap, &mut inbox, slot, key, |ccx| f(proto, ccx));
+        inbox
+    }
+
+    /// [`Child::run_durable`], for a child that keeps metadata **and appends**.
+    ///
+    /// See [`Cx::with_durable_child`]: the child's entries go into the parent's one sequence, so
+    /// the order between a parent's entry and its child's is real rather than invented at recovery.
+    pub fn run_appending<M, I, Me, En>(
+        &mut self,
+        cx: &mut Cx<'_, M, I, P::Note, Me, En>,
+        wrap: impl Fn(P::Msg) -> M,
+        slot: Slot<Me, P::Meta>,
+        entries: SeqSlot<En, P::Entry>,
+        f: impl FnOnce(&mut P, &mut ProtoCx<'_, P>),
+    ) -> Vec<P::Ind> {
+        let mut inbox = core::mem::take(&mut self.inbox);
+        let proto = &mut self.proto;
+        cx.with_durable_child(wrap, &mut inbox, slot, entries, |ccx| f(proto, ccx));
         inbox
     }
 }

@@ -106,6 +106,13 @@ peers to have made a promise it has no record of. A protocol that keeps nothing 
 `Scope` is the interval a guarantee holds over — a session, an incarnation, a deadline. A protocol
 with no scopes writes `type Scope = Infallible`, and a scope end for it cannot be constructed.
 
+`Meta` and `Entry` split what is durable: a small value that is rewritten, and a sequence that
+accumulates. A child that keeps durable state is composed through a `Slot` naming its part of the
+parent's record — one write, not two. `SeqSlot` is the same for the appended half, so a parent and a
+child append into **one** sequence and the order between their entries is real rather than invented
+at recovery; `KeyedSlot` is for a *family* of children, one record per key, with the key passed as
+data so the slot stays one fixed function.
+
 `Note` is the vocabulary a protocol **narrates** its decisions in, through `cx.note(..)`. A record of
 effects says what a protocol did; it cannot say what a protocol decided, and it is completely silent
 about a decision whose outcome was to do nothing. A protocol that narrates nothing writes
@@ -277,6 +284,9 @@ restart.
 | Logged epoch-change | [`logged_epoch_change.rs`](crates/recon-protocols/src/logged_epoch_change.rs) | Module 5.6, Alg. 5.8 | **implementation** | bounded by membership, plus what the stubborn children hold |
 | Logged read/write epoch consensus | [`logged_epoch_consensus.rs`](crates/recon-protocols/src/logged_epoch_consensus.rs) | Module 5.7, Alg. 5.9 | **implementation** | bounded by membership, plus what the stubborn children hold |
 | Logged leader-driven consensus — Paxos | [`logged_leader_driven_consensus.rs`](crates/recon-protocols/src/logged_leader_driven_consensus.rs) | Module 5.5, Alg. 5.10–5.11 | **implementation** | bounded by membership, plus what the stubborn children hold |
+| Total-order log — the port | [`total_order_log.rs`](crates/recon-protocols/src/total_order_log.rs) | — | port | none |
+| Consensus-based total-order broadcast | [`consensus_based_total_order_broadcast.rs`](crates/recon-protocols/src/consensus_based_total_order_broadcast.rs) | Module 6.1, Alg. 6.1 | transcription | unbounded |
+| Logged uniform total-order broadcast | [`logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/src/logged_uniform_total_order_broadcast.rs) | Module 6.12, Alg. 6.12 | transcription | unbounded, in stable storage too |
 
 Two things change besides the indication. **Startup becomes a branch** — a process with nothing in
 storage is initialised, one with something is recovered, exactly one runs, and both can emit
@@ -499,22 +509,46 @@ to a scope. That is a change with a proposal.
 aborted or decided — and it costs no property, because `SL1` is conditioned on a sender that sends
 once and says nothing about one that retracts. It is a tidying, not this item.
 
-#### 4–5. A replicated-log port, and the protocols that implement it
+#### 4. A total-order log port ✓ built — and 5, the protocols that implement it
 
-The first object in this repository with a *concurrent* interface: a log that many clients append to
-and read from, with operations overlapping in time. Everything up to here decides one value once,
-which is why `H` cannot come earlier — see under it.
+The first object here with a *concurrent* interface: appends and reads that overlap in time, which
+is what `G` and `H` were waiting for and what nothing before this could offer. `total_order_log.rs`
+is the port, on the model of `link.rs` and `detector.rs`; the suite belongs to it and the
+implementations are type arguments, so a property is written once and both members are held to it.
 
-The port matters more than any one protocol behind it. Multi-Paxos, ZAB, viewstamped replication and
-Raft solve the same problem by different routes, and this repository's habit is to build such a pair
-and hold both to the same properties: uniform reliable broadcast against its majority-ack twin,
-flooding consensus against Paxos. Doing that here means the *suite* belongs to the port and the
-implementations are type arguments, exactly as the broadcasts take a link and Ω now takes a detector.
+**Two implementations, and the pair is the point.** `consensus_based_total_order_broadcast` is
+Algorithm 6.1 in the crash-stop model; `logged_uniform_total_order_broadcast` is the fail-recovery
+one. All eight shared properties run against both, and what differs is exactly one thing — whether
+the sequence survives a restart — which is asserted where the second one is.
 
-That is also what pays for the evidence track. A checker written against the port checks every
-protocol behind it; a nemesis schedule that breaks one can be replayed against the others. The
-comparison is the point — where they differ is in what they assume, and a shared suite is what makes
-the difference visible rather than asserted.
+**Both are transcriptions, and say so.** The book's construction runs one consensus instance per
+round in lock-step, so every entry pays a full consensus, and `unordered`, `delivered` and the
+family of instances all grow without bound. That is the page. Bounding any of them weakens a
+guarantee to a scope and belongs to its own change.
+
+One departure, in the port: **the book has no read.** Its abstraction is `Broadcast` and `Deliver`,
+and clients observe deliveries. Both algorithms nonetheless maintain `delivered`, so `read(from)`
+exposes what the page keeps and does not offer, served locally — the claim is a total order, not
+that a read sees the latest append.
+
+Building it cost three changes to `recon-core`, each found by the compiler rather than foreseen:
+
+- **Composition's mapper widened from `fn` to `impl Fn`.** A pointer captures nothing, so a parent
+  could not stamp a child's messages with its own state. Every layer before this was fine because
+  the stamp lives in the *child* — `epoch_consensus` writes `Tagged { ets, .. }` because the epoch is
+  its own identity. The round belongs to the parent, and the consensus has never heard of rounds.
+- **`SeqSlot`**, the sequence half of `Slot`. `store.rs` had described exactly this and declined to
+  build it: "nothing needs it… building it now would be the framework before its second consumer."
+  The second consumer is the fail-recovery member, which keeps a durable record of its own *and*
+  composes the one protocol here that appends.
+- **`KeyedSlot`**, for a *family* of durable children — one consensus instance per round, each
+  keeping its own record. The key is passed as data rather than captured, so a slot is still one
+  fixed function, which is what `Slot`'s own note about not capturing was protecting.
+
+**Item 5 has no page yet, and that is the open question.** Multi-Paxos is not in Cachin at all; the
+practical writeups are elsewhere — van Renesse & Altinbuken's *Paxos Made Moderately Complex*, and
+Kirsch & Amir's *Paxos for System Builders*. This repository's method is to quote the source and
+state departures, which needs a source. Choosing one is the first decision item 5 has to make.
 
 #### A. Non-transitive partitions — **built**
 
@@ -856,14 +890,16 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
+| [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, and a non-vacuity half requiring the run to have contained overlapping operations | 17 |
+| [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart, a restarted process agrees with one that never failed, dying inside a write recovers consistently, that a recovered process settles rather than re-sending for ever, and that the growing halves are appended rather than rewritten | 6 |
 | [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded at the instant it was handled rather than scheduled, what a test can now ask that it could not, and an operation that never began recorded with why — crashed, stalled, or not a process | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-571 across the suites above, plus nine unit tests inside `recon-core` and five doctests — three
-`compile_fail`, on the link and detector ports and on narrating without a vocabulary, and two worked
-examples of a storage slot — 585 in total,
+594 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
+`compile_fail`, on the link, detector and total-order-log ports and on narrating without a
+vocabulary, and two worked examples of a storage slot — 609 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.

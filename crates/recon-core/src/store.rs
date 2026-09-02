@@ -94,19 +94,19 @@ impl Store<Infallible, Infallible> for NoStore {
 /// assert_eq!((CHILD.write)(None, 7), Parent { mine: 0, childs: Some(7) });
 /// ```
 ///
-/// # The sequence half does not exist, and this is what it would be
+/// # The sequence half is [`SeqSlot`]
 ///
-/// A slot scopes the **metadata** only, so [`Cx::with_durable_child_consuming`] hands the child a
-/// store whose `Entry` is uninhabited: a child that appends cannot be composed, and the signature
-/// says so rather than a comment.
+/// A `Slot` scopes the **metadata** only, so [`Cx::with_durable_child_consuming`] hands the child a
+/// store whose `Entry` is uninhabited: such a child cannot append, and the signature says so rather
+/// than a comment. That is still the right default, and most durable children want nothing else.
 ///
-/// Scoping the sequence is a different shape. The parent's `Entry` would have to be a sum, the slot
-/// would carry `fn(CEn) -> En` and `fn(&En) -> Option<&CEn>`, `read_from` would filter to the
-/// child's variant, and the [`Position`]s the child saw would be the parent's — sparse, but still
-/// ordered and still comparable, which is all a cursor needs. Nothing needs it:
-/// `logged_uniform_reliable_broadcast` is the only protocol here that appends, and nothing composes
-/// over it. Building it now would be the failure this repository already documented — the framework
-/// before its second consumer.
+/// A child that *appends* is composed through [`SeqSlot`] as well, with
+/// [`Cx::with_durable_child`](crate::Cx::with_durable_child). This paragraph used to say the shape
+/// such a thing would take and that nothing needed it — "building it now would be the framework
+/// before its second consumer". The second consumer arrived: the fail-recovery total-order
+/// broadcast keeps a durable record of its own *and* composes
+/// `logged_uniform_reliable_broadcast`, which is the one protocol here that appends. What was
+/// built is what that paragraph described, unchanged.
 ///
 /// [`Cx::with_durable_child_consuming`]: crate::Cx::with_durable_child_consuming
 pub struct Slot<Parent, Child> {
@@ -192,6 +192,145 @@ impl<Parent, Child, En> Store<Child, Infallible> for SlotStore<'_, Parent, Child
 
     fn end(&self) -> Position {
         Position::START
+    }
+}
+
+/// Where a child's appended entries live inside its parent's sequence.
+///
+/// [`Slot`]'s counterpart, and the same idea one type along: the parent's `Entry` is a sum, the
+/// child's entries are one of its variants, and both append into **one** sequence rather than two.
+/// One sequence is what keeps the ordering between a parent's entry and its child's real — two
+/// would have no order between them at all, and a recovery replaying them would be inventing one.
+///
+/// `wrap` puts a child's entry into the parent's vocabulary; `project` takes it back out and says
+/// `None` for an entry that is not the child's.
+///
+/// # The positions the child sees are the parent's
+///
+/// The store handed to such a child filters the parent's sequence to the child's variant, so what the child
+/// reads back is its own entries in order — but the [`Position`]s are the parent's, and therefore
+/// **sparse**: a child's third entry may sit at position seven. That is deliberate and is all a
+/// cursor needs, since positions are only ever compared and advanced, never counted. A child that
+/// treated a position as an index into its own entries would be wrong, and would have been wrong
+/// about a plain store too.
+///
+/// `fn` pointers rather than closures, for the reason [`Slot`] gives: a slot names a fixed place in
+/// a type, and one that could close over state would name a different place on different calls.
+pub struct SeqSlot<Entry, ChildEntry> {
+    /// A child's entry, in the parent's vocabulary.
+    pub wrap: fn(ChildEntry) -> Entry,
+    /// The child's entry inside a parent's, or `None` if this entry is not the child's.
+    pub project: fn(&Entry) -> Option<&ChildEntry>,
+}
+
+impl<Entry, ChildEntry> Clone for SeqSlot<Entry, ChildEntry> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Entry, ChildEntry> Copy for SeqSlot<Entry, ChildEntry> {}
+
+impl<Entry, ChildEntry> core::fmt::Debug for SeqSlot<Entry, ChildEntry> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SeqSlot")
+    }
+}
+
+/// Where one of a *family* of children keeps its record, inside its parent's.
+///
+/// [`Slot`] names a fixed place, which is right when a parent has one child of a kind. A parent
+/// holding a family — one instance per round, per epoch, per slot of a log — needs a place *per
+/// member*, and the member is not known when the slot is written.
+///
+/// The key is **data, not a capture**. `read` and `write` stay `fn` pointers and take the key as an
+/// argument, so a keyed slot still names one fixed function; what varies is what it is applied to.
+/// That is what [`Slot`]'s own note means by "a slot must not capture": a slot closing over state
+/// would be a *different* function on different calls, and this is the same function every time.
+///
+/// The parent is responsible for the keyspace being a keyspace. Two children handed the same key
+/// share a record, exactly as two `Slot`s naming one field would.
+pub struct KeyedSlot<Parent, Child, K> {
+    /// The child's record for `key`, as it sits inside the parent's.
+    pub read: for<'a> fn(&'a Parent, &K) -> Option<&'a Child>,
+    /// The parent's record with the child's part for `key` replaced.
+    pub write: fn(Option<&Parent>, &K, Child) -> Parent,
+}
+
+impl<Parent, Child, K> Clone for KeyedSlot<Parent, Child, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Parent, Child, K> Copy for KeyedSlot<Parent, Child, K> {}
+
+impl<Parent, Child, K> core::fmt::Debug for KeyedSlot<Parent, Child, K> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("KeyedSlot")
+    }
+}
+
+/// What one member of a family of durable children is handed.
+pub(crate) struct KeyedSlotStore<'p, Parent, Child, K, En> {
+    pub(crate) parent: &'p mut dyn Store<Parent, En>,
+    pub(crate) slot: KeyedSlot<Parent, Child, K>,
+    pub(crate) key: K,
+}
+
+impl<Parent, Child, K, En> Store<Child, Infallible> for KeyedSlotStore<'_, Parent, Child, K, En> {
+    fn get(&self) -> Option<&Child> {
+        self.parent.get().and_then(|p| (self.slot.read)(p, &self.key))
+    }
+
+    fn set(&mut self, child: Child) {
+        // One write, as with a plain slot: the parent's whole record comes back with this member's
+        // part replaced.
+        let whole = (self.slot.write)(self.parent.get(), &self.key, child);
+        self.parent.set(whole);
+    }
+
+    fn append(&mut self, entry: Infallible) -> Position {
+        match entry {}
+    }
+
+    fn read_from(&self, _from: Position) -> Vec<&Infallible> {
+        Vec::new()
+    }
+
+    fn end(&self) -> Position {
+        Position::START
+    }
+}
+
+/// What a child that keeps metadata **and** appends is handed: both halves of its parent's record,
+/// scoped.
+pub(crate) struct FullSlotStore<'p, Parent, Child, En, CEn> {
+    pub(crate) parent: &'p mut dyn Store<Parent, En>,
+    pub(crate) slot: Slot<Parent, Child>,
+    pub(crate) entries: SeqSlot<En, CEn>,
+}
+
+impl<Parent, Child, En, CEn> Store<Child, CEn> for FullSlotStore<'_, Parent, Child, En, CEn> {
+    fn get(&self) -> Option<&Child> {
+        self.parent.get().and_then(self.slot.read)
+    }
+
+    fn set(&mut self, child: Child) {
+        let whole = (self.slot.write)(self.parent.get(), child);
+        self.parent.set(whole);
+    }
+
+    fn append(&mut self, entry: CEn) -> Position {
+        self.parent.append((self.entries.wrap)(entry))
+    }
+
+    fn read_from(&self, from: Position) -> Vec<&CEn> {
+        self.parent.read_from(from).into_iter().filter_map(self.entries.project).collect()
+    }
+
+    fn end(&self) -> Position {
+        self.parent.end()
     }
 }
 

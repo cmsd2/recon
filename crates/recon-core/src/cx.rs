@@ -1,8 +1,11 @@
 //! Where a protocol's effects go, and how it is told the time.
 
-use crate::store::{NoStore, Slot, SlotStore, Store};
+use crate::store::{
+    FullSlotStore, KeyedSlot, KeyedSlotStore, NoStore, SeqSlot, Slot, SlotStore, Store,
+};
 use crate::{Effect, NodeId, Time, TimerId};
 use core::convert::Infallible;
+use core::marker::PhantomData;
 use core::time::Duration;
 use rand::RngCore;
 
@@ -58,15 +61,28 @@ impl<N> NoteSink<N> for NoNotes {
 ///
 /// This is what makes composition free of intermediate buffers: the child pushes, the mapper
 /// re-wraps, and the parent's sink receives — in one step, with nothing collected in between.
-struct MapSink<'p, PM, PI, CM, CI> {
+///
+/// The mappers are `Fn` rather than `fn`, so a parent can stamp with its own state. Normally they
+/// are still enum variant constructors and a wrong one is a type error; what a bare pointer
+/// forbade is the case where the *parent* owns the child's identity. `total_order_broadcast` is the
+/// first: it holds one consensus instance per round, and the round is its concept rather than the
+/// consensus's, so unlike `epoch_consensus` — whose instance stamps its own messages because the
+/// epoch is its identity — the stamp cannot live in the child. `Effect::map` already took `FnOnce`;
+/// the sinks were the last place pinning a pointer.
+struct MapSink<'p, PM, PI, CM, CI, FM, FI> {
     parent: &'p mut dyn EffectSink<PM, PI>,
-    msg: fn(CM) -> PM,
-    ind: fn(CI) -> PI,
+    msg: FM,
+    ind: FI,
+    child: PhantomData<(CM, CI)>,
 }
 
-impl<PM, PI, CM, CI> EffectSink<CM, CI> for MapSink<'_, PM, PI, CM, CI> {
+impl<PM, PI, CM, CI, FM, FI> EffectSink<CM, CI> for MapSink<'_, PM, PI, CM, CI, FM, FI>
+where
+    FM: Fn(CM) -> PM,
+    FI: Fn(CI) -> PI,
+{
     fn emit(&mut self, effect: Effect<CM, CI>) {
-        self.parent.emit(effect.map(self.msg, self.ind));
+        self.parent.emit(effect.map(&self.msg, &self.ind));
     }
 }
 
@@ -76,13 +92,17 @@ impl<PM, PI, CM, CI> EffectSink<CM, CI> for MapSink<'_, PM, PI, CM, CI> {
 /// "a message arrived" is an *input* to the parent's logic, not an output of it. The parent
 /// cannot react during the call — it is already borrowed by the child — so indications are
 /// collected and processed once the child returns.
-struct ConsumeSink<'p, 'c, PM, PI, CM, CI> {
+struct ConsumeSink<'p, 'c, PM, PI, CM, CI, FM> {
     parent: &'p mut dyn EffectSink<PM, PI>,
     collected: &'c mut Vec<CI>,
-    msg: fn(CM) -> PM,
+    msg: FM,
+    child: PhantomData<CM>,
 }
 
-impl<PM, PI, CM, CI> EffectSink<CM, CI> for ConsumeSink<'_, '_, PM, PI, CM, CI> {
+impl<PM, PI, CM, CI, FM> EffectSink<CM, CI> for ConsumeSink<'_, '_, PM, PI, CM, CI, FM>
+where
+    FM: Fn(CM) -> PM,
+{
     fn emit(&mut self, effect: Effect<CM, CI>) {
         match effect {
             Effect::Send { to, msg } => self.parent.emit(Effect::Send { to, msg: (self.msg)(msg) }),
@@ -217,11 +237,11 @@ impl<'a, M, I, N, Me, En> Cx<'a, M, I, N, Me, En> {
     /// on to this context's sink.
     pub fn with_child<CM, CI>(
         &mut self,
-        msg: fn(CM) -> M,
-        ind: fn(CI) -> I,
+        msg: impl Fn(CM) -> M,
+        ind: impl Fn(CI) -> I,
         f: impl FnOnce(&mut Cx<'_, CM, CI, N, Infallible, Infallible>),
     ) {
-        let mut mapped = MapSink { parent: &mut *self.sink, msg, ind };
+        let mut mapped = MapSink { parent: &mut *self.sink, msg, ind, child: PhantomData };
         let mut none = NoStore;
         let mut child = Cx {
             sink: &mut mapped,
@@ -242,11 +262,11 @@ impl<'a, M, I, N, Me, En> Cx<'a, M, I, N, Me, En> {
     /// passed through. `collected` belongs to the caller and is reused across events.
     pub fn with_child_consuming<CM, CI>(
         &mut self,
-        msg: fn(CM) -> M,
+        msg: impl Fn(CM) -> M,
         collected: &mut Vec<CI>,
         f: impl FnOnce(&mut Cx<'_, CM, CI, N, Infallible, Infallible>),
     ) {
-        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg };
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg, child: PhantomData };
         let mut none = NoStore;
         let mut child = Cx {
             sink: &mut sink,
@@ -272,17 +292,80 @@ impl<'a, M, I, N, Me, En> Cx<'a, M, I, N, Me, En> {
     /// composes two children that each keep a record too, and whose recovery reads its children's
     /// records by name.
     ///
-    /// The child's `Entry` is uninhabited: a child that *appends* cannot be composed. [`Slot`]
-    /// documents why, and what the sequence half would look like if something needed it.
+    /// The child's `Entry` is uninhabited: a child composed this way cannot append. That is the
+    /// right default and most durable children want nothing else; one that *does* append is
+    /// composed with [`Cx::with_durable_child`] and a [`SeqSlot`] as well.
     pub fn with_durable_child_consuming<CM, CI, CMe>(
         &mut self,
-        msg: fn(CM) -> M,
+        msg: impl Fn(CM) -> M,
         collected: &mut Vec<CI>,
         slot: Slot<Me, CMe>,
         f: impl FnOnce(&mut Cx<'_, CM, CI, N, CMe, Infallible>),
     ) {
-        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg };
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg, child: PhantomData };
         let mut store = SlotStore { parent: &mut *self.store, slot };
+        let mut child = Cx {
+            sink: &mut sink,
+            now: self.now,
+            rng: &mut *self.rng,
+            store: &mut store,
+            next_timer: &mut *self.next_timer,
+            notes: &mut *self.notes,
+        };
+        f(&mut child);
+    }
+
+    /// [`Cx::with_durable_child_consuming`], for one member of a *family* of durable children.
+    ///
+    /// A [`Slot`] names a fixed place, which is right when a parent has one child of a kind. A
+    /// parent holding one instance per round needs a place per round, and `key` supplies it — as
+    /// data rather than as something the slot captured, so the slot is still one fixed function.
+    ///
+    /// The parent owns the keyspace: two members handed the same key share a record.
+    pub fn with_keyed_durable_child_consuming<CM, CI, CMe, K>(
+        &mut self,
+        msg: impl Fn(CM) -> M,
+        collected: &mut Vec<CI>,
+        slot: KeyedSlot<Me, CMe, K>,
+        key: K,
+        f: impl FnOnce(&mut Cx<'_, CM, CI, N, CMe, Infallible>),
+    ) {
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg, child: PhantomData };
+        let mut store = KeyedSlotStore { parent: &mut *self.store, slot, key };
+        let mut child = Cx {
+            sink: &mut sink,
+            now: self.now,
+            rng: &mut *self.rng,
+            store: &mut store,
+            next_timer: &mut *self.next_timer,
+            notes: &mut *self.notes,
+        };
+        f(&mut child);
+    }
+
+    /// [`Cx::with_durable_child_consuming`], for a child that keeps metadata **and appends**.
+    ///
+    /// The child's record lives in `slot` of this protocol's, exactly as before, and its entries go
+    /// into *this* protocol's sequence through `entries` — **one sequence, not two**. Two sequences
+    /// would have no order between them, and a recovery replaying both would be inventing one.
+    ///
+    /// The positions the child reads back are this protocol's, and therefore sparse: its third entry
+    /// may sit at position seven. [`SeqSlot`] says why that is all a cursor needs.
+    ///
+    /// [`Cx::with_durable_child_consuming`] remains the one to reach for. A child that cannot append
+    /// is one fewer thing to reason about, and its signature says it cannot; this exists because the
+    /// fail-recovery total-order broadcast keeps a durable record of its own and composes a child
+    /// that appends, which nothing did before.
+    pub fn with_durable_child<CM, CI, CMe, CEn>(
+        &mut self,
+        msg: impl Fn(CM) -> M,
+        collected: &mut Vec<CI>,
+        slot: Slot<Me, CMe>,
+        entries: SeqSlot<En, CEn>,
+        f: impl FnOnce(&mut Cx<'_, CM, CI, N, CMe, CEn>),
+    ) {
+        let mut sink = ConsumeSink { parent: &mut *self.sink, collected, msg, child: PhantomData };
+        let mut store = FullSlotStore { parent: &mut *self.store, slot, entries };
         let mut child = Cx {
             sink: &mut sink,
             now: self.now,
