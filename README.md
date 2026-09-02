@@ -380,7 +380,7 @@ protocol track                        evidence track
 ──────────────                        ──────────────
 1. accrual detector                   A. non-transitive partitions        ✓ built
 2. defensive re-announcement          B. per-node clocks, and skew
-3. Stop                               C. invocations in the trace
+3. bounding what grows                C. invocations in the trace
 4. a replicated-log port              D. indeterminate outcomes
 5. multi-Paxos ┐                      E. shrinking                        ✓ built
    ZAB         ├── over it ───┐       F. logging and tracing              ✓ built
@@ -432,10 +432,67 @@ re-announces it periodically, so a process that missed the edge converges withou
 to anticipate how it missed it. It costs standing traffic against a stack that is otherwise silent
 when idle, so it wants measuring rather than assuming, and it belongs to the real-world set.
 
-#### 3. `Stop`
+**The larger risk is not the traffic. It is that re-announcement hides the bugs it repairs.** This
+repository has the instance: the leader trusted by everyone that announced nothing was found
+*because nothing repaired it*. The stack deadlocked and stayed deadlocked, so a test could see it.
+Add periodic re-announcement and that run converges after one period — the test passes, and the
+defect beneath it sits there unfound until it resurfaces as latency, or under a longer period, or in
+the one configuration nobody ran. A safety net that catches silently is a bug-concealer.
 
-Every logged protocol here inherits an unbounded outstanding set from the stubborn children, because
-nothing ever retires a transmission — see [`docs/bounded-space.md`](docs/bounded-space.md).
+So the mechanism is only half of it. **A repair that is recorded and asserted on is a detector rather
+than a concealer**, and item `F` is what makes that possible: a re-announcement that actually changed
+something at the receiver narrates it, and the correctness suites assert the count. The assertion
+cannot be "never" — a process that was crashed or unreachable genuinely missed the edge, and
+repairing it is the feature working. The sharp form is attributable, and the trace holds everything
+it needs:
+
+> A repair is legitimate when the receiver **could not** have had the edge — down, unreachable, or
+> newly joined across the interval in which the edge was sent. A repair to a process that was up and
+> connected throughout is a bug upstream, and the test fails.
+
+A fault-free run therefore asserts zero repairs, and a faulted run asserts every repair falls inside
+a fault interval that explains it. The precedent is already here and already passes:
+[`epoch_change`'s suite](crates/recon-protocols/tests/epoch_change.rs) requires that a settled stack
+sends no reports at all. Generalising the mechanism without generalising that assertion is the way
+this item goes wrong.
+
+Two consequences. Its acceptance criteria include the attribution test, not only the traffic
+measurement. And it depends on `F` rather than being independent of it, which is one more reason `F`
+came first.
+
+#### 3. Bounding what actually grows
+
+This item used to read "`Stop`", on the reasoning that every logged protocol inherits an unbounded
+outstanding set from its stubborn children because nothing retires a transmission. The premise is
+true — **nothing in the repository calls `Stop`, on either the link or the broadcast** — but the
+conclusion had the causation backwards, and the item was aimed at the wrong target.
+
+A stubborn link's outstanding set is unbounded *because that is its specification*. Module 2.2's
+`SL1` is that a message sent once is delivered "an infinite number of times". A link that stopped
+would not be a bounded stubborn link, it would not be a stubborn link, and there is no such thing as
+a bounded one. Nothing would ever run it either; the answer to wanting a bounded link is a session
+link, which already exists here. See [`docs/bounded-space.md`](docs/bounded-space.md), whose table
+had marked this as a defect and no longer does.
+
+What genuinely grows without bound, and is the real content of this item:
+
+| | grows with |
+|---|---|
+| `perfect_link.delivered` | messages ever received |
+| `reliable_broadcast.delivered` | messages ever delivered |
+| `uniform_reliable_broadcast` — `pending`, `ack`, `delivered` | messages ever seen |
+| `logged_link.delivered`, `logged_uniform_reliable_broadcast` | messages ever seen, **in stable storage** |
+
+`Stop` is no help with any of them: they are all *receiver* state, and a sender letting go of a
+transmission does not tell a receiver it may forget having seen it. The mechanism is the one
+`docs/bounded-space.md` already describes — a delivered **cursor** rather than a delivered set, so
+an indication says "everything up to sequence `n`" and the state is bounded by membership. It costs
+per-sender ordering, which the link beneath does not currently promise, and it weakens the guarantee
+to a scope. That is a change with a proposal.
+
+`Stop` remains worth wiring where a layer genuinely knows a transmission is finished — an epoch that
+aborted or decided — and it costs no property, because `SL1` is conditioned on a sender that sends
+once and says nothing about one that retracts. It is a tidying, not this item.
 
 #### 4–5. A replicated-log port, and the protocols that implement it
 

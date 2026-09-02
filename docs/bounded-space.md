@@ -58,17 +58,21 @@ actually had; what it incidentally buys is that the claim above is now checked. 
 exhibits it turned up something the original investigation missed — **one process suffices**, with no
 peers at all, because a process is its own peer and answers its own redelivered broadcast.
 
-What the stubborn children hold outstanding is still never retired, because nothing calls `Stop`.
-For the consensus that is one reply per follower per epoch and the epoch's own three announcements
-— bounded, and retired by `Abort`. For `logged_epoch_change`, which has no ending, it is one
-transmission per *distinct* announcement or refusal, which grows with leadership changes rather
-than with time. That is the residual warning in the table.
+What the stubborn children hold outstanding is still never retired, because **nothing in this
+repository calls `Stop` at all** — not the link's and not the broadcast's. Only their own suites do.
+An earlier version of this paragraph said the consensus's set was "retired by `Abort`" in the
+sentence after the one saying nothing retires it; the second half was wrong, and the two were
+adjacent. For the consensus the set is bounded anyway — one reply per follower per epoch and the
+epoch's own three announcements — but it is bounded because an epoch is finite, not because anything
+lets go of it. For `logged_epoch_change`, which has no ending, it is one transmission per *distinct*
+announcement or refusal, which grows with leadership changes rather than with time. That is the
+residual warning in the table.
 
 | Protocol | State | Bounded by |
 |---|---|---|
 | `perfect_failure_detector` | `last_heard`, `detected`, `peers` | **membership** ✅ |
 | `best_effort_broadcast` | `peers` (plus its child) | **membership** ✅ |
-| `stubborn_link` | `sent` | messages ever sent ❌ |
+| `stubborn_link` | `sent` | **its own property.** SL1 is *infinite* delivery — see below ⚠️ |
 | `perfect_link` | `delivered` | messages ever received ❌ |
 | `reliable_broadcast` | `delivered` | messages ever delivered ❌ |
 | `uniform_reliable_broadcast` | `pending` (with payloads), `ack`, `delivered` | messages ever seen ❌ |
@@ -105,10 +109,25 @@ bounded by membership. It costs per-sender ordering, which the link beneath does
 promise, and it weakens the guarantee to a scope in the way §"Bounding changes the guarantee"
 describes. It is a change with a proposal, not a cleanup.
 
-The stubborn link is the worst of them, and not only in space. It has a `Stop` command and
-**nothing ever calls it** — the perfect link never stops retransmission, because Algorithm 2.2
-never does. So `sent` grows for ever and every entry is re-sent on every tick. Measured over 500ms
-with a 10ms interval, on a network with no loss where every message arrived on its first attempt:
+The stubborn link looks like the worst of them, and it is the one row in the table that is not a
+defect at all. **Its unboundedness is its specification.** Module 2.2, quoted:
+
+> **SL1: Stubborn delivery**: If a correct process `p` sends a message `m` once to a correct process
+> `q`, then `q` delivers `m` an **infinite number of times**.
+
+A link that stopped would not be a bounded stubborn link; it would not be a stubborn link. `sent`
+growing for ever is a faithful rendering of "an infinite number of times", and marking it ❌ was this
+document contradicting the distinction it exists to draw — inheriting the book's omissions is correct
+of a transcription, and infinite delivery is not even an omission, it is the stated property.
+
+What *is* true is that nothing calls `Stop`. The perfect link never does, because Algorithm 2.2 never
+does. `Stop` is a departure both modules document, and a conservative one: SL1 is conditioned on a
+sender that "sends `m` once" and says nothing about one that retracts, so with no caller the
+behaviour is exactly the book's. A layer that genuinely knows a transmission is finished could call
+it without costing a property. None does yet.
+
+So every entry is re-sent on every tick. Measured over 500ms with a 10ms interval, on a network with
+no loss where every message arrived on its first attempt:
 
 ```
  10 messages ->     510 sends on the wire,   10 outstanding retransmissions
@@ -117,9 +136,12 @@ with a 10ms interval, on a network with no loss where every message arrived on i
  80 messages ->   4 080 sends on the wire,   80 outstanding retransmissions
 ```
 
-Fifty-one transmissions per message, none of them needed, and the rate grows with every message
-ever sent. In a simulator this is a slow test. In a running system it is a link that degrades
-until it stops working.
+Fifty-one transmissions per message, and the rate grows with every message ever sent. Not "none of
+them needed", as this said before: under SL1 every one of them is the property being delivered on.
+They are unnecessary *operationally*, which is a different claim and the one that matters — in a
+simulator this is a slow test, and in a running system it is a link that degrades until it stops
+working. Which is why nothing would run it: the answer is a session link, not a bounded stubborn
+link. There is no bounded stubborn link.
 
 ## The first two bounded from the start
 

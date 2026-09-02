@@ -2,15 +2,20 @@
 //!
 //! Cachin, Guerraoui & Rodrigues, Module 2.2 and Algorithm 2.1 ("Retransmit Forever").
 //!
-//! **Status: academic. Space: unbounded.** This is how a perfect link is built when the only
-//! thing underneath is a lossy datagram service — the simulator's situation, and not a
-//! deployment's, where TCP and QUIC retransmit already. It stays because everything above needs a
+//! **Status: academic. Space: unbounded — and unboundable.** This is how a perfect link is built
+//! when the only thing underneath is a lossy datagram service — the simulator's situation, and not
+//! a deployment's, where TCP and QUIC retransmit already. It stays because everything above needs a
 //! perfect link and the simulator offers only fair-loss.
 //!
-//! `sent` grows with every transmission and nothing retires an entry unless the layer above stops
-//! it, which Algorithm 2.2 never does. Every entry is re-sent on every tick, so the cost grows
-//! with everything ever sent. See `docs/bounded-space.md`; the fix is not to bound this but to
-//! ship a session link instead.
+//! `sent` grows with every transmission, and that is not a defect to be fixed: **it is `SL1`.** The
+//! property below is that a message sent once is delivered *an infinite number of times*, so a link
+//! that let go would not be a bounded stubborn link — it would not be a stubborn link. There is no
+//! bounded form of this abstraction, and the answer to wanting one is [`crate::session_link`], not
+//! a smaller `sent`. See `docs/bounded-space.md`.
+//!
+//! What is true is that nothing retires an entry unless the layer above stops it, and nothing in
+//! this repository does — the perfect link never does, because Algorithm 2.2 never does. Every
+//! entry is therefore re-sent on every tick, and the cost grows with everything ever sent.
 //!
 //! Turns a fair-loss network into one where a message sent between correct processes is
 //! eventually delivered, by retransmitting it at a fixed interval. The cost is unbounded
@@ -42,6 +47,11 @@
 //! - Each transmission is named by a [`SendId`] so the layer above can retire it with
 //!   [`Cmd::Stop`]. The book has no such request and never lets go. See [`Cmd::Send`] for the
 //!   precondition that naming brings with it.
+//!
+//!   Conservative, and worth saying why: `SL1` is conditioned on a sender that sends `m` *once*,
+//!   and says nothing about one that retracts. So with no caller the behaviour is exactly the
+//!   book's, and a layer that genuinely knows a transmission is finished may stop it without
+//!   costing a property. Nothing in this repository calls it yet; only this module's own suite does.
 
 use core::time::Duration;
 use recon_core::{NodeId, ProtoCx, Protocol, TimerId};
@@ -49,8 +59,9 @@ use std::collections::BTreeMap;
 
 /// Identifies one stubborn transmission, so it can later be stopped.
 ///
-/// The book retransmits forever and never stops. A running system needs a way to let go, or
-/// `sent` grows without bound — so the caller names each transmission and can retire it.
+/// The book retransmits forever and never stops, which is `SL1` rather than an oversight. A caller
+/// that knows a transmission is finished may nonetheless let go of it, so each one is named. That
+/// is a retraction, which the property does not speak about — not a bound on the property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SendId(pub u64);
 
