@@ -1,15 +1,21 @@
 ## 1. The source, pinned
 
-- [ ] 1.1 Pin the edition before writing a line. This transcribes van Renesse, *Paxos Made
-      Moderately Complex*, Cornell University technical report, 25 March 2011 — Figures 2, 3 and 4,
-      §2. The 2015 ACM Computing Surveys version by van Renesse & Altinbüken is a different document
-      with different figure numbering, and README currently names *that* one. Verify by opening the
-      PDF and checking the figure numbers against what the module quotes
+- [ ] 1.1 Pin the edition before writing a line. This transcribes **van Renesse, R. and Altinbuken,
+      D. (2015) 'Paxos Made Moderately Complex', *ACM Computing Surveys*, 47(3), pp. 1–36** — §2, and
+      Figures 4 (acceptor), 6 (commander and scout) and 7 (leader). The 2011 Cornell technical report
+      of the same title is a different document with different figure numbering and a materially
+      different §4.2; it is not what this quotes. Verify by opening the survey and checking each
+      figure number against what the module quotes
 - [ ] 1.2 Extend `CLAUDE.md`'s reference material section: this is the first module here whose source
-      is a paper rather than Cachin, so the convention that a module quotes its page has to say which
-      paper and which edition. Verify the section names the report, its date, and the figures used
-- [ ] 1.3 Correct README's roadmap item 5, which names the 2015 survey. Verify the reference matches
-      what 1.1 pinned
+      is a paper rather than Cachin, so the convention that a module quotes its page has to name the
+      paper *and the edition*, since both editions exist under one title. Verify the section carries
+      the full reference and says which figures are used
+- [ ] 1.3 Verify README's roadmap item 5 names the same edition. It already names the survey, so this
+      is a check rather than a correction
+- [ ] 1.4 Record the cross-check source in the module's documentation: **Liu, Y.A., Chand, S. and
+      Stoller, S.D. (2019) 'Moderately Complex Paxos Made Simple'**, whose DistAlgo specification and
+      TLA+ proofs are where the liveness fixes in group 6 come from. Verify each fix cites it where it
+      departs from the survey's pseudocode
 
 ## 2. The wire and the ballot
 
@@ -17,14 +23,14 @@
       ordering's bottom. Verify with a unit test that any two ballots are comparable and that a
       ballot names its leader
 - [ ] 2.2 One message enum — `P1a`, `P1b`, `P2a`, `P2b` — carrying ballots and pvalues, the whole of
-      Figures 2 and 3. Verify it survives encoding, as every wire type here does
+      Figures 4 and 6. Verify it survives encoding, as every wire type here does
 - [ ] 2.3 State the ballot generator's scope in the module: **this incarnation**, volatile, and why
       the source makes that sufficient. Verify the documentation says what a re-minted ballot would
       break and that a durable counter is what a fail-recovery variant buys
 
 ## 3. The acceptor
 
-- [ ] 3.1 `ballot_num` and `accepted`, with Figure 2 quoted above them. `p1a` takes up a strictly
+- [ ] 3.1 `ballot_num` and `accepted`, with Figure 4 quoted above them. `p1a` takes up a strictly
       greater ballot and answers with everything accepted; `p2a` accepts under `b ≥ ballot_num`.
       Verify against a hand-driven test that a stale `p1a` is refused and that the refusal names the
       ballot that beat it
@@ -33,10 +39,10 @@
 
 ## 4. The leader, and its bookkeeping
 
-- [ ] 4.1 `ballot_num`, `active`, `proposals`, with Figure 4 quoted. Verify a proposal arriving while
+- [ ] 4.1 `ballot_num`, `active`, `proposals`, with Figure 7 quoted. Verify a proposal arriving while
       passive is remembered and sent once the ballot is adopted
 - [ ] 4.2 The scout as a field rather than a thread — one at a time, for this process's own ballots
-      only — collecting `p1b` to a majority and yielding the union of pvalues. Quote Figure 3(b) and
+      only — collecting `p1b` to a majority and yielding the union of pvalues. Quote Figure 6(b) and
       state in the module where each of its `switch receive` arms went. Verify adoption needs a
       majority and not one fewer
 - [ ] 4.3 `pmax` over the collected pvalues, and the update that replaces this leader's proposal for
@@ -44,7 +50,7 @@
       on. Verify directly: a proposal already accepted by a majority under a lower ballot is what the
       new leader proposes, not what it set out to propose
 - [ ] 4.4 Commanders as a map keyed by slot within the current ballot, collecting `p2b` to a
-      majority. Quote Figure 3(a). Verify at most one commander exists per slot per ballot —
+      majority. Quote Figure 6(a). Verify at most one commander exists per slot per ballot —
       Invariant C1 — and that a second proposal for a slot already commanded is not started
 - [ ] 4.5 `preempted` handling: move `ballot_num` past the ballot that beat it, go passive, and
       **do not** start a scout unless still trusted. Verify a preempted leader that Ω no longer
@@ -75,7 +81,17 @@
 - [ ] 6.2 One periodic timer resending `p1a` and `p2a` to acceptors that have not answered, compared
       against its own `TimerId` before acting. Verify a dropped request is retried and the round
       still completes
-- [ ] 6.3 Verify the send rate is flat: the retry set is bounded by the outstanding `waitfor` sets
+- [ ] 6.3 The three liveness fixes Liu et al. found in this specification, each reachable here
+      because this link loses messages, and each tested by dropping the message that causes it:
+      a lost `p1a` must not leave the leader waiting for ever (time out and restart phase one); a
+      lost `p2b` must not leave a slot undecided (resend `p2a`); and a lost `preempt` must not leave
+      the leader sending `p2a` for ever to acceptors that have moved to a higher ballot (**restart
+      phase one**, which resending cannot substitute for). Verify each with the specific message
+      dropped, not merely with lossy links switched on
+- [ ] 6.4 Record the fourth, which is the replica's and belongs to change 2 — no decision for a slot
+      wedges every replica once `WINDOW` fills, fixed by re-proposing after a timeout — so change 2
+      does not rediscover it. Verify it is written down where change 2 will find it
+- [ ] 6.5 Verify the send rate is flat: the retry set is bounded by the outstanding `waitfor` sets
       and therefore by membership, so `tests/common::assert_send_rate_flat!` should hold without the
       module doing anything special. This is the first thing here whose rate is flat by construction
 

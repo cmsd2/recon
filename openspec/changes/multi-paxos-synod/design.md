@@ -4,7 +4,7 @@ See `proposal.md` — Why, for the motivation and for why this source rather tha
 
 What shapes the approach here is that the source describes five *processes* that spawn threads —
 replica, acceptor, leader, scout, commander — and this repository has no threads, no spawning, and a
-composition model built for layers rather than for siblings. §4.3 of the paper says the roles are
+composition model built for layers rather than for siblings. §4.4 of the paper says the roles are
 co-located on one machine in practice, which is the shape to build; the question this design settles
 is which of them are protocols and which are bookkeeping.
 
@@ -21,7 +21,7 @@ Three constraints from `CLAUDE.md` bear directly:
 
 **Goals:**
 
-- One module readable against Figures 2, 3 and 4 of the source, with the pseudocode quoted above it.
+- One module readable against Figures 4, 6 and 7 of the source, with the pseudocode quoted above it.
 - Safety that holds unconditionally, asserted over runs containing competing ballots and crashes.
 - Progress claimed only where Ω settles, with the condition stated rather than assumed.
 - A shape that change 2 can put a replica on top of without rework.
@@ -41,7 +41,7 @@ The proposal guessed they would be a run-time family of `Child`ren keyed by ball
 that `KeyedSlot` was what they needed. Reading the figures says otherwise, and the deciding question
 is the one `link.rs` already asks: does this thing have a vocabulary of its own?
 
-It does not. An acceptor replies to the **leader**, not to the scout: Figure 2 sends
+It does not. An acceptor replies to the **leader**, not to the scout: Figure 4 sends
 `⟨p1b, self(), ballot_num, accepted⟩` to `λ`, and `⟨p2b, self(), ballot_num⟩` to `λ`. Scouts and
 commanders own no link, no timer, and no durable record. What a scout is, concretely, is a `waitfor`
 set and a union of pvalues; what a commander is, is a `waitfor` set. They are the leader's
@@ -62,13 +62,13 @@ here to justify itself.
 
 ### Acceptor and leader are one protocol, not two
 
-Per §4.3 the roles are co-located, and this repository's unit of composition is one protocol per
+Per §4.4 the roles are co-located, and this repository's unit of composition is one protocol per
 process. `MultiPaxosSynod` holds both roles as fields of itself rather than as children, for the same
 reason as above: neither has a vocabulary the other does not, and both send and receive on the same
 wire.
 
 The wire is one enum with four variants — `P1a`, `P1b`, `P2a`, `P2b` — carrying ballots and pvalues,
-which is the whole of Figures 2 and 3. A layer that adds no per-hop state adds no wire field, and
+which is the whole of Figures 4 and 6. A layer that adds no per-hop state adds no wire field, and
 this layer adds the ballot because the ballot is its own concept.
 
 *Alternative considered:* separate `Acceptor` and `Leader` protocols composed as children of a
@@ -132,8 +132,13 @@ So a returning process could lead under a fresh identity but must not be counted
 a reconfiguration admits it, and until then the cluster runs with one fewer acceptor than it was
 configured for — it tolerates one fewer failure, silently, which is the kind of degradation worth
 refusing rather than shipping. Keeping acceptor state on disk is cheaper than a reconfiguration
-protocol, which is why §5's exercise 8 says to do exactly that. The idea is not wrong; it is a
-membership change wearing a disguise, and membership changes are their own algorithm.
+protocol, which is why the source gives §4.3, *Keeping State on Disk*, instead. The idea is not wrong; it is
+a membership change wearing a disguise, and membership changes are their own algorithm — which this
+source has, so the disguise is unnecessary. §5's Cheap Paxos does exactly this and does it safely:
+it "reconfigures the system replacing the suspected acceptor with a fresh one", through the
+reconfiguration command rather than by swapping an identity underneath a fixed quorum. A returning
+process rejoining as a new acceptor is legitimate when a reconfiguration admits it and unsound when
+it just appears.
 
 ### The link is a type parameter defaulting to a session link
 
@@ -143,9 +148,35 @@ obligation is running over one, and this is the first module here that can meet 
 rather than after. `Boundary::Ended` is classified and propagated; this layer bridges nothing,
 holding no redundancy that outlives a session beyond the other processes.
 
+### Three liveness fixes from the cross-check, applied rather than discovered later
+
+Liu, Chand and Stoller (2019) specify this same algorithm in DistAlgo, prove it in TLA+, and report
+four liveness violations in the vRA specification **when messages can be lost**. That condition is
+not hypothetical here: this module runs over a link that loses messages, so all four are reachable
+and three are inside this change.
+
+| Where | What is lost | What happens | What the leader must do |
+|---|---|---|---|
+| Phase 1 | `p1a` | No `p1b` majority and no preemption ever arrives, so the leader waits for ever | time out the wait and start phase 1 again |
+| Phase 2 | `p2b` | No decision for that slot; if it happens at every leader, the replicas above stall too | resend `p2a` for that slot after a timeout |
+| Phase 2 | `preempt` | A majority has moved to a higher ballot, so `p2a` can never reach one — the leader sends for ever and decides nothing | start **phase 1** again after a timeout, not merely resend |
+
+The fourth is in the replica and belongs to change 2: if no decision arrives for a slot, every
+replica stops applying from that slot, `slot out` stops moving, `WINDOW` fills, and the system
+wedges. Its fix is for a replica to re-propose after a timeout. Recorded here so change 2 does not
+have to rediscover it.
+
+The third of these is the one worth naming, because it is what a naive design gets wrong. Resending
+`p2a` cannot help once a majority holds a higher ballot; the leader has to go back to phase 1. A
+single retransmission sweep over unanswered requests — which is what an earlier draft of this design
+described — recovers from the first two and loops for ever on the third.
+
 ### Timers
 
-One periodic timer, for retransmitting `p1a` and `p2a` to acceptors that have not answered. The
+One periodic timer, for retransmitting `p1a` and `p2a` to acceptors that have not answered, **and**
+for the two escalations above: a phase-one attempt that has neither adopted nor been preempted
+restarts, and a phase-two attempt that has neither decided nor been preempted goes back to phase
+one rather than resending indefinitely. The
 source assumes messages between non-faulty processes are eventually delivered and leaves
 retransmission implicit; a session link does not resend across an ending, so the leader owns the
 retry. The timer is compared against the registered `TimerId` before acting, as the convention
@@ -192,4 +223,33 @@ test that catches it not being.
 
 - **Whether the retry timer is per-outstanding-request or one sweep.** One sweep is simpler and
   bounded the same way; per-request gives tighter timing. Decidable when the retransmission test is
-  written.
+  written. Either way it carries the three escalations above, which is a question of what the timer
+  does rather than how many there are.
+
+## References
+
+- van Renesse, R. and Altinbuken, D. (2015) 'Paxos Made Moderately Complex', *ACM Computing
+  Surveys*, 47(3), pp. 1–36. doi:10.1145/2673577. **The source this module transcribes.** Figures 4
+  (acceptor), 6 (commander and scout) and 7 (leader); §2 for the protocol, §3 for liveness, §4 for
+  the pragmatics that change 3 will need — §4.1 state reduction, §4.2 garbage collection, §4.3
+  keeping state on disk, §4.4 colocation, §4.5 read-only commands, §4.6 exercises — and §5 for the
+  variants. The section numbering differs from the 2011 report's, which is one reason the edition has
+  to be named.
+- van Renesse, R. (2011) *Paxos Made Moderately Complex*. Technical report. Cornell University.
+  The earlier edition of the same title, superseded here and **not** what is quoted: its figures are
+  numbered differently and its §4.2 differs materially from the survey's.
+- Liu, Y.A., Chand, S. and Stoller, S.D. (2019) 'Moderately Complex Paxos Made Simple', in
+  *Proceedings of the 21st International Symposium on Principles and Practice of Declarative
+  Programming*, pp. 1–15. doi:10.1145/3354166.3354180. The cross-check: a DistAlgo specification of
+  the same algorithm with machine-checked TLA+ safety proofs, and the source of the three liveness
+  fixes above.
+- Kirsch, J. and Amir, Y. (2008) *Paxos for System Builders*. Technical Report CNDS-2008-2. Johns
+  Hopkins University. Considered and not chosen; `proposal.md` says why. Worth reading for its
+  Figures 6, 7 and 14, which specify leader election, the prepare phase and recovery more fully than
+  the survey does.
+- Lamport, L. (2001) 'Paxos Made Simple', *ACM SIGACT News*, 32(4), pp. 51–58. The `α` sketch that
+  the survey's `WINDOW` makes concrete.
+- Ongaro, D. and Ousterhout, J. (2014) 'In Search of an Understandable Consensus Algorithm', in
+  *Proceedings of the 2014 USENIX Annual Technical Conference*, pp. 305–319. Not a source for this
+  module; named because its §6 is the other fully specified membership change, should the survey's
+  reconfiguration prove awkward to transcribe.

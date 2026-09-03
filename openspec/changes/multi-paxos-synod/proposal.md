@@ -10,8 +10,11 @@ two worst rows in the audit.
 Multi-Paxos is what fixes that, by keeping the first phase for a stable leader instead of paying it
 per entry. README's roadmap item 5 has been blocked on a question rather than on work: Multi-Paxos
 is **not in Cachin at all**, and this repository's method needs a page to quote. This change answers
-it. The source is van Renesse, *Paxos Made Moderately Complex*, Cornell University technical report,
-25 March 2011.
+it. The source is van Renesse and Altinbuken (2015), *Paxos Made Moderately Complex* — the ACM
+Computing Surveys edition, not the 2011 Cornell technical report of the same title. The two differ
+enough to matter: figure numbering, a fuller treatment of §4's pragmatics, and reconfiguration
+throughout rather than in one sentence. README already named this edition; an earlier draft of this
+proposal named the report, and the discrepancy resolves here in the survey's favour.
 
 **That paper rather than the alternative, and the reason is `docs/bounded-space.md`.** Kirsch &
 Amir's *Paxos for System Builders* specifies more of what a deployment needs — leader election, view
@@ -20,10 +23,18 @@ as an adaptive timeout. But the protocol it specifies keeps a Global History ind
 number that is never truncated, and garbage collection appears in it only as something its
 unspecified `Paxos-complete` variant has. Transcribing it faithfully would reproduce exactly the
 defect this work exists to remove. *Paxos Made Moderately Complex* puts the bounding **on the page**:
-§4.1 has acceptors keep one maximum pvalue per slot rather than every pvalue, and §4.2 releases
-pvalues below a watermark. So the eventual module can be an *implementation* under
-`docs/bounded-space.md` while remaining a faithful transcription of its source, which is the thing
-no other candidate offers.
+§4.1 has acceptors keep only the most recently accepted pvalue per slot, and §4.2 collects the state
+below a watermark once at least `f + 1` replicas have learned a slot's decision, with the collected
+slot number carried in `p1b` so that a later leader does not read absence as "nothing was ever
+accepted". So the eventual module can be an *implementation* under `docs/bounded-space.md` while
+remaining a faithful transcription of its source, which is the thing no other candidate offers.
+
+**A second source, for cross-checking rather than transcribing.** Liu, Chand and Stoller (2019),
+*Moderately Complex Paxos Made Simple*, specifies the same algorithm in DistAlgo and proves it in
+TLA+. It reports four liveness violations in the vRA specification **when messages can be lost**,
+which is this repository's setting rather than a hypothetical one, and three of them are in the
+leader and land inside this change. They are listed in `design.md` and applied; the module cites
+them where it departs.
 
 **This change is the first of three.** §2 of the paper is the Synod protocol — acceptors, scouts,
 commanders and leaders — and its safety holds unconditionally: at most one proposal is ever chosen
@@ -36,9 +47,9 @@ port come next; bounding and entry to the real-world set after that.
 
 ## What Changes
 
-- **`multi_paxos_synod.rs`** — §2 of the paper, transcribed, with its Figures 2, 3 and 4 quoted
+- **`multi_paxos_synod.rs`** — §2 of the paper, transcribed, with its Figures 4, 6 and 7 quoted
   above the implementation as every module here quotes its algorithm. Four roles, co-located on one
-  process as §4.3 describes:
+  process as §4.4 describes:
   - an **acceptor**, holding `ballot_num` and `accepted`, answering `p1a` and `p2a`;
   - a **scout**, one per ballot, running phase one and reporting `adopted` or `preempted`;
   - a **commander**, one per (ballot, slot), running phase two and reporting a decision or
@@ -69,26 +80,28 @@ port come next; bounding and entry to the real-world set after that.
 
 Deliberately not in scope, each for its own later change:
 
-- **Slots, replicas and the log.** The replica of Figure 1, `slot_num`, `decisions`, and satisfying
+- **Slots, replicas and the log.** The replica of Figure 1, `slot in`, `slot out`, `decisions`, and
+  satisfying
   `TotalOrderLog` so the shared suite runs against it. Change 2.
-- **Bounding.** §4.1's state reduction and §4.2's garbage collection, and the decision §4.2 forces:
-  its watermark advances only when *all* replicas have performed a slot, so one crashed replica
-  stalls it forever, and the paper's two ways out — `2f + 1` replicas with a snapshot, or an adaptive
-  replica set — are both more than a transcription. Change 3, and what admits the module to the
-  real-world set.
-- **Leases and read-only commands.** §4.4 needs a known bound on clock drift. Per-node clocks are
+- **Bounding.** §4.1's state reduction and §4.2's garbage collection. Less is left open than an
+  earlier draft of this proposal claimed, which had read the 2011 report: the survey collects once
+  `f + 1` replicas have learned a decision rather than waiting for all of them, says what an acceptor
+  must carry in `p1b` so the collection is not mistaken for absence, and answers the case where too
+  few replicas remain to report — run `2f + 1` of them, or put the replica set in the configuration
+  and replace the suspicious ones. Change 3, and what admits the module to the real-world set.
+- **Leases and read-only commands.** §4.5 needs a known bound on clock drift. Per-node clocks are
   roadmap item `B` and do not exist.
-- **Changing the membership.** Acceptors are fixed for the run, and no edition of this source
-  specifies otherwise. The 2011 report mentions an adaptive set exactly once, in §4.2, as an
-  alternative way to unstick the garbage-collection watermark — and it is about the **replica** set,
-  which is the one whose membership does not threaten safety, sketched in a sentence with no protocol
-  behind it. Kirsch & Amir assume static membership outright. Adding or removing an *acceptor* is
-  what breaks quorum intersection, and it is a separate algorithm: Lamport sketches it in *Paxos Made
-  Simple* by making the configuration part of the replicated state and letting slot `i + α` use the
-  configuration decided at `i`, and Raft §6 specifies it properly through joint consensus. Whichever
-  is chosen, it needs its own change and its own source.
-- **Durability, and with it any process that returns having forgotten.** The paper's §5 exercise 8
-  keeps acceptor and leader state on stable storage. Until that exists this module is crash-stop, and
+- **Changing the membership**, which this source *does* specify and this change still does not build.
+  The survey is the "full reconfigurable" Paxos: a client proposes a special reconfiguration command,
+  it is decided in a slot like any other, and it takes effect at slot `s + WINDOW`, so up to `WINDOW`
+  proposals may be pending against a configuration that is still certain. That is Lamport's `α` from
+  *Paxos Made Simple* made concrete. It belongs with slots, because a configuration takes effect at a
+  slot and there are no slots until change 2 — so it is change 2's or change 3's, with a source
+  already chosen, rather than an open question. Kirsch and Amir assume static membership outright,
+  which is one more reason they are not the source here.
+- **Durability, and with it any process that returns having forgotten.** The paper's §4.3, *Keeping
+  State on Disk* — a section the 2011 report did not have at all — puts acceptor and leader state on
+  stable storage, and its exercise 7 says to implement it and to handle a crash mid-save. Until that exists this module is crash-stop, and
   that is the source's own model rather than a scope dodge: a crash there is permanent — a crashed
   state machine "will make no more transitions" — and a process that comes back off disk "is not
   theoretically considered crashed, it is simply slow for a while". There is no third case, and a
@@ -96,7 +109,7 @@ Deliberately not in scope, each for its own later change:
   boundary, because this simulator can produce that case and Ω will trust such a process again: the
   round counter restarts, a ballot is re-minted, and an acceptor still holding it can accept a second
   proposal under it. A durable ballot counter is what makes leading again after a restart legal, and
-  it belongs to the fail-recovery change with the rest of exercise 8.
+  it belongs to the fail-recovery change with the rest of §4.3.
 
 ## Capabilities
 
@@ -125,6 +138,6 @@ change 2's job.
   says so; change 3 is what alters that.
 - **`CLAUDE.md`** — the reference material section, which currently names only Cachin. This is the
   first module here whose source is a paper, so the convention that a module quotes its page needs to
-  say which paper and which edition. The 2011 technical report is what this transcribes; the 2015 ACM
-  Computing Surveys version by van Renesse & Altinbüken has different figure numbering and is a
-  different document for quoting purposes.
+  say which paper and which edition, in full. Both editions of *Paxos Made Moderately Complex* exist
+  and their figures are numbered differently, so naming the title alone is not enough to quote
+  against. `design.md` carries the reference list.

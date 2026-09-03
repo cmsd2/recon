@@ -112,8 +112,16 @@ capability buys by fixing it.
 
 The source admits two behaviours and no third. A crash is permanent — a crashed state machine "will
 make no more transitions and thus its current state is fixed indefinitely" — and a process that
-comes back off disk "is not theoretically considered crashed, it is simply slow for a while". A
-process that returns with nothing is the first case making transitions it is not allowed to make.
+comes back off disk "is not theoretically considered crashed—it is simply slow for a while. Only a
+process that suffers a permanent disk failure would be considered crashed." A process that returns
+with nothing is the first case making transitions it is not allowed to make.
+
+There is a third way out that this capability does not take, and the source does specify it: a
+returning process may rejoin as a **new** acceptor through a reconfiguration. That is safe because
+the configuration change is itself decided, so majorities are counted against a configuration both
+sides agree on. Swapping an identity underneath a fixed configuration is not the same thing and is
+not safe — majorities of two different acceptor sets need not intersect. Reconfiguration is a later
+change; until it exists, the boundary above is where this capability stops.
 
 It matters here because the simulator can produce that case and the eventual leader detector will
 trust such a process again. What breaks is ballot identity: the round counter restarts, the process
@@ -148,6 +156,21 @@ an ending. A layer above may need to know that an answer it was waiting for will
 
 - **WHEN** the link reports a session with a peer has ended
 - **THEN** this capability raises it, rather than treating the peer as merely slow
+
+### Requirement: The membership is fixed for the run
+
+The set of acceptors SHALL be fixed when the run begins, and this capability SHALL NOT add or remove
+one.
+
+Majorities are counted over that set, and the argument that two majorities intersect is what makes
+one proposal per slot hold. Changing the set without deciding the change is what breaks it. The
+source specifies how to change it safely — a reconfiguration command decided in a slot, taking
+effect a window of slots later — and that needs slots, which this capability does not have.
+
+#### Scenario: The acceptor set does not change
+
+- **WHEN** a run proceeds, with or without crashes
+- **THEN** the set of acceptors majorities are counted over is the one the run began with
 
 ### Requirement: The state is unbounded, and this is a transcription
 
