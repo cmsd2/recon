@@ -66,13 +66,19 @@ port come next; bounding and entry to the real-world set after that.
   session provides within itself; the scope-ended event is what tells the layer above that a suffix
   may have been lost. This is the first module to satisfy the real-world set's first obligation
   before it is a member rather than after.
-- **One departure, stated: liveness comes from Ω, not from the paper's pinging.** §3 has a preempted
+- **The main departure, stated: liveness comes from Ω, not from the paper's pinging.** §3 has a preempted
   leader monitor the preempting one by pinging it on a regular basis, backing off with an AIMD
   timeout, and says outright that "this concept is called failure detection". This repository
   already has an eventual leader detector, tested against a detector that lies. The leader composes
   `EventualLeaderDetector` and acts on `Trust`: it starts a scout for its next ballot when trusted
   and stays passive otherwise. The module states the difference — Ω names one leader where the
   paper's scheme lets any correct leader win a race — and what it costs.
+- **A second departure, in the acceptor: `p2a` accepts under `b ≥ ballot_num`, adopting the ballot
+  it accepts.** The survey's Figure 4 requires equality, and its commander treats any other reply
+  as a preemption; over a link that can lose a `p1a` at a session ending, that pairing lets an
+  acceptor that missed phase 1 kill a commander with a reply naming a lower ballot, and the slot
+  stalls until a timeout. The condition used is the 2011 report's, and is the fix Liu et al. give
+  for their useless-replies finding; `design.md` carries the scenario and the alternatives.
 - **A suite for the Synod protocol's own guarantees**, before there is a log to observe them
   through: at most one proposal is chosen per slot, a chosen proposal is one that was proposed, and
   a majority that has adopted a ballot cannot later accept a lower one. Plus the non-vacuity halves

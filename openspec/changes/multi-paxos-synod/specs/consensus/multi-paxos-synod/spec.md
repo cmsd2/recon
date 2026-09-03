@@ -58,7 +58,9 @@ for.
 
 An acceptor SHALL take up strictly increasing ballots, and SHALL accept a proposal only under the
 ballot it has currently taken up. Having taken up a ballot, it SHALL NOT afterwards accept anything
-under a lower one.
+under a lower one. Taking up MAY happen in the same transition as accepting: an acceptor offered a
+proposal under a ballot at least as high as its own takes that ballot up and accepts under it, so a
+process that missed a ballot's first phase still answers usefully in its second.
 
 This is what makes the intersection argument work: a majority that has taken up ballot `b` is a
 majority that can no longer accept anything below `b`, so a proposal chosen below `b` must already
@@ -74,6 +76,13 @@ be visible to whoever holds `b`.
 - **WHEN** a process is refused because a higher ballot exists
 - **THEN** it is told which ballot, so that it can take up a higher one rather than retrying the
   same one
+
+#### Scenario: An acceptor that missed phase 1 still counts in phase 2
+
+- **WHEN** an acceptor receives a proposal under a ballot at least as high as the one it holds,
+  having never received that ballot's phase 1 request
+- **THEN** it takes the ballot up, accepts the proposal under it, and its answer counts toward the
+  majority
 
 ### Requirement: Progress is conditional on a leader settling, and the module says so
 

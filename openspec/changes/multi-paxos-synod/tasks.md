@@ -31,11 +31,18 @@
 ## 3. The acceptor
 
 - [ ] 3.1 `ballot_num` and `accepted`, with Figure 4 quoted above them. `p1a` takes up a strictly
-      greater ballot and answers with everything accepted; `p2a` accepts under `b ≥ ballot_num`.
-      Verify against a hand-driven test that a stale `p1a` is refused and that the refusal names the
-      ballot that beat it
+      greater ballot and answers with everything accepted; `p2a` accepts under `b ≥ ballot_num` and
+      adopts `b` in the same transition — a stated departure from the quoted figure, whose condition
+      is `b = ballot_num`. The condition used is the 2011 report's, and is Liu et al.'s fix for the
+      useless-replies issue; `design.md` says why the survey's line does not survive this link.
+      Document it in the module's departures list with both editions named. Verify against a
+      hand-driven test that a stale `p1a` is refused and that the refusal names the ballot that beat
+      it
 - [ ] 3.2 Verify the promise is monotonic: an acceptor that has taken up a ballot never afterwards
       accepts under a lower one, asserted over a run that offers it lower ones
+- [ ] 3.3 Verify the departure does what it is for: an acceptor that never saw phase 1 for a ballot
+      receives that ballot's `p2a`, adopts and accepts, and its `p2b` counts toward the commander's
+      majority. Assert the non-vacuity half too — the acceptor really had not seen the `p1a`
 
 ## 4. The leader, and its bookkeeping
 
@@ -87,13 +94,20 @@
       lost `p2b` must not leave a slot undecided (resend `p2a`); and a lost `preempt` must not leave
       the leader sending `p2a` for ever to acceptors that have moved to a higher ballot (**restart
       phase one**, which resending cannot substitute for). Verify each with the specific message
-      dropped, not merely with lossy links switched on
-- [ ] 6.4 Record the fourth, which is the replica's and belongs to change 2 — no decision for a slot
+      dropped, not merely with lossy links switched on. Both restarts rerun phase one under the
+      **same** ballot, as `design.md` decides: verify the lost-preempt case ends with the leader
+      learning the higher ballot from a `p1b` answer rather than minting one blind
+- [ ] 6.4 Drive the route that motivated the acceptor departure end to end: one acceptor's `p1a`
+      dies at a session ending, the scout completes with a majority that excludes it, and the
+      retransmitted `p2a` reaches it cold. Verify its answer counts toward the decision and that no
+      commander exits on a ballot lower than its own
+- [ ] 6.5 Record the fourth, which is the replica's and belongs to change 2 — no decision for a slot
       wedges every replica once `WINDOW` fills, fixed by re-proposing after a timeout — so change 2
       does not rediscover it. Verify it is written down where change 2 will find it
-- [ ] 6.5 Verify the send rate is flat: the retry set is bounded by the outstanding `waitfor` sets
-      and therefore by membership, so `tests/common::assert_send_rate_flat!` should hold without the
-      module doing anything special. This is the first thing here whose rate is flat by construction
+- [ ] 6.6 Verify the send rate is flat once the work is done: the retry sweep is bounded by
+      membership times the slots still undecided, and a decided slot retires its commander and
+      leaves the sweep, so `tests/common::assert_send_rate_flat!` holds over the windows after the
+      last decision without the module doing anything special
 
 ## 7. Safety, asserted over runs
 
@@ -106,7 +120,22 @@
 - [ ] 7.4 Non-vacuity, and this suite needs both halves. "At most one chosen" is satisfied by a run
       that chooses nothing, and "no two disagree" by a run with one leader. Assert that something was
       chosen, that the run contained competing ballots, and that a preemption really happened —
-      `tests/method.rs` is the precedent
+      `tests/method.rs` is the precedent. Place each counter at the point in the schedule that
+      depends on it, and cover both roles: preemptor and preempted, refuser and refused
+- [ ] 7.5 A stepwise checker fed from the trace: per-acceptor promise history and per-slot chosen
+      sets, asserting after every event that promises only rise, accepts happen only at the
+      promise, one command exists per ballot and slot, and no two observers disagree on a slot —
+      so a violation names the first event that broke it and the seed replays it
+- [ ] 7.6 A seeded sweep: the property checks of 7.1–7.3 and the checker of 7.5 run across a batch
+      of seeds with loss, duplication, reordering and a partition window on, and a failure reports
+      its seed. Keep the batch small enough for `check.sh` and say in the test where to turn the
+      count up
+- [ ] 7.7 The sabotage check, in `check-durability-tests.sh`'s shape and its own script: two
+      feature-gated mutations — a leader that ignores `pmax`, an acceptor that accepts below its
+      promise — under each of which every registered safety test must fail. A test still green
+      under a mutation is reading something other than the property. Register the suite's safety
+      tests by name, run it when touching the module, and give README's guard table its row in the
+      same commit
 
 ## 8. The boundary this change does not cross
 

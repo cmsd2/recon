@@ -171,21 +171,101 @@ The third of these is the one worth naming, because it is what a naive design ge
 single retransmission sweep over unanswered requests — which is what an earlier draft of this design
 described — recovers from the first two and loops for ever on the third.
 
+The same paper has a fourth finding against these figures that is not a liveness violation, the
+useless reply from the acceptor, and it changes a line of Figure 4 here; it gets the next decision
+to itself.
+
+### The acceptor accepts under `b ≥ ballot_num`, which is the report's condition rather than the survey's
+
+The survey's Figure 4 accepts a pvalue only when `b = ballot_num`, and its Figure 6 commander
+treats any `p2b` naming a different ballot as a preemption. The two only compose because §2.3
+asserts that every `p2b` carries `b′ ≥ b`, and that assertion rests on the acceptor having seen
+phase 1 before phase 2, which this module's link does not provide. The case is concrete: an
+acceptor's `p1a` dies at a session ending, the scout completes with a majority that excludes it,
+and the retransmitted `p2a` finds `ballot_num < b`. Under the survey's text the acceptor refuses
+and replies with its own lower ballot; the commander reads the mismatch as a preemption and exits;
+the leader ignores the preemption because the ballot in it is below its own; and the retry sweep no
+longer covers the slot, because the `waitfor` set that drove it left with the commander. The slot
+stalls until the phase-two escalation notices, a whole timeout after the run held the majority it
+needed.
+
+So the acceptor here accepts under `b ≥ ballot_num` and adopts `b` in the same transition. That is
+the condition the 2011 report's Figure 2 uses, and it is the fix Liu et al. give for what they name
+the useless-replies issue in this acceptor. Every `p2b` then names a ballot at least as high as the
+request's, the commander's else-arm is a genuine preemption again, and the property §2.3 asserts
+without support holds here by construction. The departure is stated in the module beside the quoted
+Figure 4, with both editions named: this line is the one place in §2 where the two editions differ
+materially, which is why task 1.1 pins the edition before anything is transcribed.
+
+*Alternatives considered:* keep the survey's condition and have the commander ignore a `p2b` naming
+a lower ballot — rejected because the reply stays useless (Liu et al.'s point) and the acceptor
+stays unable to help with that ballot until the next phase 1; keep both figures verbatim and key
+the phase-two escalation to proposed-but-undecided slots rather than to live commanders — rejected
+as the most faithful reading and the slowest recovery, turning a reachable case into a full timeout
+plus a rerun of phase 1.
+
 ### Timers
 
 One periodic timer, for retransmitting `p1a` and `p2a` to acceptors that have not answered, **and**
 for the two escalations above: a phase-one attempt that has neither adopted nor been preempted
 restarts, and a phase-two attempt that has neither decided nor been preempted goes back to phase
-one rather than resending indefinitely. The
+one rather than resending indefinitely. Both escalations rerun phase one under the **same**
+ballot. For a lost `p1a` the rerun is idempotent: an acceptor that already adopted the ballot
+answers again and the scout recollects. For a lost preemption the rerun is how the leader learns
+what it missed: acceptors that moved answer `p1b` naming their higher ballot, the scout reports
+that as a preemption, and only then does `ballot_num` move. Minting a higher ballot on timeout was
+considered and rejected — it discards phase-two work already accepted under the current ballot and
+learns nothing a same-ballot rerun does not. The
 source assumes messages between non-faulty processes are eventually delivered and leaves
 retransmission implicit; a session link does not resend across an ending, so the leader owns the
 retry. The timer is compared against the registered `TimerId` before acting, as the convention
 requires.
 
-The retry set is bounded by the outstanding `waitfor` sets, which are bounded by membership — so
-unlike the stubborn children elsewhere, this does not resend the whole history every tick. Worth
-noting because it is the first thing here whose send rate is flat by construction rather than by a
-test that catches it not being.
+The retry set is the union of the outstanding `waitfor` sets. Each is bounded by membership, but
+their number is not: it grows with the slots proposed and not yet decided, so the sweep is bounded
+by membership times the slots in flight, and a stalled leader with many slots open resends in
+proportion to them. What retires a commander is its decision, so once the work completes the sweep
+is empty — which is the window `assert_send_rate_flat!` measures. Unlike the stubborn children
+elsewhere, nothing here resends history: a decided slot leaves the sweep, and only membership and
+the undecided frontier set its size.
+
+### How the suite earns its verdicts
+
+The simulator is the standard of evidence here, and this suite leans on it four ways. Each is a
+decision now so the apply phase does not improvise one.
+
+**Safety is checked at every step, not at the end of the run.** The agreement property compares
+what observers learned, and a comparison made once at the end points at nothing when it fails. The
+suite keeps a checker beside the sim, fed from the trace, holding per-acceptor promise history and
+per-slot chosen sets, and asserts after every event: promises only rise (A1), accepts happen only
+at the promise (A2), one command per ballot and slot (C1), and per-slot agreement. A violation then
+names the first event that broke it, and the seed replays it.
+
+**Schedules come from two sources, and both are needed.** Seeded sweeps — the same property checks
+run across a batch of seeds with loss, duplication, reordering and a partition window switched
+on — find the interleavings nobody thought of, and the failing seed is the reproduction. Hand-driven
+`step_with` schedules cover the edges randomness rarely lands on: adoption at exactly the majority
+and not one fewer, two leaders alternating phases over one slot, a preemption arriving between a
+majority's last `p2b` and the decision being noticed, the stale-`p2a` route of the acceptor
+departure. The sweep is evidence of breadth, the hand-driven schedules of depth, and neither
+substitutes for the other.
+
+**Every safety claim has a sabotage that must turn it red.** The durability guard's instrument
+generalises: break the thing a test claims to protect and require the red. Two feature-gated
+mutations, compiled only for this check, each remove one clause the safety argument rests on — a
+leader that ignores `pmax` and proposes what it set out to propose, and an acceptor that accepts
+below its promise. The safety suite runs under each, and every registered test must fail; one that
+stays green is not testing what it says. Agreement makes the same silent substitution available
+that durability did — a run with one settled leader satisfies it vacuously, whatever the code
+does — which is exactly the case the instrument exists for. Like the durability check, this
+rebuilds the crate per mutation and lives in its own script rather than in `check.sh`.
+
+**Non-vacuity counters have places in the sequence.** The counters the method requires — something
+was chosen, ballots really competed, a preemption really happened, a crash really landed before
+the step that depends on it — are asserted at their place in the schedule, not once at the end,
+per the convention that caught a death counted after the recovery it was meant to justify. And
+both roles get them, per the both-roles rule: the preempting leader and the preempted one, the
+acceptor that refused and the leader it refused.
 
 ## Risks / Trade-offs
 
