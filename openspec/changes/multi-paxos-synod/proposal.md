@@ -78,6 +78,15 @@ Deliberately not in scope, each for its own later change:
   real-world set.
 - **Leases and read-only commands.** §4.4 needs a known bound on clock drift. Per-node clocks are
   roadmap item `B` and do not exist.
+- **Changing the membership.** Acceptors are fixed for the run, and no edition of this source
+  specifies otherwise. The 2011 report mentions an adaptive set exactly once, in §4.2, as an
+  alternative way to unstick the garbage-collection watermark — and it is about the **replica** set,
+  which is the one whose membership does not threaten safety, sketched in a sentence with no protocol
+  behind it. Kirsch & Amir assume static membership outright. Adding or removing an *acceptor* is
+  what breaks quorum intersection, and it is a separate algorithm: Lamport sketches it in *Paxos Made
+  Simple* by making the configuration part of the replicated state and letting slot `i + α` use the
+  configuration decided at `i`, and Raft §6 specifies it properly through joint consensus. Whichever
+  is chosen, it needs its own change and its own source.
 - **Durability, and with it any process that returns having forgotten.** The paper's §5 exercise 8
   keeps acceptor and leader state on stable storage. Until that exists this module is crash-stop, and
   that is the source's own model rather than a scope dodge: a crash there is permanent — a crashed
