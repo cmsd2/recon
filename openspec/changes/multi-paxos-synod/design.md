@@ -1,0 +1,195 @@
+## Context
+
+See `proposal.md` — Why, for the motivation and for why this source rather than Kirsch & Amir.
+
+What shapes the approach here is that the source describes five *processes* that spawn threads —
+replica, acceptor, leader, scout, commander — and this repository has no threads, no spawning, and a
+composition model built for layers rather than for siblings. §4.3 of the paper says the roles are
+co-located on one machine in practice, which is the shape to build; the question this design settles
+is which of them are protocols and which are bookkeeping.
+
+Three constraints from `CLAUDE.md` bear directly:
+
+- **Constraint 4** — compose statically, and extract the framework only after two or three hand-written
+  consumers. Using machinery because it exists is the failure this repository already made.
+- **A timer is a handle, not a type**, so a layer that registers a timer compares before acting, and
+  an expiry is offered to every layer.
+- **Identity is as durable as the state it keys.** Ballot numbers cross the wire, so their generator
+  is state with a scope, and the scope has to be stated.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- One module readable against Figures 2, 3 and 4 of the source, with the pseudocode quoted above it.
+- Safety that holds unconditionally, asserted over runs containing competing ballots and crashes.
+- Progress claimed only where Ω settles, with the condition stated rather than assumed.
+- A shape that change 2 can put a replica on top of without rework.
+
+**Non-Goals:**
+
+- Any per-slot ordering, `slot_num`, or client-facing log. There is no `Replica` here; the leader is
+  driven directly by the suite, and slots are just numbers it is asked to fill.
+- Matching the source's process decomposition where this repository's own model contradicts it. The
+  algorithm is what must be faithful, not the concurrency structure of a paper written for threads.
+
+## Decisions
+
+### Scouts and commanders are state inside the leader, not child protocols
+
+The proposal guessed they would be a run-time family of `Child`ren keyed by ballot and slot, and
+that `KeyedSlot` was what they needed. Reading the figures says otherwise, and the deciding question
+is the one `link.rs` already asks: does this thing have a vocabulary of its own?
+
+It does not. An acceptor replies to the **leader**, not to the scout: Figure 2 sends
+`⟨p1b, self(), ballot_num, accepted⟩` to `λ`, and `⟨p2b, self(), ballot_num⟩` to `λ`. Scouts and
+commanders own no link, no timer, and no durable record. What a scout is, concretely, is a `waitfor`
+set and a union of pvalues; what a commander is, is a `waitfor` set. They are the leader's
+bookkeeping over responses it is already receiving, and the paper models them as threads because it
+is written in a language where a thread is the cheapest way to say "wait for a majority".
+
+So: `scout: Option<Scout>` and `commanders: BTreeMap<Slot, Commander>` as plain fields. The paper
+also constrains their number in ways worth encoding — a leader runs at most one scout, "only for its
+own ballots", and at most one commander per `(ballot, slot)` (Invariant C1). One optional scout and a
+map keyed by slot within the current ballot says both in the types.
+
+*Alternative considered:* make them `Child<Scout>` and a `BTreeMap<(Ballot, Slot), Child<Commander>>`,
+using the family machinery built two changes ago. Rejected because the wrap function would have
+nothing to wrap — the child would emit messages in the parent's own vocabulary — and because it would
+put the `on_init`-on-creation hazard into the one module that creates the most children. The
+machinery keeps its consumer in `logged_uniform_total_order_broadcast`; it does not need a second one
+here to justify itself.
+
+### Acceptor and leader are one protocol, not two
+
+Per §4.3 the roles are co-located, and this repository's unit of composition is one protocol per
+process. `MultiPaxosSynod` holds both roles as fields of itself rather than as children, for the same
+reason as above: neither has a vocabulary the other does not, and both send and receive on the same
+wire.
+
+The wire is one enum with four variants — `P1a`, `P1b`, `P2a`, `P2b` — carrying ballots and pvalues,
+which is the whole of Figures 2 and 3. A layer that adds no per-hop state adds no wire field, and
+this layer adds the ballot because the ballot is its own concept.
+
+*Alternative considered:* separate `Acceptor` and `Leader` protocols composed as children of a
+third. Rejected as two extra wrap functions and a message enum with a `Left`/`Right` split that buys
+nothing, since every message from either goes to the same peers over the same link.
+
+### Ω replaces the source's pinging, and the leader is passive by default
+
+§3 has a preempted leader ping the preempting one and back off with an AIMD timeout, and says
+outright that "this concept is called failure detection". This module composes
+`Child<EventualLeaderDetector>` and acts on `Trust`: start a scout for the next ballot when trusted,
+stay passive otherwise. A `preempted` message updates `ballot_num` past the ballot that beat it but
+does **not** start a scout unless this process is still trusted — which is what stops the duel the
+source's §3 opens by describing.
+
+The difference to state in the module: Ω names *one* leader, where the paper's scheme lets any
+correct leader win a race and simply makes the loser wait longer each time. Ω is the stronger
+assumption and the cheaper mechanism, and the chain it rests on is already written down link by link
+in `docs/conditional-guarantees.md`.
+
+*Alternative considered:* transcribe §3. Rejected as a second failure detector in the tree with its
+own timeout knob interacting with `detect_after`, to reimplement something already tested against a
+detector that lies.
+
+### Ballots are `(round, NodeId)`, and their scope is the incarnation
+
+Lexicographic pairs, as §2 has them, so a ballot names its leader and any two are comparable. The
+round counter is volatile, and the module says so: its scope is **this incarnation**, and the source
+is what makes that sufficient, because in its model a process that returns without its state has not
+recovered — it is a crashed process making a transition it is not permitted. See the spec
+requirement covering the boundary.
+
+What the module must not do is pretend the simulator cannot produce that case. It can, and Ω will
+trust such a process again, and the consequence is concrete: a re-minted ballot, an acceptor still
+holding it, and a second proposal accepted under one ballot and slot. The module documents that, and
+names the durable counter as what a fail-recovery variant buys.
+
+*Alternative considered: give a recovered process a fresh identity, so it cannot re-mint a ballot it
+has already used.* This works for one of the two roles and fails for the other, and the split is
+worth recording because it explains why the source reaches for a disk instead.
+
+**As a leader it is sound.** Ballot uniqueness is a proposer-side obligation, and the proposer set
+does not have to be fixed for safety — any process may propose under any ballot provided no ballot
+is ever reused for two different proposals. A returning process that leads under a new identity mints
+`(0, E′)`, which no acceptor has ever seen, so the hazard above disappears. The cost is that the
+fresh identity has to come from somewhere monotonic across incarnations, and with no disk that means
+an external source — a boot id, an incarnation number handed in at construction. That is a real
+assumption rather than a free one, and it is the same shape as the session-epoch idea in the
+reference notes: an identifier that increments on restart so the layer above is told this is a new
+incarnation rather than the old one continuing.
+
+**As an acceptor it breaks safety, and not subtly.** The acceptor set is what majorities are counted
+over, and changing it without a reconfiguration protocol destroys the intersection the whole argument
+rests on. With acceptors `{A, B, C, D, E}` and majorities of three: `{A, B, E}` accepts `⟨b, s, p⟩`,
+so `p` is chosen. `E` returns as `E′`. A later leader's scout collects from `{C, D, E′}` — a majority
+of the new set — and none of them has ever seen `⟨b, s, p⟩`, so `pmax` yields nothing for `s` and the
+leader is free to propose something else, which that same majority accepts. Two values chosen for one
+slot. The two majorities do not intersect, because they are majorities of different sets.
+
+So a returning process could lead under a fresh identity but must not be counted as an acceptor until
+a reconfiguration admits it, and until then the cluster runs with one fewer acceptor than it was
+configured for — it tolerates one fewer failure, silently, which is the kind of degradation worth
+refusing rather than shipping. Keeping acceptor state on disk is cheaper than a reconfiguration
+protocol, which is why §5's exercise 8 says to do exactly that. The idea is not wrong; it is a
+membership change wearing a disguise, and membership changes are their own algorithm.
+
+### The link is a type parameter defaulting to a session link
+
+`MultiPaxosSynod<L: Link = SessionLink<..>>`, following every other composing layer here. The
+default is the session link rather than the perfect link because the real-world set's first
+obligation is running over one, and this is the first module here that can meet it before joining
+rather than after. `Boundary::Ended` is classified and propagated; this layer bridges nothing,
+holding no redundancy that outlives a session beyond the other processes.
+
+### Timers
+
+One periodic timer, for retransmitting `p1a` and `p2a` to acceptors that have not answered. The
+source assumes messages between non-faulty processes are eventually delivered and leaves
+retransmission implicit; a session link does not resend across an ending, so the leader owns the
+retry. The timer is compared against the registered `TimerId` before acting, as the convention
+requires.
+
+The retry set is bounded by the outstanding `waitfor` sets, which are bounded by membership — so
+unlike the stubborn children elsewhere, this does not resend the whole history every tick. Worth
+noting because it is the first thing here whose send rate is flat by construction rather than by a
+test that catches it not being.
+
+## Risks / Trade-offs
+
+- **Scouts and commanders as plain state diverges structurally from the figures** → the module quotes
+  the figures and states the mapping explicitly: which fields are the scout's, which the commander's,
+  and where each `for ever / switch receive` arm went. The repository's method is reading code
+  against its quoted contract, so the mapping is part of the contract rather than a note.
+
+- **Ω's answer and the ballot's leader can disagree** → a process trusted by Ω that keeps being
+  preempted by a higher ballot from a process Ω does not trust will escalate on each `preempted`.
+  This terminates once Ω settles, which is exactly the conditional the spec states, but a test should
+  drive the disagreement rather than assume it does not happen — a run where the detector is wrong
+  for a while and the ballots reflect it.
+
+- **A crash-stop module in a repository with a fail-recovery simulator** → nothing prevents a test
+  from restarting one of these and getting an unsafe run. Mitigated by the spec requirement, the
+  module documentation, and a suite that crashes without restarting. Not mitigated by the type
+  system, and that should be said plainly rather than implied.
+
+- **Safety is a property over a whole run, not an assertion at a point** → the suite has to collect
+  what was chosen, per slot, across every process and every ballot, and compare. That needs the trace
+  rather than protocol state, since the point of the property is that no *pair* of observers
+  disagrees. Same shape as the total-order suite's agreement property.
+
+- **Non-vacuity is harder here than usual** → "at most one proposal chosen per slot" is satisfied by
+  a run that chooses nothing, and "no two disagree" by a run with one leader. Both halves need
+  asserting: that something was chosen, and that the run really contained competing ballots and a
+  preemption. `tests/method.rs` is the precedent.
+
+## Open Questions
+
+- **How many slots should the safety suite drive?** Enough that a leader has several commanders in
+  flight at once, which is what exercises Invariant C1, but the number is a tuning question that does
+  not change the specs or the tasks.
+
+- **Whether the retry timer is per-outstanding-request or one sweep.** One sweep is simpler and
+  bounded the same way; per-request gives tighter timing. Decidable when the retransmission test is
+  written.
