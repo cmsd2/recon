@@ -18,8 +18,14 @@ use common::{A, ALL, B, BOUND, C, assert_send_rate_flat, timing};
 /// children retransmit everything ever sent on every tick, so at any instant the network holds a
 /// full replayable copy of the run. A process crashed and restarted in the same instant is rebuilt
 /// by that backlog — the network's redundancy, which is the *crash-stop* member's story — and a
-/// durability test that allows it asserts nothing about storage. So: crash, run the backlog dry
-/// against the dead process, and only then restart.
+/// durability test that allows it asserts nothing about storage.
+///
+/// **The order is partition, then drain, then restart**, and it is the order that does the work.
+/// `Sim::partition` refuses *future* sends; it does not retract what is already scheduled, and one
+/// stubborn tick carries the whole history. Draining after the partition is what empties the queue
+/// A would otherwise wake up into. Partitioning after the drain leaves a delivery bound's worth in
+/// flight, which was enough to rebuild the log — the mutation audit caught exactly that in the
+/// write-death test below, one commit after this suite was supposedly fixed.
 const DRAIN: Duration = Duration::from_millis(100);
 
 type Lutob = LoggedUniformTotalOrderBroadcast<u32>;
@@ -60,12 +66,12 @@ fn the_ordered_sequence_survives_a_restart() {
     let before = held(&s, A);
     assert!(!before.is_empty(), "nothing was ordered, so nothing could survive");
 
-    // Crash, drain the in-flight backlog against the dead process, and cut A off before it comes
-    // back. What it then holds came from its own storage and nowhere else — which is the one thing
-    // this member claims and the crash-stop member does not.
+    // Cut A off, then drain what was already scheduled for it against the dead process, and only
+    // then bring it back. What it holds came from its own storage and nowhere else — which is the
+    // one thing this member claims and the crash-stop member does not.
     s.crash(A);
-    s.run_for(DRAIN);
     s.partition(&[&[A], &ALL[1..]]);
+    s.run_for(DRAIN);
     s.restart(A);
     settle(&mut s);
 
@@ -121,10 +127,10 @@ fn a_process_that_dies_inside_a_write_recovers_consistently() {
 
     assert!(s.trace().deaths_in_writes() > 0, "nobody died inside a write, so nothing was tested");
 
-    // A is down where the doomed write left it. Drain and isolate before restarting, as the
-    // restart test does: recovery must come from what landed, not from the backlog.
-    s.run_for(DRAIN);
+    // A is down where the doomed write left it. Isolate, then drain, then restart, as the test
+    // above does: recovery must come from what landed, not from the backlog.
     s.partition(&[&[A], &ALL[1..]]);
+    s.run_for(DRAIN);
     s.restart(A);
     settle(&mut s);
 
