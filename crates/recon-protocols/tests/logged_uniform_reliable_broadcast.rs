@@ -118,6 +118,12 @@ fn a_process_that_log_delivers_crashes_and_recovers_does_not_deliver_twice() {
 
     s.crash(C);
     s.restart(C);
+
+    // Before the wire says anything. Settling first and asserting one entry would pass whether the
+    // record suppressed the redelivery or C forgot and log-delivered it again — both end at one
+    // entry, so the assertion cannot tell them apart, and the mutation audit found it could not.
+    assert_eq!(log_of(&s, C), vec![(A, 4)], "C read its own record back, nothing having arrived");
+
     settle(&mut s); // the stubborn broadcast is still delivering it, over and over
 
     assert_eq!(log_of(&s, C), vec![(A, 4)], "still once, an incarnation later");

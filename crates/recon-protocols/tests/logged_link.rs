@@ -162,6 +162,13 @@ fn no_duplication_holds_across_a_restart() {
 
     s.crash(B);
     s.restart(B);
+
+    // Read before anything can arrive. Settling first and asserting the log holds `4` would pass
+    // whether the record suppressed the retransmission or B forgot and logged it afresh, since
+    // both end in a log of one message — the mutation audit found exactly that. What survived the
+    // restart is what B holds in the instant it comes back, before the wire says anything.
+    assert_eq!(log_of(&s, B), vec![4], "B read its own record back, with nothing having arrived");
+
     settle(&mut s); // ample time for many retransmissions to arrive
 
     assert_eq!(log_of(&s, B), vec![4], "still exactly once, an incarnation later");

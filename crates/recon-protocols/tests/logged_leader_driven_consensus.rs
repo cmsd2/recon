@@ -317,13 +317,21 @@ fn the_parent_and_both_children_keep_their_own_part_of_one_record() {
 
     s.crash(C);
     s.restart(C);
-    s.run_for(heartbeat());
 
+    // Read before the wire says anything. Running a heartbeat first and then asserting these four
+    // would pass with C's storage entirely wiped — E is still leading, the epoch re-establishes and
+    // the decision comes back — so the assertions would be about the network rather than about the
+    // one record this test exists to check. The mutation audit found exactly that.
     let p = s.at(C);
     assert!(p.epoch() > 0, "the parent lost its epoch");
     assert_eq!(p.leader(), E, "the parent lost its leader");
     assert_eq!(p.decision(), Some(&9), "the parent lost its decision");
     assert_eq!(p.state().val, Some(9), "the epoch consensus child lost what it accepted");
+
+    // And it rejoins on what it read back, rather than the read-back being inert.
+    s.run_for(heartbeat());
+    let p = s.at(C);
+    assert_eq!(p.decision(), Some(&9), "and it still holds it once the run continues");
 }
 
 #[test]

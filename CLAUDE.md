@@ -249,6 +249,22 @@ Errors get `thiserror` types per layer. The string `"json decoding error"` shoul
   records. When the direct property is enforced by the types or invisible to the trace, say so in
   the test and assert the minimal implication — a non-vacuity floor — rather than a ratio that
   encodes an assumption about everything else's write cadence.
+- **A partition does not retract what is already in flight.** `Sim::partition` and `Sim::sever`
+  refuse *future* sends; everything already scheduled stays in the queue and is delivered. So the
+  order for isolating a process is **partition, then drain, then restart** — draining after the
+  partition is what empties the queue it would otherwise wake up into. Getting this backwards
+  leaves a delivery bound's worth of traffic due, and one stubborn tick carries the whole history,
+  which is exactly the redundancy the isolation was removing.
+- **Break the thing a test claims to protect, and watch it go red.** A durability test that passes
+  when storage is wiped is testing the network. The sweep is one line — clear the node's store
+  inside `Sim::restart` so every recovery starts empty — and then any test still green either does
+  not depend on durability or does not test it. Run against the whole crate it took 22 tests to 25:
+  it found `the_parent_and_both_children_keep_their_own_part_of_one_record`, whose own comment says
+  a half-written record would go unnoticed until recovery and which could not have noticed, and it
+  found a leak in a test written the day before *specifically* to close this hole. Reading cannot
+  do this; two tests with identical structure and intent differed in whether they actually leaked.
+  The same instrument generalises: to check a test tests what it says, break that thing and require
+  the red.
 
 ## The real-world set
 
