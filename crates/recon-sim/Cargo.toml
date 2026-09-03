@@ -6,6 +6,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[features]
+# Storage does not survive a restart. Off in every normal build; `scripts/check-durability-tests.sh`
+# turns it on to ask which tests would notice. See `Sim::restart`.
+lose-storage-on-restart = []
+
 [dependencies]
 recon-core = { workspace = true }
 rand = { workspace = true }

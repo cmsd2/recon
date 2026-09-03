@@ -832,6 +832,22 @@ at runtime rather than loud — each one is a bug that would otherwise be found 
 | `cargo clippy -D warnings` | any lint | warnings accumulate and hide real diagnostics |
 | `cargo doc -D warnings` | a broken intra-doc link | a docstring naming something that is not there asserts a contract the code does not have, and it fails silently — the link just renders as text. It had already happened four times when the check was added: `Cmd::Start` documented in two modules as the way to begin a broadcast after the command was removed, a deleted `ScopedLink` still explained, and a renamed method still linked |
 
+One more check is deliberately outside that set, in
+[`check-durability-tests.sh`](scripts/check-durability-tests.sh), because it rebuilds the crate
+under a feature and runs the suites again — a minute, against the seconds the others cost. It
+breaks the thing and requires the red: `--features lose-storage-on-restart` makes `Sim::restart`
+discard what was written, and the twenty-five tests registered in the script must then fail. One
+that passes is reading the network rather than the disk, and in this project the network is always
+an available answer — the stubborn children retransmit everything they have ever sent on every
+tick, so the backlog in flight holds a full replayable copy of the run, and a process that crashes
+and comes straight back is repopulated by its peers within one settle.
+
+Reading cannot substitute for it. The audit that produced the list found two tests with identical
+structure and intent where only one actually leaked, three whose stated purpose was durability and
+which could not have detected its absence — including the one guarding the composed durable record,
+whose own comment says a half-written record would go unnoticed until recovery — and a leak in a
+test written the day before specifically to close that hole.
+
 CI runs the whole of `./scripts/check.sh` on `master` and on every pull request targeting it — the
 script itself, not a reimplementation of it, so adding a guard here puts it in CI with no second
 edit. The badge at the top of this file reports all of it.

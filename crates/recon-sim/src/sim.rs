@@ -355,6 +355,19 @@ where
         // are effects, which a constructor cannot emit.
         // Exactly one branch, as the book has it: something in storage means recovery, nothing
         // means this incarnation is starting afresh and takes the first-start path instead.
+        // The disk did not survive either. A fault in its own right — storage is not guaranteed to
+        // come back — and the model already has the event that says so, since a restart with
+        // nothing written takes the first-start branch and records `had_state: false`.
+        //
+        // It exists for the audit in `scripts/check-durability-tests.sh`: a test asserting that
+        // something survived a restart should fail when nothing did, and one that passes anyway is
+        // reading the network. That is not hypothetical — it found three such tests, one of them
+        // guarding the composed durable record, and a leak in a fourth written the day before to
+        // close exactly this hole. Compile-time rather than a knob, because the audit asks the
+        // question of every existing test at once without editing any of them.
+        #[cfg(feature = "lose-storage-on-restart")]
+        self.storage.remove(&node);
+
         let survived = self.storage.get(&node).map(|s| !s.is_empty()).unwrap_or(false);
         self.record(TraceEvent::Recovered { at, node, had_state: survived });
         if survived {

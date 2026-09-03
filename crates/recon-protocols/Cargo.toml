@@ -12,6 +12,10 @@ rand = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Pass-through for the durability audit; see `scripts/check-durability-tests.sh`.
+lose-storage-on-restart = ["recon-sim/lose-storage-on-restart"]
+
 [dev-dependencies]
 recon-sim = { workspace = true }
 rand_chacha = { workspace = true }

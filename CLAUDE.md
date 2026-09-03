@@ -61,6 +61,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace --all-targets
 cargo test --workspace
 ./scripts/check-ordered-maps.sh   # BTreeMap only: HashMap iteration order breaks replay
+./scripts/check-durability-tests.sh  # separate, and slower: see below
 ./scripts/check-error-types.sh    # no io::Error for domain failures
 ```
 
@@ -85,6 +86,22 @@ Four guards run, and each exists because of a specific way this project has fail
 
 `check-no-transport.sh` is meant to be **deleted deliberately**, in the commit that introduces
 transport under constraint 5. Do not weaken it; delete it, or leave it alone.
+
+A fifth check is **not** in `check.sh`, because it rebuilds the crate under a feature and runs the
+suites a second time — a minute, against the seconds the others cost:
+
+```bash
+./scripts/check-durability-tests.sh   # storage lost on every restart; 25 tests must notice
+```
+
+It breaks the thing and requires the red. `--features lose-storage-on-restart` makes `Sim::restart`
+discard what was written, and every test registered in the script must then fail; one that passes
+is reading the network rather than the disk, which in this project is always an available answer,
+since the stubborn children keep a full replayable copy of the run in flight at every instant. Run
+it when touching recovery, storage, or any test that crashes and restarts a process. The list of
+registered names is the point rather than an inconvenience: it is an explicit statement of what this
+repository's durability evidence consists of. It found three tests whose stated purpose was
+durability and which could not have detected its absence.
 
 ## Keep `README.md` current
 
