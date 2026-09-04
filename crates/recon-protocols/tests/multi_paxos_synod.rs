@@ -114,10 +114,18 @@ struct Checked {
     proposed: BTreeSet<(Slot, u32)>,
 }
 
-/// Reduce the whole trace, then assert S1, S2, A1, A2 and C1 over it.
+/// Reduce the whole trace, then assert S1, S2, A1 and C1 over it.
 ///
 /// Cheap enough to run after every single event, which is the point: a violation then names the
 /// first event that broke it rather than the end of the run.
+///
+/// **A2 is not among these, and cannot be.** "An acceptor accepts only under the ballot it holds"
+/// is a claim about internal state at the instant of the acceptance; the trace holds the `p2b` that
+/// followed, whose ballot the acceptor's own reply construction makes `≥` the request regardless.
+/// So a violation of A2 leaves no signature here. Its evidence is the mutation
+/// `synod-accept-below-promise` in `scripts/check-safety-tests.sh`, and the schedules registered
+/// against it — the same shape as the total-order log asserting a non-vacuity floor where the
+/// direct property is invisible to the trace.
 fn check(sim: &Sim<Synod>) -> Checked {
     let mut c = Checked::default();
     for (_, _, cmd) in sim.trace().invocations() {
@@ -1162,6 +1170,67 @@ fn safety_survives_a_minority_crashing_and_never_returning() {
     for slot in 1..=3u64 {
         assert_eq!(decisions(&s).get(&slot), Some(&(slot as u32)));
     }
+}
+
+#[test]
+fn a_value_chosen_under_a_crashed_leader_is_what_its_successor_proposes() {
+    // The classic Paxos scenario, and the one the crash test above does not reach: the leader
+    // changes hands *over a crash*, and the process taking over must not contradict a value the
+    // crashed leader already got chosen. Above, Ω trusts the highest rank throughout, so E leads
+    // before and after and no handover happens. Here E — the highest, and so the leader — chooses a
+    // value and then crashes, and D, the next highest, becomes leader and must adopt what E chose.
+    //
+    // This exercises the value-adoption path (`pmax` after a genuine leadership change) end to end,
+    // where the delayed-message test drives it by hand. A leader crashing after a value is chosen is
+    // the case the whole intersection argument exists for.
+    let mut s = sim_of(&FIVE, synchronous(41));
+
+    // E leads. It gets 700 chosen for slot 7.
+    s.command(E, Cmd::Propose { slot: 7, command: 700 });
+    s.run_for(Duration::from_millis(300));
+    assert_eq!(
+        decisions(&s).get(&7),
+        Some(&700),
+        "700 must be chosen under E before it crashes, or the constraint below is vacuous",
+    );
+
+    // E crashes for good. A crash then no restart is amnesia, not a pause: E is gone.
+    s.crash(E);
+    assert!(s.is_stopped(E), "the leader really crashed, and before its successor proposes");
+
+    // D is now the highest correct process, so Ω moves to it. Command D a *different* command for
+    // slot 7. A correct successor must discover 700 in phase one and propose that, dropping 999 —
+    // Figure 7's `proposals := proposals ◁ pmax(pvals)` composed with the `∄c'` guard.
+    s.command(D, Cmd::Propose { slot: 7, command: 999 });
+    // And a slot nobody touched before, to prove D actually leads rather than merely not-splitting.
+    s.command(D, Cmd::Propose { slot: 8, command: 800 });
+    let checked = run_checking(&mut s, Duration::from_secs(6));
+
+    // No split: slot 7 is 700 for every process that learned it, and 999 was never chosen for it.
+    let learners = checked.chosen.get(&7).expect("slot 7 was chosen before the crash");
+    for (node, command) in learners {
+        assert_eq!(*command, 700, "{node} learned {command} for slot 7, not the chosen 700");
+    }
+    assert_eq!(
+        decisions(&s).get(&7),
+        Some(&700),
+        "the successor must not overwrite a chosen value"
+    );
+
+    // Non-vacuity, at its place in the sequence: D really took over and did new work, and the run
+    // really contained the competing command that a broken successor would have chosen.
+    assert_eq!(
+        decisions(&s).get(&8),
+        Some(&800),
+        "the successor must actually lead, not just defer"
+    );
+    assert!(
+        s.trace()
+            .invocations()
+            .any(|(_, _, cmd)| matches!(cmd, Cmd::Propose { slot: 7, command: 999 })),
+        "the contradicting proposal must really have been made for the constraint to mean anything",
+    );
+    assert!(ballots_seen(&s).len() > 1, "leadership must really have changed hands");
 }
 
 #[test]
