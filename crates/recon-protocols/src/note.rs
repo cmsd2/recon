@@ -48,6 +48,15 @@ pub enum Note {
     /// had become one. The same `NACK` as a refusal goes on the wire, so the trace cannot tell the
     /// two decisions apart; this says which it was.
     ReachReported { leader: NodeId, nts: u64 },
+    /// A leader was preempted by a higher ballot and did **not** take up another, because Ω no
+    /// longer trusts it. **Nothing at all reaches the trace from this decision** — a leader that
+    /// stops competing sends no message, sets no timer and raises no indication, so a run in which
+    /// it correctly stood down and one in which it was never told apart look identical.
+    LeadershipYielded { to: NodeId, round: u64 },
+    /// A proposal was dropped because this leader already had one for the slot — Figure 7's
+    /// `if ∄c' : ⟨s, c'⟩ ∈ proposals`, which is what keeps at most one commander per slot. The
+    /// decision produces no effect whatever.
+    ProposalIgnored { slot: u64 },
 }
 
 /// Why something was refused or ignored.

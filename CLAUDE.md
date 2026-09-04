@@ -409,6 +409,25 @@ Each of these is a real decision from the first attempt, with the consequence it
 
 ## Reference material
 
+Most modules here quote Cachin, Guerraoui & Rodrigues. **One does not**, and the convention needs
+saying in full because both editions of its source exist under one title and their figures are
+numbered differently — so naming the title alone is not enough to quote against.
+
+| Module | Source | What is quoted |
+|---|---|---|
+| `multi_paxos_synod.rs` | van Renesse, R. and Altinbuken, D. (2015) 'Paxos Made Moderately Complex', *ACM Computing Surveys*, 47(3), pp. 1–36 | §2, and Figures 4 (acceptor), 6 (commander and scout) and 7 (leader) |
+
+**Not** van Renesse, R. (2011) *Paxos Made Moderately Complex*, Cornell technical report. Same
+title, different document: different figure numbering, a materially different §4.2, and an acceptor
+whose `p2a` arm differs from the survey's in the one clause the module departs on. A reader checking
+code against the page needs to know which page, so a module whose source is a paper states the
+edition in its own documentation.
+
+The cross-check for that module is Liu, Y.A., Chand, S. and Stoller, S.D. (2019) 'Moderately Complex
+Paxos Made Simple', PPDP '19 — the same algorithm in DistAlgo with machine-checked TLA+ safety
+proofs, and the source of three liveness fixes and one acceptor fix the module applies rather than
+rediscovers.
+
 The previous implementation is checked out as detached worktrees alongside this repo. Read
 these as notes when reimplementing — **do not port them**; the post-mortem documents four
 concrete bugs in the gossip code that would come with.

@@ -15,6 +15,11 @@ thiserror = { workspace = true }
 [features]
 # Pass-through for the durability audit; see `scripts/check-durability-tests.sh`.
 lose-storage-on-restart = ["recon-sim/lose-storage-on-restart"]
+# Mutations for the safety audit; see `scripts/check-safety-tests.sh`. Each removes exactly one
+# clause the Synod protocol's safety argument rests on, and every registered safety test must fail
+# under each. Never enable one outside that script.
+synod-ignore-pmax = []
+synod-accept-below-promise = []
 
 [dev-dependencies]
 recon-sim = { workspace = true }

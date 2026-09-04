@@ -1,0 +1,1281 @@
+//! The Synod protocol of *Paxos Made Moderately Complex* §2, against its own guarantees.
+//!
+//! Safety here is a property over a whole run rather than an assertion at a point: what has to
+//! hold is that no *pair* of observers disagrees about a slot, which no single process's state can
+//! say. So the suite carries a checker fed from the trace ([`check`]) and runs it after **every**
+//! event, so that a violation names the first event that broke it and the seed replays it.
+//!
+//! Two sources of schedule, and both are needed. [`sweep_over_seeds`] runs the properties across a
+//! batch of seeds with loss, duplication and reordering on, which finds the interleavings nobody
+//! thought of. The hand-driven schedules below cover the edges randomness rarely lands on —
+//! adoption at exactly the majority and not one fewer, a leader learning what a lost preemption
+//! would have told it, an acceptor that never saw phase one answering phase two. Neither
+//! substitutes for the other.
+//!
+//! The safety tests are also registered in `scripts/check-safety-tests.sh`, which compiles two
+//! mutations of the module and requires every one of them to go red. Agreement admits the same
+//! silent substitution durability did — a run with one settled leader satisfies it whatever the
+//! code does — which is the case that guard exists for.
+
+use core::convert::Infallible;
+use core::time::Duration;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+use recon_core::{Effect, Event, MemStore, NodeId, Time, TimerId, step_noting};
+use recon_protocols::multi_paxos_synod::{
+    Ballot, Cmd, Ind, MultiPaxosSynod, Pvalue, Slot, SynodMsg, Wire,
+};
+use recon_protocols::session_link::SessionLink;
+use recon_protocols::{Note, Timing};
+use recon_sim::{Config, Sim};
+use std::collections::{BTreeMap, BTreeSet};
+
+const A: NodeId = NodeId::new(1);
+const B: NodeId = NodeId::new(2);
+const C: NodeId = NodeId::new(3);
+const D: NodeId = NodeId::new(4);
+const E: NodeId = NodeId::new(5);
+const FIVE: [NodeId; 5] = [A, B, C, D, E];
+const THREE: [NodeId; 3] = [A, B, C];
+
+/// The network's promise; everything else is derived from it.
+const BOUND: Duration = Duration::from_millis(20);
+
+fn timing() -> Timing {
+    Timing { retransmit: Duration::from_millis(10), heartbeat: BOUND * 2, detect_after: BOUND * 6 }
+}
+
+type Synod = MultiPaxosSynod<u32, SessionLink<SynodMsg<u32>>>;
+type Msg = Wire<SynodMsg<u32>>;
+
+fn synod_over(members: &'static [NodeId]) -> impl Fn(NodeId) -> Synod {
+    move |me| MultiPaxosSynod::new(me, members.iter().copied(), timing())
+}
+
+fn sim_of(members: &'static [NodeId], config: Config) -> Sim<Synod> {
+    let mut s: Sim<Synod> = Sim::new(config.sessions(), members, synod_over(members));
+    s.deliver_session_events();
+    s
+}
+
+fn synchronous(seed: u64) -> Config {
+    Config::default().seed(seed).synchronous(BOUND).max_steps(2_000_000)
+}
+
+/// A network that varies in delay, and whose **sessions break**.
+///
+/// `Config::loss` is deliberately not set: in session mode the simulator applies no loss,
+/// duplication or reordering at all, because that is what a session is — reliable and ordered
+/// while it holds. Setting those knobs here would produce a perfectly clean run wearing an
+/// adversarial name, which is the vacuity this repository keeps finding. The way to lose a message
+/// under a session link is to end the session, so [`churn`] is what makes these runs hostile, and
+/// every test using it asserts that sessions really did end.
+fn unreliable(seed: u64) -> Config {
+    Config::default().seed(seed).latency(Duration::from_millis(1), BOUND).max_steps(2_000_000)
+}
+
+/// Break sessions while the run proceeds, checking after every event.
+///
+/// A session ending is the only way this stack loses a message, so this is the fault injection the
+/// suite spends. The pairs are walked deterministically from `seed` so a failure replays.
+fn churn(sim: &mut Sim<Synod>, seed: u64, breaks: usize, between: Duration) -> Checked {
+    let pairs: Vec<(NodeId, NodeId)> = FIVE
+        .iter()
+        .flat_map(|a| FIVE.iter().map(move |b| (*a, *b)))
+        .filter(|(a, b)| a < b)
+        .collect();
+    let mut checked = check(sim);
+    for i in 0..breaks {
+        let (a, b) = pairs[(seed as usize + i * 7) % pairs.len()];
+        if sim.has_session(a, b) {
+            sim.break_session(a, b);
+            sim.deliver_session_events();
+        }
+        checked = run_checking(sim, between);
+    }
+    checked
+}
+
+// ---------------------------------------------------------------- the checker (task 7.5)
+
+/// What the trace says happened, reduced to the four things safety is made of.
+///
+/// Fed from the trace rather than from protocol state, because the property is that no *pair* of
+/// observers disagrees — which is not visible from inside any one of them.
+#[derive(Debug, Default)]
+struct Checked {
+    /// Per acceptor, the highest ballot it has been seen to hold. A1: this only rises.
+    promise: BTreeMap<NodeId, Ballot>,
+    /// Per `⟨ballot, slot⟩`, the command proposed under it. C1 and A4: there is at most one.
+    commanded: BTreeMap<(Ballot, Slot), u32>,
+    /// Per slot, what each process learned was chosen. S1: they agree.
+    chosen: BTreeMap<Slot, BTreeMap<NodeId, u32>>,
+    /// Every `⟨slot, command⟩` any process was asked to propose. S2 is checked against this.
+    proposed: BTreeSet<(Slot, u32)>,
+}
+
+/// Reduce the whole trace, then assert S1, S2, A1, A2 and C1 over it.
+///
+/// Cheap enough to run after every single event, which is the point: a violation then names the
+/// first event that broke it rather than the end of the run.
+fn check(sim: &Sim<Synod>) -> Checked {
+    let mut c = Checked::default();
+    for (_, _, cmd) in sim.trace().invocations() {
+        let Cmd::Propose { slot, command } = cmd;
+        c.proposed.insert((*slot, *command));
+    }
+    // Sends rather than deliveries: what an acceptor put on the wire is what it held at the time,
+    // whether or not anything received it.
+    for (from, _, msg) in sim.trace().sends() {
+        match msg {
+            Wire::Synod(SynodMsg::P1b { ballot, .. })
+            | Wire::Synod(SynodMsg::P2b { ballot, .. }) => {
+                // A1, restated as the acceptor's own promise: an acceptor takes up strictly
+                // increasing ballots, so what it reports never goes backwards.
+                let held = c.promise.entry(from).or_insert(*ballot);
+                assert!(
+                    *ballot >= *held,
+                    "an acceptor's promise went backwards: {from} held {held} and then reported \
+                     {ballot}",
+                );
+                *held = *ballot;
+            }
+            // A4 and C1 together: at most one command is selected per ballot and slot, and it is
+            // the leader that enforces it. Two different commands under one ⟨b, s⟩ would let two
+            // majorities accept different values at the same ballot.
+            Wire::Synod(SynodMsg::P2a { pvalue }) => {
+                let Pvalue { ballot, slot, command } = pvalue;
+                let already = c.commanded.entry((*ballot, *slot)).or_insert(*command);
+                assert_eq!(
+                    already, command,
+                    "two commands proposed under one ballot and slot ({ballot}, {slot}): \
+                     {already} and {command} — Invariant C1",
+                );
+            }
+            _ => {}
+        }
+    }
+    for (node, ind) in sim.trace().indications() {
+        if let Ind::Decision { slot, command } = ind {
+            // S2: a chosen proposal is one some process proposed.
+            assert!(
+                c.proposed.contains(&(*slot, *command)),
+                "{node} learned {command} chosen for slot {slot}, which nobody proposed",
+            );
+            let learners = c.chosen.entry(*slot).or_default();
+            for (other, theirs) in learners.iter() {
+                // S1: at most one proposal is ever chosen for a slot.
+                assert_eq!(
+                    theirs, command,
+                    "slot {slot} was split: {other} learned {theirs} and {node} learned {command}",
+                );
+            }
+            learners.insert(node, *command);
+        }
+    }
+    c
+}
+
+/// Run the sim one event at a time, checking after each. Returns the final reduction.
+fn run_checking(sim: &mut Sim<Synod>, until: Duration) -> Checked {
+    let deadline = sim.now() + until;
+    let mut last = check(sim);
+    while sim.now() < deadline {
+        if !sim.step() {
+            break;
+        }
+        last = check(sim);
+    }
+    last
+}
+
+fn decisions(sim: &Sim<Synod>) -> BTreeMap<Slot, u32> {
+    let mut out = BTreeMap::new();
+    for (_, ind) in sim.trace().indications() {
+        if let Ind::Decision { slot, command } = ind {
+            out.insert(*slot, *command);
+        }
+    }
+    out
+}
+
+/// Did the run really contain a preemption? An acceptor answering with a ballot above the one it
+/// was asked about is the only thing that produces one, so it is what the trace can be asked.
+fn preemptions(sim: &Sim<Synod>) -> usize {
+    let mut asked: BTreeMap<(NodeId, NodeId), Ballot> = BTreeMap::new();
+    let mut n = 0;
+    for (from, to, msg) in sim.trace().sends() {
+        match msg {
+            Wire::Synod(SynodMsg::P1a { ballot }) => {
+                asked.insert((from, to), *ballot);
+            }
+            Wire::Synod(SynodMsg::P2a { pvalue }) => {
+                asked.insert((from, to), pvalue.ballot);
+            }
+            Wire::Synod(SynodMsg::P1b { ballot, .. })
+            | Wire::Synod(SynodMsg::P2b { ballot, .. })
+                if asked.get(&(to, from)).is_some_and(|requested| ballot > requested) =>
+            {
+                n += 1;
+            }
+            _ => {}
+        }
+    }
+    n
+}
+
+/// How many distinct ballots were put on the wire. More than one means the run really contained
+/// competing ballots rather than one leader having its way.
+fn ballots_seen(sim: &Sim<Synod>) -> BTreeSet<Ballot> {
+    sim.trace()
+        .sends()
+        .filter_map(|(_, _, msg)| match msg {
+            Wire::Synod(SynodMsg::P1a { ballot }) => Some(*ballot),
+            Wire::Synod(SynodMsg::P2a { pvalue }) => Some(pvalue.ballot),
+            _ => None,
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------- the hand-driven harness
+
+/// Several processes, one timer-identity source, and a wire the test decides what to do with.
+///
+/// The simulator delivers or loses by its own rules, which is right for a sweep and wrong for
+/// "lose exactly this message and nothing else". Here every send lands in [`Hand::wire`] and the
+/// test says which of them arrive.
+struct Hand {
+    nodes: BTreeMap<NodeId, Synod>,
+    stores: BTreeMap<NodeId, MemStore<Infallible, Infallible>>,
+    timers: BTreeMap<NodeId, Vec<TimerId>>,
+    /// In flight: who sent it, who it is for, what it says.
+    wire: Vec<(NodeId, NodeId, Msg)>,
+    /// Taken out of flight by [`Hand::hold`] and put back by [`Hand::release`] — a message delayed
+    /// past an event rather than lost, which is what a stale leader needs to exist at all.
+    held: Vec<(NodeId, NodeId, Msg)>,
+    inds: Vec<(NodeId, Ind<u32>)>,
+    notes: Vec<(NodeId, Note)>,
+    rng: ChaCha8Rng,
+    ids: u64,
+    now: Time,
+}
+
+impl Hand {
+    fn new(members: &'static [NodeId]) -> Self {
+        let mut h = Hand {
+            nodes: members.iter().map(|&n| (n, synod_over(members)(n))).collect(),
+            stores: members.iter().map(|&n| (n, MemStore::default())).collect(),
+            timers: members.iter().map(|&n| (n, Vec::new())).collect(),
+            wire: Vec::new(),
+            held: Vec::new(),
+            inds: Vec::new(),
+            notes: Vec::new(),
+            rng: ChaCha8Rng::seed_from_u64(7),
+            ids: 0,
+            now: Time::ZERO,
+        };
+        for &n in members {
+            h.event(n, Event::Init);
+        }
+        h
+    }
+
+    /// Deliver one event and file everything it emitted.
+    fn event(&mut self, node: NodeId, event: Event<Cmd<u32>, Msg, recon_core::SessionEvent>) {
+        let proto = self.nodes.get_mut(&node).expect("a member");
+        let store = self.stores.get_mut(&node).expect("a member");
+        // One identity source for the whole harness: two layers each starting at zero would each
+        // accept the other's expiry.
+        // `step_noting` rather than `step_with`: a decision that produced no effect is exactly
+        // what some of these tests are about, and only the narration holds it.
+        let mut narrated: Vec<Note> = Vec::new();
+        let effects =
+            step_noting(proto, event, self.now, &mut self.rng, store, &mut self.ids, &mut narrated);
+        for e in effects {
+            match e {
+                Effect::Send { to, msg } => self.wire.push((node, to, msg)),
+                Effect::Indicate(ind) => self.inds.push((node, ind)),
+                Effect::SetTimer { id, .. } => {
+                    self.timers.get_mut(&node).expect("a member").push(id)
+                }
+            }
+        }
+        for n in narrated {
+            self.notes.push((node, n));
+        }
+    }
+
+    /// What a node narrated — the decisions that left no effect behind.
+    fn notes_at(&self, node: NodeId) -> impl Iterator<Item = &Note> {
+        self.notes.iter().filter(move |(n, _)| *n == node).map(|(_, note)| note)
+    }
+
+    fn propose(&mut self, node: NodeId, slot: Slot, command: u32) {
+        self.event(node, Event::Cmd(Cmd::Propose { slot, command }));
+    }
+
+    /// Fire every timer this node has registered. The protocol compares before acting, so handing
+    /// it all of them is what a driver does.
+    fn tick(&mut self, node: NodeId) {
+        let ids = self.timers.get(&node).cloned().unwrap_or_default();
+        self.timers.get_mut(&node).expect("a member").clear();
+        for id in ids {
+            self.event(node, Event::Timer(id));
+        }
+    }
+
+    fn tick_all(&mut self) {
+        let nodes: Vec<NodeId> = self.nodes.keys().copied().collect();
+        for n in nodes {
+            self.tick(n);
+        }
+    }
+
+    /// Deliver everything in flight that `keep` accepts, and discard the rest.
+    ///
+    /// Runs to a fixed point: a delivery emits sends of its own, and a phase does not complete in
+    /// one pass.
+    fn settle(&mut self, keep: impl Fn(NodeId, NodeId, &Msg) -> bool) {
+        for _ in 0..64 {
+            if self.wire.is_empty() {
+                return;
+            }
+            let batch = core::mem::take(&mut self.wire);
+            for (from, to, msg) in batch {
+                if keep(from, to, &msg) {
+                    self.event(to, Event::Msg { from, msg });
+                }
+            }
+        }
+    }
+
+    /// Deliver everything.
+    fn settle_all(&mut self) {
+        self.settle(|_, _, _| true);
+    }
+
+    /// Deliver only the Synod protocol's own traffic, so a node can be starved of heartbeats
+    /// without being cut off from the algorithm. The simulator cannot do this — one wire, one
+    /// link — which is why the duel below is driven by hand.
+    fn settle_without_heartbeats_to(&mut self, starved: NodeId) {
+        self.settle(|_, to, msg| !(to == starved && matches!(msg, Wire::Detector(_))));
+    }
+
+    fn advance(&mut self, d: Duration) {
+        self.now += d;
+    }
+
+    fn at(&self, node: NodeId) -> &Synod {
+        self.nodes.get(&node).expect("a member")
+    }
+
+    fn decisions_at(&self, node: NodeId) -> Vec<(Slot, u32)> {
+        self.inds
+            .iter()
+            .filter(|(n, _)| *n == node)
+            .filter_map(|(_, i)| match i {
+                Ind::Decision { slot, command } => Some((*slot, *command)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn all_decisions(&self) -> Vec<(NodeId, Slot, u32)> {
+        self.inds
+            .iter()
+            .filter_map(|(n, i)| match i {
+                Ind::Decision { slot, command } => Some((*n, *slot, *command)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What is in flight, for a test that wants to inspect or intercept it.
+    fn in_flight(&self) -> &[(NodeId, NodeId, Msg)] {
+        &self.wire
+    }
+
+    /// The Synod messages in flight from `from` to `to`. The detector's heartbeats share the wire
+    /// and are never what a test about the algorithm means.
+    fn synod_from(&self, from: NodeId, to: NodeId) -> Vec<SynodMsg<u32>> {
+        self.wire
+            .iter()
+            .filter(|(f, t, _)| *f == from && *t == to)
+            .filter_map(|(_, _, m)| match m {
+                Wire::Synod(s) => Some(s.clone()),
+                Wire::Detector(_) => None,
+            })
+            .collect()
+    }
+
+    /// Every Synod message in flight from `from`, whoever it is for.
+    fn synod_sent_by(&self, from: NodeId) -> Vec<SynodMsg<u32>> {
+        self.wire
+            .iter()
+            .filter(|(f, _, _)| *f == from)
+            .filter_map(|(_, _, m)| match m {
+                Wire::Synod(s) => Some(s.clone()),
+                Wire::Detector(_) => None,
+            })
+            .collect()
+    }
+
+    /// Take everything `which` accepts out of flight and keep it, to be put back by
+    /// [`Hand::release`]. A *delay*, where [`Hand::settle`] gives a loss.
+    fn hold(&mut self, which: impl Fn(NodeId, NodeId, &Msg) -> bool) {
+        let batch = core::mem::take(&mut self.wire);
+        for (from, to, msg) in batch {
+            if which(from, to, &msg) {
+                self.held.push((from, to, msg));
+            } else {
+                self.wire.push((from, to, msg));
+            }
+        }
+    }
+
+    /// Put everything held back in flight.
+    fn release(&mut self) {
+        let held = core::mem::take(&mut self.held);
+        self.wire.extend(held);
+    }
+
+    /// Preempt `node` with `high`, whichever phase it is in.
+    ///
+    /// A leader learns of a higher ballot only through an attempt it has in flight — Figure 7's
+    /// `preempted` arrives from a scout or a commander, and a leader running neither is told
+    /// nothing. So a scouting leader is answered with a `p1b` and an active one with a `p2b`, for
+    /// which it must first have a commander.
+    fn preempt(&mut self, node: NodeId, high: Ballot) {
+        if self.at(node).is_scouting() {
+            let from = *self.nodes.keys().find(|n| **n != node).expect("another member");
+            self.event(
+                node,
+                Event::Msg {
+                    from,
+                    msg: Wire::Synod(SynodMsg::P1b { ballot: high, accepted: Vec::new() }),
+                },
+            );
+            return;
+        }
+        assert!(self.at(node).is_active(), "{node} has no attempt in flight to be preempted");
+        let existing = self.at(node).commanded_slots().next();
+        let slot = match existing {
+            Some(slot) => slot,
+            None => {
+                self.propose(node, 999, 9_999);
+                999
+            }
+        };
+        let from = *self.nodes.keys().find(|n| **n != node).expect("another member");
+        self.event(
+            node,
+            Event::Msg { from, msg: Wire::Synod(SynodMsg::P2b { ballot: high, slot }) },
+        );
+    }
+
+    /// Drive `node` to the point where Ω trusts it and phase one has completed.
+    ///
+    /// Starving it of heartbeats is what makes it trust itself: it suspects everyone else, so
+    /// `maxrank(Π \ suspected)` is itself. The simulator cannot do this — one wire, one link — which
+    /// is why the leader-side tests are driven by hand.
+    fn make_active_leader(&mut self, node: NodeId) {
+        for _ in 0..8 {
+            self.advance(timing().detect_after);
+            self.tick_all();
+            self.settle_without_heartbeats_to(node);
+            if self.at(node).is_trusted() && self.at(node).is_active() {
+                return;
+            }
+        }
+        panic!(
+            "{node} never became an active leader: trusted={} scouting={} active={}",
+            self.at(node).is_trusted(),
+            self.at(node).is_scouting(),
+            self.at(node).is_active(),
+        );
+    }
+}
+
+// ---------------------------------------------------------------- task 2.1: ballots
+
+#[test]
+fn any_two_ballots_are_comparable_and_a_ballot_names_its_leader() {
+    let a0 = Ballot::initial(A);
+    let e0 = Ballot::initial(E);
+    let a1 = Ballot { round: 1, leader: A };
+
+    // Lexicographic on ⟨round, leader⟩: the round dominates, and the leader breaks the tie, so two
+    // processes' ballots are never equal however far their rounds drift.
+    assert!(a0 < e0, "same round, so the leader orders them");
+    assert!(e0 < a1, "a higher round wins whoever leads it");
+    assert_ne!(a0, e0);
+    assert_eq!(a0.leader, A, "a ballot names its leader");
+    assert_eq!(a1.leader, A);
+
+    // ⊥ is ordered before any normal ballot number, which `Option`'s own ordering already gives.
+    assert!(None < Some(a0), "⊥ is below every ballot");
+
+    // `(r' + 1, self())` — the ballot to take up after being preempted.
+    assert_eq!(Ballot::above(e0, A), Ballot { round: 1, leader: A });
+    assert!(Ballot::above(e0, A) > e0, "climbing past what beat it");
+}
+
+// ---------------------------------------------------------------- task 2.2: the wire
+
+#[test]
+fn the_wire_survives_encoding() {
+    let mut s = sim_of(&FIVE, synchronous(1));
+    s.enable_codec_check();
+    s.command(E, Cmd::Propose { slot: 1, command: 42 });
+    s.run_for(Duration::from_secs(2));
+    // The codec check panics inside the sim on a round trip that does not match, so reaching here
+    // with traffic having flowed is the assertion. The floor keeps it from passing vacuously.
+    assert!(s.trace().send_count() > 0, "nothing was encoded, so nothing was checked");
+}
+
+// ---------------------------------------------------------------- task 3: the acceptor
+
+#[test]
+fn a_stale_p1a_is_refused_and_the_refusal_names_the_ballot_that_beat_it() {
+    let mut h = Hand::new(&THREE);
+    let high = Ballot { round: 9, leader: C };
+    let low = Ballot { round: 2, leader: A };
+
+    // B adopts the high ballot first.
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
+    assert_eq!(h.at(B).adopted_ballot(), Some(high));
+    h.wire.clear();
+
+    // Then a lower one arrives. `if b > ballot_num` fails, so nothing is taken up.
+    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: low }) });
+    assert_eq!(h.at(B).adopted_ballot(), Some(high), "a stale p1a takes nothing up");
+
+    let replies = h.synod_from(B, A);
+    match replies.as_slice() {
+        [SynodMsg::P1b { ballot, .. }] => {
+            assert_eq!(
+                *ballot, high,
+                "the refusal names the ballot that beat it, not the one asked"
+            );
+        }
+        other => panic!("expected exactly one p1b, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_acceptors_promise_is_monotonic_over_a_run_that_offers_it_lower_ballots() {
+    let mut h = Hand::new(&THREE);
+    let offered = [
+        Ballot { round: 5, leader: C },
+        Ballot { round: 2, leader: A },
+        Ballot { round: 7, leader: B },
+        Ballot { round: 1, leader: A },
+        Ballot { round: 7, leader: A },
+    ];
+    let mut held = None;
+    let mut lower_really_offered = 0;
+    for ballot in offered {
+        if Some(ballot) < held {
+            lower_really_offered += 1;
+        }
+        h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot }) });
+        let now = h.at(B).adopted_ballot();
+        assert!(now >= held, "the promise went backwards: {held:?} then {now:?}");
+        held = now;
+    }
+    assert_eq!(held, Some(Ballot { round: 7, leader: B }), "the highest offered, and no other");
+    // Non-vacuity: the run really did offer it lower ballots, which is the only way the assertion
+    // above could have failed.
+    assert!(lower_really_offered >= 2, "only {lower_really_offered} lower ballots were offered");
+}
+
+#[test]
+fn an_acceptor_that_missed_phase_one_still_counts_in_phase_two() {
+    // The departure this module makes, tested directly: Figure 4's `b = ballot_num` would have B
+    // refuse here, answer with its own lower ballot, and kill the commander that asked.
+    let mut h = Hand::new(&THREE);
+    let ballot = Ballot { round: 3, leader: A };
+
+    // B has adopted nothing at all — no p1a for this ballot ever reached it.
+    assert_eq!(h.at(B).adopted_ballot(), None, "the phase-one request really did not arrive");
+
+    let pvalue = Pvalue { ballot, slot: 1, command: 77 };
+    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+
+    assert_eq!(h.at(B).adopted_ballot(), Some(ballot), "it adopts what it accepts");
+    let replies = h.synod_from(B, A);
+    match replies.as_slice() {
+        [SynodMsg::P2b { ballot: answered, slot }] => {
+            assert_eq!(*answered, ballot, "the answer counts toward the commander's majority");
+            assert_eq!(*slot, 1, "and names the slot it answers for");
+        }
+        other => panic!("expected exactly one p2b, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------- task 4: the leader
+
+#[test]
+fn a_proposal_arriving_while_passive_is_remembered_and_sent_once_the_ballot_is_adopted() {
+    let mut h = Hand::new(&THREE);
+    // Nobody has trusted A, so it is passive: Figure 7's `if active then` guard does nothing.
+    assert!(!h.at(A).is_active() && !h.at(A).is_scouting(), "A starts passive");
+    h.wire.clear();
+    h.propose(A, 4, 400);
+    assert!(
+        h.synod_sent_by(A).is_empty(),
+        "a passive leader sends nothing at all: {:?}",
+        h.synod_sent_by(A),
+    );
+
+    // Now let A become trusted and complete phase one. `adopted` spawns a commander for every
+    // proposal it was holding, so the one made while passive must be the one that gets chosen.
+    h.make_active_leader(A);
+    assert_eq!(
+        h.decisions_at(A),
+        vec![(4, 400)],
+        "the proposal remembered while passive must be commanded once the ballot is adopted",
+    );
+}
+
+#[test]
+fn adoption_needs_a_majority_and_not_one_fewer() {
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    // Force a fresh phase one under a ballot nobody has answered, by preempting A with a higher
+    // one. It is trusted, so it scouts again.
+    let high = Ballot { round: 40, leader: C };
+    h.preempt(A, high);
+    assert!(h.at(A).is_scouting() && !h.at(A).is_active(), "A is back in phase one");
+    let ballot = h.at(A).leader_ballot();
+    assert!(ballot > high, "under a ballot above the one that beat it");
+
+    // One answer of three is not a majority: |waitfor| = 2, and 2 * 2 < 3 is false. Written the
+    // other way — `waitfor.len() < acceptors.len() / 2` — integer division reads `< 1` here and
+    // would demand all three.
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new() }) },
+    );
+    assert!(!h.at(A).is_active(), "one answer of three is not a majority");
+    // The second makes it: |waitfor| = 1, and 1 * 2 < 3.
+    h.event(
+        A,
+        Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new() }) },
+    );
+    assert!(h.at(A).is_active(), "two of three is a majority and must adopt");
+}
+
+#[test]
+fn a_later_ballot_proposes_what_an_earlier_majority_accepted() {
+    // pmax, and the step the whole safety argument rests on. A sets out to propose 111 for slot 1;
+    // the majority tells it 999 was already accepted under a lower ballot; it must propose 999.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    // Preempt A so it runs a fresh phase one whose answers this test writes.
+    let old = Ballot { round: 40, leader: E };
+    h.preempt(A, old);
+    let ballot = h.at(A).leader_ballot();
+    assert!(ballot > old, "a preempted leader climbs past what beat it");
+    assert!(h.at(A).is_scouting(), "and a trusted one scouts again");
+
+    // It intends 111 for slot 1.
+    h.propose(A, 1, 111);
+    h.wire.clear();
+
+    // The majority reports a pvalue for slot 1 under a lower ballot, carrying a different command.
+    let earlier = Ballot { round: 39, leader: C };
+    let reported = vec![Pvalue { ballot: earlier, slot: 1, command: 999 }];
+    for peer in [B, C] {
+        h.event(
+            A,
+            Event::Msg {
+                from: peer,
+                msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: reported.clone() }),
+            },
+        );
+    }
+    assert!(h.at(A).is_active(), "a majority answered, so it adopted");
+
+    let commanded: Vec<u32> = h
+        .synod_sent_by(A)
+        .iter()
+        .filter_map(|m| match m {
+            SynodMsg::P2a { pvalue } if pvalue.slot == 1 => Some(pvalue.command),
+            _ => None,
+        })
+        .collect();
+    assert!(!commanded.is_empty(), "the adopted leader must command slot 1");
+    assert!(
+        commanded.iter().all(|c| *c == 999),
+        "the leader proposed {commanded:?}, not what the majority had already accepted (999)",
+    );
+}
+
+#[test]
+fn at_most_one_commander_per_slot_per_ballot() {
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    h.propose(A, 7, 700);
+    assert_eq!(h.at(A).commanded_slots().collect::<Vec<_>>(), vec![7], "one commander for slot 7");
+
+    // A second proposal for a slot already proposed for is dropped — Figure 7's guard, and what
+    // enforces C1 against a second commander for one ⟨ballot, slot⟩.
+    h.wire.clear();
+    h.propose(A, 7, 701);
+    assert_eq!(h.at(A).commanded_slots().collect::<Vec<_>>(), vec![7], "still exactly one");
+    assert!(
+        !h.synod_sent_by(A).iter().any(|m| matches!(
+            m,
+            SynodMsg::P2a { pvalue } if pvalue.command == 701
+        )),
+        "the second command for a commanded slot must not go on the wire",
+    );
+    // The decision produced no effect whatever, so the trace cannot say it happened. The narration
+    // is the only record, which is the whole reason this module narrates.
+    assert!(
+        h.notes_at(A).any(|n| matches!(n, Note::ProposalIgnored { slot: 7 })),
+        "the leader must say it dropped the proposal, since nothing else can",
+    );
+}
+
+#[test]
+fn a_preempted_leader_that_omega_no_longer_trusts_stops_competing() {
+    // Both roles are in this run: A leads and is then preempted, and the process that beat it is
+    // the one Ω trusts. Starve A first so it leads at all, then let the heartbeats back so its
+    // detector restores the others and Ω moves its answer to C.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    assert!(h.at(A).is_trusted(), "A led, which is what makes the next step mean anything");
+
+    for _ in 0..8 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle_all();
+        if !h.at(A).is_trusted() {
+            break;
+        }
+    }
+    assert!(
+        !h.at(A).is_trusted(),
+        "Ω must have moved to the highest process for this to be a test"
+    );
+
+    let before = h.at(A).leader_ballot();
+    h.wire.clear();
+    // Preempt A with a ballot above its own, through the scout it is running.
+    let high = Ballot { round: before.round + 20, leader: C };
+    assert!(
+        h.at(A).is_scouting() || h.at(A).is_active(),
+        "A must have an attempt in flight for a preemption to reach it",
+    );
+    h.preempt(A, high);
+
+    assert!(h.at(A).leader_ballot() > high, "it still climbs past what beat it");
+    assert!(!h.at(A).is_scouting(), "but an untrusted leader starts no scout");
+    assert!(!h.at(A).is_active());
+    // Nothing whatever reaches the trace from the decision to stand down, which is why it is
+    // narrated: a leader correctly standing down and one that was never told look identical.
+    assert!(
+        h.notes_at(A).any(|n| matches!(n, Note::LeadershipYielded { to, .. } if *to == C)),
+        "standing down must be narrated, since it leaves no other evidence",
+    );
+}
+
+// ---------------------------------------------------------------- task 5: liveness through Ω
+
+#[test]
+fn a_settled_detector_gets_every_proposed_slot_chosen() {
+    let mut s = sim_of(&FIVE, synchronous(3));
+    for slot in 1..=4u64 {
+        s.command(E, Cmd::Propose { slot, command: (slot * 10) as u32 });
+    }
+    let checked = run_checking(&mut s, Duration::from_secs(3));
+
+    let decided = decisions(&s);
+    assert_eq!(decided.len(), 4, "every proposed slot must be chosen: got {decided:?}");
+    for slot in 1..=4u64 {
+        assert_eq!(decided.get(&slot), Some(&((slot * 10) as u32)));
+    }
+    assert!(!checked.chosen.is_empty(), "and the checker really saw them");
+}
+
+#[test]
+fn duelling_leaders_are_permitted_to_choose_nothing() {
+    // Two processes each believing themselves leader. Driven by hand because the simulator cannot
+    // starve one node of heartbeats while still carrying the algorithm's own traffic: one wire,
+    // one link. A is fed no heartbeats, so it suspects B and C and trusts itself; C is the highest
+    // node, so everybody else trusts C.
+    let mut h = Hand::new(&THREE);
+    for _ in 0..4 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle_without_heartbeats_to(A);
+    }
+    assert!(h.at(A).is_trusted(), "A trusts itself");
+    assert!(h.at(C).is_trusted(), "and so does C");
+
+    h.propose(A, 1, 111);
+    h.propose(C, 1, 999);
+
+    let mut rounds = 0;
+    for _ in 0..12 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle_without_heartbeats_to(A);
+        rounds += 1;
+    }
+
+    // Progress is **not** asserted. What is asserted is that the run really was a duel, and that
+    // safety survived it — which is the whole of what this capability claims.
+    let ballots_a = h.at(A).leader_ballot();
+    let ballots_c = h.at(C).leader_ballot();
+    assert!(
+        ballots_a.round > 0 && ballots_c.round > 0,
+        "neither leader was preempted, so this was not a duel: A at {ballots_a}, C at {ballots_c} \
+         after {rounds} rounds",
+    );
+    let mut per_slot: BTreeMap<Slot, BTreeSet<u32>> = BTreeMap::new();
+    for (_, slot, command) in h.all_decisions() {
+        per_slot.entry(slot).or_default().insert(command);
+    }
+    for (slot, commands) in per_slot {
+        assert_eq!(commands.len(), 1, "slot {slot} was split during the duel: {commands:?}");
+    }
+}
+
+#[test]
+fn safety_holds_while_the_detector_is_wrong() {
+    // `detect_after` well below what the network needs, so Ω accuses correct processes and
+    // leadership moves while the ballots reflect it. The risk `design.md` names, driven rather
+    // than assumed.
+    let wrong = Timing {
+        retransmit: Duration::from_millis(10),
+        heartbeat: Duration::from_millis(10),
+        detect_after: Duration::from_millis(12),
+    };
+    let mut s: Sim<Synod> = Sim::new(
+        Config::default()
+            .seed(11)
+            .latency(Duration::from_millis(1), Duration::from_millis(60))
+            .loss(0.05)
+            .max_steps(2_000_000)
+            .sessions(),
+        &FIVE,
+        move |me| MultiPaxosSynod::new(me, FIVE, wrong),
+    );
+    s.deliver_session_events();
+    for slot in 1..=3u64 {
+        s.command(A, Cmd::Propose { slot, command: slot as u32 });
+        s.command(E, Cmd::Propose { slot, command: (slot + 100) as u32 });
+    }
+    run_checking(&mut s, Duration::from_secs(5));
+
+    // Non-vacuity: the detector really was wrong for a while, which shows up as more than one
+    // ballot on the wire and at least one preemption.
+    assert!(ballots_seen(&s).len() > 1, "only one ballot ran, so the detector never disagreed");
+    assert!(preemptions(&s) > 0, "nothing was ever preempted, so no leader was ever wrong");
+}
+
+// ---------------------------------------------------------------- task 6: the link and retries
+
+#[test]
+fn a_session_ending_reaches_the_layer_above() {
+    let mut s = sim_of(&FIVE, synchronous(5));
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    s.run_for(Duration::from_millis(300));
+    s.break_session(E, A);
+    s.deliver_session_events();
+    s.run_for(Duration::from_millis(300));
+
+    let ended =
+        s.trace().indications().filter(|(_, i)| matches!(i, Ind::SessionEnded { .. })).count();
+    assert!(ended > 0, "a session ended and nothing above was told — the cardinal sin");
+    let established = s
+        .trace()
+        .indications()
+        .filter(|(_, i)| matches!(i, Ind::SessionEstablished { .. }))
+        .count();
+    assert!(established > 0, "an establishment is the moment a resend is possible; it must arrive");
+}
+
+#[test]
+fn a_request_lost_at_a_session_ending_is_retried_and_the_round_still_completes() {
+    // A session ending is how this stack loses a message; the link beneath does not retransmit, so
+    // the leader owns the retry. Everything in flight to the broken peer is gone.
+    let mut s = sim_of(&FIVE, unreliable(13));
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    churn(&mut s, 13, 6, Duration::from_millis(150));
+    run_checking(&mut s, Duration::from_secs(4));
+
+    let decided = decisions(&s);
+    assert_eq!(decided.get(&1), Some(&1), "a broken session must not stop the round: {decided:?}");
+    // Non-vacuity, at its place in the sequence: the sessions really did end, and something really
+    // was lost with them.
+    assert!(s.trace().session_ends() > 0, "no session ended, so nothing was ever retried");
+    assert!(
+        s.trace().drops_because(recon_sim::DropReason::NoSession) > 0
+            || s.trace().suffix_losses() > 0,
+        "the endings cost nothing, so the retry was never needed",
+    );
+}
+
+#[test]
+fn a_lost_p1a_does_not_leave_the_leader_waiting_for_ever() {
+    // Liu et al.'s first leader violation. Driven by hand with exactly that message dropped, not
+    // with lossy links switched on.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    // Force a fresh phase one, and lose every p1a it sends.
+    let high = Ballot { round: 20, leader: C };
+    h.preempt(A, high);
+    assert!(h.at(A).is_scouting(), "A is in phase one");
+    let ballot = h.at(A).leader_ballot();
+    h.wire.retain(|(_, _, m)| !matches!(m, Wire::Synod(SynodMsg::P1a { .. })));
+    assert!(!h.at(A).is_active(), "and nothing has adopted");
+
+    // Ticks below the escalation threshold resend; the threshold restarts phase one. Either way
+    // p1a must reach the wire again — the figure would wait for ever.
+    h.advance(timing().detect_after * 2);
+    h.tick(A);
+    let resent = h
+        .in_flight()
+        .iter()
+        .filter(|(from, _, m)| {
+            *from == A && matches!(m, Wire::Synod(SynodMsg::P1a { ballot: b }) if *b == ballot)
+        })
+        .count();
+    assert!(resent >= 2, "phase one must be reissued to a majority, got {resent} p1a");
+    assert!(h.at(A).is_scouting(), "and the leader is still in phase one rather than stuck");
+
+    // Now let the answers through: the round completes, which is what "not waiting for ever" means.
+    h.settle_without_heartbeats_to(A);
+    assert!(h.at(A).is_active(), "the restarted phase one must be able to adopt");
+}
+
+#[test]
+fn a_lost_p2b_does_not_leave_a_slot_undecided() {
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    h.propose(A, 3, 333);
+    // Deliver the p2a, but lose every p2b coming back.
+    h.settle(|_, to, msg| {
+        !(to == A && matches!(msg, Wire::Synod(SynodMsg::P2b { .. })))
+            && !matches!(msg, Wire::Detector(_))
+    });
+    assert!(h.decisions_at(A).is_empty(), "no p2b arrived, so nothing is decided yet");
+    assert!(h.at(A).commanded_slots().any(|s| s == 3), "the commander is still outstanding");
+
+    // A tick below the escalation threshold resends the pvalue to whoever has not answered.
+    h.wire.clear();
+    h.advance(timing().retransmit);
+    h.tick(A);
+    let resent = h
+        .in_flight()
+        .iter()
+        .filter(|(from, _, m)| {
+            *from == A && matches!(m, Wire::Synod(SynodMsg::P2a { pvalue }) if pvalue.slot == 3)
+        })
+        .count();
+    assert!(resent >= 2, "p2a must be resent to the acceptors that did not answer, got {resent}");
+
+    // Let the answers through this time.
+    h.settle_without_heartbeats_to(A);
+    assert_eq!(h.decisions_at(A), vec![(3, 333)], "the slot must be decided once p2b arrives");
+}
+
+#[test]
+fn a_lost_preempt_sends_the_leader_back_to_phase_one_rather_than_resending_for_ever() {
+    // The third violation, and the one a naive design gets wrong: resending p2a cannot help once a
+    // majority holds a higher ballot. Nothing but a return to phase one recovers.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    let stale = h.at(A).leader_ballot();
+
+    // A majority moves to a higher ballot behind A's back.
+    let higher = Ballot { round: stale.round + 5, leader: C };
+    for peer in [B, C] {
+        h.event(peer, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: higher }) });
+    }
+    h.wire.clear();
+
+    // A proposes, and every reply that would tell it it has been preempted is lost.
+    h.propose(A, 5, 555);
+    h.settle(|_, to, msg| {
+        !(to == A && matches!(msg, Wire::Synod(SynodMsg::P2b { .. })))
+            && !matches!(msg, Wire::Detector(_))
+    });
+    assert!(h.decisions_at(A).is_empty(), "a majority holds a higher ballot; nothing can decide");
+    assert_eq!(h.at(A).leader_ballot(), stale, "and A has not learnt of it");
+
+    // Resending would loop for ever. The escalation must put A back into phase one.
+    h.wire.clear();
+    h.advance(timing().detect_after * 2);
+    h.tick(A);
+    assert!(h.at(A).is_scouting(), "the leader must go back to phase one, not resend p2a");
+    assert!(!h.at(A).is_active());
+    let p1a = h
+        .in_flight()
+        .iter()
+        .filter(|(from, _, m)| *from == A && matches!(m, Wire::Synod(SynodMsg::P1a { .. })))
+        .count();
+    assert!(p1a >= 2, "phase one must reach a majority, got {p1a} p1a");
+
+    // And phase one is how the higher ballot is learnt — under the same ballot, not a fresh one.
+    h.settle_without_heartbeats_to(A);
+    assert!(
+        h.at(A).leader_ballot() > higher,
+        "the p1b answers must carry the higher ballot up to the leader: it is at {} and the \
+         majority holds {higher}",
+        h.at(A).leader_ballot(),
+    );
+}
+
+#[test]
+fn an_acceptor_reached_cold_by_a_retransmitted_p2a_still_counts_toward_the_decision() {
+    // The route that motivated the acceptor departure, end to end: C's p1a never arrives, the
+    // scout completes without it, and the retransmitted p2a reaches C having never seen phase one.
+    let mut h = Hand::new(&THREE);
+    for _ in 0..3 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle(|_, to, msg| {
+            !(to == A && matches!(msg, Wire::Detector(_)))
+                && !(to == C && matches!(msg, Wire::Synod(SynodMsg::P1a { .. })))
+        });
+    }
+    assert!(h.at(A).is_trusted() && h.at(A).is_active(), "A adopted with a majority of A and B");
+    assert_eq!(h.at(C).adopted_ballot(), None, "C never saw phase one — the precondition");
+
+    let ballot = h.at(A).leader_ballot();
+    h.propose(A, 8, 888);
+    // Now let everything through, including the p2a that reaches C cold.
+    h.settle(|_, to, msg| !(to == A && matches!(msg, Wire::Detector(_))));
+
+    assert_eq!(h.at(C).adopted_ballot(), Some(ballot), "C adopts what it accepts");
+    // Under Figure 4's `b = ballot_num` C would have answered with ⊥-derived nothing and killed the
+    // commander; here its answer counts.
+    assert_eq!(h.decisions_at(A), vec![(8, 888)]);
+    let split: Vec<_> = h.all_decisions();
+    assert!(
+        split.iter().all(|(_, s, c)| *s == 8 && *c == 888),
+        "one decision, undivided: {split:?}"
+    );
+}
+
+#[test]
+fn the_send_rate_is_flat_once_the_work_is_done() {
+    let mut s = sim_of(&FIVE, synchronous(17));
+    for slot in 1..=5u64 {
+        s.command(E, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_secs(2));
+    assert_eq!(
+        decisions(&s).len(),
+        5,
+        "the work must actually be done before the rate is measured"
+    );
+    // A decision retires its commander and leaves the sweep, so the sweep is empty once the slots
+    // are decided; what remains is the detector's own heartbeat, which is flat by construction.
+    common::assert_send_rate_flat!(s, Duration::from_millis(400), 4);
+}
+
+// ---------------------------------------------------------------- task 7: safety over runs
+
+#[test]
+fn at_most_one_proposal_is_chosen_per_slot_under_competing_ballots() {
+    let mut s = sim_of(&FIVE, unreliable(23));
+    // Every process proposes a different command for the same slots, so the run genuinely contains
+    // proposals that would split it.
+    for (i, node) in FIVE.iter().enumerate() {
+        for slot in 1..=3u64 {
+            s.command(*node, Cmd::Propose { slot, command: (i as u32 + 1) * 1000 + slot as u32 });
+        }
+    }
+    // A partition and a heal, so more than one process leads over the run, and session churn
+    // throughout so messages are genuinely lost rather than merely delayed.
+    s.run_for(Duration::from_millis(200));
+    s.partition(&[&[A, B], &[C, D, E]]);
+    churn(&mut s, 23, 4, Duration::from_millis(200));
+    s.heal();
+    s.deliver_session_events();
+    let checked = churn(&mut s, 5, 6, Duration::from_millis(400));
+    let checked = {
+        let _ = checked;
+        run_checking(&mut s, Duration::from_secs(3))
+    };
+
+    // The checker asserted agreement after every event; these are the non-vacuity halves, and each
+    // sits at the point in the sequence that depends on it.
+    assert!(!checked.chosen.is_empty(), "nothing was chosen, so agreement held vacuously");
+    assert!(ballots_seen(&s).len() > 1, "one ballot ran, so no ballots competed");
+    assert!(preemptions(&s) > 0, "no ballot was ever refused, so none of them collided");
+    assert!(s.trace().session_ends() > 0, "no session ended, so nothing was ever lost");
+}
+
+#[test]
+fn a_chosen_proposal_is_one_that_was_proposed_and_an_unproposed_slot_stays_empty() {
+    let mut s = sim_of(&FIVE, unreliable(29));
+    for slot in [1u64, 2, 4] {
+        s.command(E, Cmd::Propose { slot, command: (slot * 7) as u32 });
+    }
+    churn(&mut s, 29, 4, Duration::from_millis(200));
+    let checked = run_checking(&mut s, Duration::from_secs(4));
+
+    // S2 is asserted inside the checker after every event; here is the slot nobody proposed for.
+    assert!(!checked.chosen.contains_key(&3), "slot 3 was never proposed for and must stay empty");
+    assert!(checked.chosen.contains_key(&1), "and the proposed slots must actually be chosen");
+    assert_eq!(decisions(&s).get(&1), Some(&7));
+}
+
+#[test]
+fn safety_survives_a_minority_crashing_and_never_returning() {
+    // Crash-stop, which is the source's own model: the crashed processes are **not** restarted,
+    // and safety is asserted over the survivors. A process that returned having forgotten what it
+    // knew would be outside what this module claims — see the module documentation.
+    let mut s = sim_of(&FIVE, synchronous(31));
+    for slot in 1..=3u64 {
+        s.command(E, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_millis(200));
+
+    let decided_before = decisions(&s).len();
+    s.crash(A);
+    s.crash(B);
+    assert!(s.is_stopped(A) && s.is_stopped(B), "the crashes really happened, and before the rest");
+
+    for slot in 4..=6u64 {
+        s.command(E, Cmd::Propose { slot, command: slot as u32 });
+    }
+    let checked = run_checking(&mut s, Duration::from_secs(5));
+
+    assert!(
+        checked.chosen.len() > decided_before,
+        "the run must make progress after the crashes, or it proves nothing about them",
+    );
+    // Agreement was checked after every event by `run_checking`; this pins that the survivors did
+    // the work rather than the run having stalled.
+    for slot in 1..=3u64 {
+        assert_eq!(decisions(&s).get(&slot), Some(&(slot as u32)));
+    }
+}
+
+#[test]
+fn a_majority_that_has_taken_up_a_ballot_cannot_afterwards_accept_a_lower_one() {
+    // The acceptor's promise, and the only thing standing between this run and a split slot.
+    //
+    // A leads at `stale` and commands slot 1 with 111, but every one of those requests is *held* —
+    // delayed past what happens next rather than lost, which is what makes A a stale leader that
+    // does not know it. C then takes up a higher ballot, sees nothing accepted for slot 1, and
+    // gets 999 chosen. Only then are A's requests released. An acceptor that honours its promise
+    // refuses them and answers with the ballot it now holds, so A is preempted and decides
+    // nothing. One that does not would give A a majority for 111, and the slot would hold two
+    // values at once.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    let stale = h.at(A).leader_ballot();
+
+    h.propose(A, 1, 111);
+    h.hold(|_, _, m| matches!(m, Wire::Synod(SynodMsg::P2a { pvalue }) if pvalue.slot == 1));
+    assert!(h.at(A).commanded_slots().any(|s| s == 1), "A really is commanding slot 1");
+
+    // C climbs above A and runs a full phase one. It is the highest process, so Ω trusts it.
+    assert!(h.at(C).is_trusted(), "C is trusted, which is what lets it lead at all");
+    h.preempt(C, Ballot { round: stale.round + 1, leader: E });
+    let fresh = h.at(C).leader_ballot();
+    assert!(fresh > stale, "C's ballot must be above A's for this to be the stale-leader case");
+    h.settle_without_heartbeats_to(A);
+    assert!(h.at(C).is_active(), "C completed phase one");
+
+    // Nothing was accepted for slot 1 yet — A's requests are still held — so C is free to propose
+    // its own command, and gets it chosen.
+    h.propose(C, 1, 999);
+    h.settle_without_heartbeats_to(A);
+    assert!(
+        h.decisions_at(C).contains(&(1, 999)),
+        "C must get 999 chosen for slot 1, got {:?}",
+        h.decisions_at(C),
+    );
+
+    // Now A's stale phase two lands on acceptors that have moved on.
+    h.release();
+    h.settle_without_heartbeats_to(A);
+
+    assert!(h.at(A).leader_ballot() > fresh, "A must learn it was preempted");
+    let per_slot: BTreeSet<u32> =
+        h.all_decisions().iter().filter(|(_, s, _)| *s == 1).map(|(_, _, c)| *c).collect();
+    assert_eq!(
+        per_slot,
+        BTreeSet::from([999]),
+        "slot 1 was split: a majority that had taken up {fresh} accepted something under {stale}",
+    );
+}
+
+#[test]
+fn the_safety_suite_is_not_vacuous() {
+    // "At most one chosen" is satisfied by a run that chooses nothing, and "no two disagree" by a
+    // run with one leader. Both halves are asserted here, at the point in the schedule that
+    // depends on them, and for both roles: the leader that preempted and the one preempted.
+    let mut s = sim_of(&FIVE, unreliable(37));
+    for slot in 1..=3u64 {
+        s.command(A, Cmd::Propose { slot, command: slot as u32 });
+        s.command(E, Cmd::Propose { slot, command: (slot + 50) as u32 });
+    }
+    s.run_for(Duration::from_millis(300));
+    s.partition(&[&[A, B, C], &[D, E]]);
+    run_checking(&mut s, Duration::from_secs(2));
+
+    // While partitioned, the minority side cannot reach a majority: a leader there is preempted or
+    // stalled, and the majority side carries on. Both roles exist in this run by construction.
+    s.heal();
+    let checked = run_checking(&mut s, Duration::from_secs(4));
+
+    assert!(!checked.chosen.is_empty(), "something must actually have been chosen");
+    assert!(ballots_seen(&s).len() > 1, "the run must contain competing ballots");
+    assert!(preemptions(&s) > 0, "and a preemption must really have happened");
+    // Both roles: somebody's ballot was refused, and somebody did the refusing.
+    let refusers: BTreeSet<NodeId> = s
+        .trace()
+        .sends()
+        .filter_map(|(from, _, m)| match m {
+            Wire::Synod(SynodMsg::P1b { .. }) | Wire::Synod(SynodMsg::P2b { .. }) => Some(from),
+            _ => None,
+        })
+        .collect();
+    assert!(refusers.len() >= 3, "a majority must have answered for any of this to mean anything");
+}
+
+#[test]
+fn safety_holds_across_a_sweep_of_seeds() {
+    // Breadth, where the hand-driven schedules give depth. A failure here reports its seed, and the
+    // seed replays the run exactly.
+    for seed in 100..112u64 {
+        let mut s = sim_of(&FIVE, unreliable(seed));
+        for (i, node) in FIVE.iter().enumerate() {
+            for slot in 1..=2u64 {
+                s.command(
+                    *node,
+                    Cmd::Propose { slot, command: (i as u32 + 1) * 100 + slot as u32 },
+                );
+            }
+        }
+        s.run_for(Duration::from_millis(200));
+        s.partition(&[&[A, B], &[C, D, E]]);
+        churn(&mut s, seed, 3, Duration::from_millis(200));
+        s.heal();
+        s.deliver_session_events();
+        churn(&mut s, seed + 3, 4, Duration::from_millis(300));
+        let checked = run_checking(&mut s, Duration::from_secs(3));
+        assert!(
+            !checked.chosen.is_empty(),
+            "seed {seed} chose nothing, so it proved nothing about agreement",
+        );
+        assert!(s.trace().session_ends() > 0, "seed {seed} never lost a message");
+    }
+}
+
+mod common;

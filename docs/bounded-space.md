@@ -93,6 +93,7 @@ residual warning in the table.
 | `consensus_based_total_order_broadcast` | `unordered`, `delivered`, and one consensus instance per round | entries handled ❌ — **the page**, and the module says so |
 | `logged_uniform_total_order_broadcast` | the same three, and `delivered` and `proposals` **in stable storage** | entries handled ❌❌ — the page again |
 | `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership** for state and for work; inherits `logged_epoch_change`'s ⚠️ |
+| `multi_paxos_synod` | `accepted` (every pvalue, resent whole in every `p1b`), `proposals`, one commander per undecided slot | slots handled ❌ — **the page**: vRA §2 is explicitly the impractical version, and §4.1 and §4.2 are what bound it |
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the
 second problem and no longer do: the durable state was one blob rewritten on every change, so a

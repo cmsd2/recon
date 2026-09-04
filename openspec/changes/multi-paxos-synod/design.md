@@ -204,6 +204,32 @@ the phase-two escalation to proposed-but-undecided slots rather than to live com
 as the most faithful reading and the slowest recovery, turning a reachable case into a full timeout
 plus a rerun of phase 1.
 
+### What folding the threads into fields actually costs: two more departures
+
+Both were found by building it, and both have one cause. A thread has an identity, and that identity
+is doing two jobs the figures never name: it routes a reply to the attempt that made the request,
+and it makes a reply to an attempt that has **exited** unroutable. A field has neither.
+
+**A `p2b` must name its slot.** Figure 4 answers with `⟨p2b, self(), ballot_num⟩`, which is enough
+for a commander thread because the reply is addressed to it. A leader running commanders for several
+slots at once cannot tell from `⟨p2b, α, b⟩` which of them answered, so the slot travels in the
+message. No guarantee changes — the slot was already determined by the request the reply answers —
+and `p1b` needs no equivalent, because a leader runs at most one scout.
+
+**A reply naming a ballot below the attempt's is stale and must be discarded.** This is the half
+that bites, and taking Figure 6 literally is a liveness bug that was measured: a leader is preempted,
+climbs, and starts a scout for the new ballot; the second acceptor's answer to the *old* ballot then
+arrives, fails `b' = b`, takes the `else` arm, and discards the running scout while reporting a
+preemption the leader correctly ignores as beneath its current ballot. The leader ends with no scout,
+not active, and nothing in the sweep to restart it. It stops for ever while Ω goes on trusting it.
+So a reply is classified against the attempt it reaches: above is a preemption, equal is an answer,
+below is an answer to an attempt that has already exited. Under the figures' own model the third case
+cannot arise, which is why they do not name it.
+
+Neither was foreseen here, and that is worth recording rather than smoothing over: the decision to
+make scouts and commanders fields was right, and its price was two clauses the source had no reason
+to write down.
+
 ### Timers
 
 One periodic timer, for retransmitting `p1a` and `p2a` to acceptors that have not answered, **and**
@@ -242,8 +268,14 @@ at the promise (A2), one command per ballot and slot (C1), and per-slot agreemen
 names the first event that broke it, and the seed replays it.
 
 **Schedules come from two sources, and both are needed.** Seeded sweeps — the same property checks
-run across a batch of seeds with loss, duplication, reordering and a partition window switched
-on — find the interleavings nobody thought of, and the failing seed is the reproduction. Hand-driven
+run across a batch of seeds with a partition window and **session churn** switched on — find the
+interleavings nobody thought of, and the failing seed is the reproduction. Churn rather than
+`Config::loss`, and this is a trap the first draft of the suite fell into: in session mode the
+simulator applies no loss, duplication or reordering whatever, because that is what a session *is*.
+A sweep configured with `.loss(0.1).sessions()` runs on a perfectly clean network while reading as
+adversarial, which is exactly the silent vacuity this repository keeps finding. The way to lose a
+message under a session link is to end the session, so every such test asserts `session_ends() > 0`
+at its place in the sequence. Hand-driven
 `step_with` schedules cover the edges randomness rarely lands on: adoption at exactly the majority
 and not one fewer, two leaders alternating phases over one slot, a preemption arriving between a
 majority's last `p2b` and the decision being noticed, the stale-`p2a` route of the acceptor

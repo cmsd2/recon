@@ -287,6 +287,7 @@ restart.
 | Total-order log — the port | [`total_order_log.rs`](crates/recon-protocols/src/total_order_log.rs) | — | port | none |
 | Consensus-based total-order broadcast | [`consensus_based_total_order_broadcast.rs`](crates/recon-protocols/src/consensus_based_total_order_broadcast.rs) | Module 6.1, Alg. 6.1 | transcription | unbounded |
 | Logged uniform total-order broadcast | [`logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/src/logged_uniform_total_order_broadcast.rs) | Module 6.12, Alg. 6.12 | transcription | unbounded, in stable storage too |
+| Multi-Paxos — the Synod protocol | [`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) | **not in Cachin** — vRA (2015) §2, Figs. 4, 6, 7 | transcription | unbounded — grows with the slots handled |
 
 Two things change besides the indication. **Startup becomes a branch** — a process with nothing in
 storage is initialised, one with something is recovered, exactly one runs, and both can emit
@@ -314,8 +315,10 @@ recovery phase repairs, at exactly `k` requests per gap. Identity at both layers
 originator's incarnation, so a restarted originator's broadcasts are neither discarded as duplicates
 by the eager layer nor as already-delivered by the lazy one — and a receiver keeps state for at most
 two incarnations of each originator, so a restart costs a purge rather than a leak.
-Multi-Paxos will join the set when it is written; single-instance Paxos will not — it is the book's
-stepping stone, and is kept as one.
+Multi-Paxos joins the set once it is bounded: `multi_paxos_synod` is written and runs over a session
+link, which is the set's first obligation, but its state still grows with the slots handled, which is
+the second. Single-instance Paxos will not join — it is the book's stepping stone, and is kept as
+one.
 
 ### Detectors versus quorums
 
@@ -397,7 +400,7 @@ protocol track                        evidence track
 2. defensive re-announcement          B. per-node clocks, and skew
 3. bounding what grows                C. invocations in the trace          ✓ built
 4. a replicated-log port              D. indeterminate outcomes
-5. multi-Paxos ┐                      E. shrinking                        ✓ built
+5. multi-Paxos: Synod ✓ built         E. shrinking                        ✓ built
    ZAB         ├── over it ───┐       F. logging and tracing              ✓ built
    VR, Raft…   ┘              │       G. a concurrent workload
                               └───────┴──▶  H. a checker, written once
@@ -545,10 +548,21 @@ Building it cost three changes to `recon-core`, each found by the compiler rathe
   keeping its own record. The key is passed as data rather than captured, so a slot is still one
   fixed function, which is what `Slot`'s own note about not capturing was protecting.
 
-**Item 5 has no page yet, and that is the open question.** Multi-Paxos is not in Cachin at all; the
-practical writeups are elsewhere — van Renesse & Altinbuken's *Paxos Made Moderately Complex*, and
-Kirsch & Amir's *Paxos for System Builders*. This repository's method is to quote the source and
-state departures, which needs a source. Choosing one is the first decision item 5 has to make.
+**Item 5 had no page, and that was the open question. It is answered, and the first of three changes
+is built.** Multi-Paxos is not in Cachin at all, so the source is van Renesse & Altinbuken's *Paxos
+Made Moderately Complex* — the 2015 ACM Computing Surveys edition, not the 2011 Cornell report of the
+same title. It was chosen over Kirsch & Amir's *Paxos for System Builders* for the reason
+[`docs/bounded-space.md`](docs/bounded-space.md) makes central: Kirsch & Amir specify more of what a
+deployment needs, but the protocol they specify keeps a Global History that is never truncated, so
+transcribing it faithfully would reproduce the defect this work exists to remove. The survey puts the
+bounding **on the page** — §4.1 has an acceptor keep only the most recently accepted pvalue per slot,
+and §4.2 collects state below a watermark — so the module can become an implementation while staying
+a faithful transcription of its source.
+
+[`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) is §2, the Synod protocol:
+ballots, acceptors, scouts, commanders and leaders, with safety holding unconditionally and progress
+claimed only where Ω settles. Two changes remain — slots, a replica and the `TotalOrderLog` port; and
+then §4.1 and §4.2's bounding, which is what admits it to the real-world set.
 
 #### A. Non-transitive partitions — **built**
 
@@ -832,9 +846,19 @@ at runtime rather than loud — each one is a bug that would otherwise be found 
 | `cargo clippy -D warnings` | any lint | warnings accumulate and hide real diagnostics |
 | `cargo doc -D warnings` | a broken intra-doc link | a docstring naming something that is not there asserts a contract the code does not have, and it fails silently — the link just renders as text. It had already happened four times when the check was added: `Cmd::Start` documented in two modules as the way to begin a broadcast after the command was removed, a deleted `ScopedLink` still explained, and a renamed method still linked |
 
-One more check is deliberately outside that set, in
-[`check-durability-tests.sh`](scripts/check-durability-tests.sh), because it rebuilds the crate
-under a feature and runs the suites again — a minute, against the seconds the others cost. It
+**Two** more checks are deliberately outside that set, because each rebuilds the crate under a
+feature and runs the suites again. [`check-safety-tests.sh`](scripts/check-safety-tests.sh) is the
+same instrument pointed at agreement rather than durability: it compiles two mutations of
+`multi_paxos_synod` — a leader that ignores what the majority reported, and an acceptor that accepts
+below its own promise — and requires every test registered against each to fail. Agreement admits the
+silent substitution particularly easily, since "at most one proposal chosen per slot" is satisfied by
+a run that chooses nothing and "no two disagree" by a run with one leader, whatever the code does.
+The first mutation was noticed by five tests and the second by **one**, which is what writing the
+guard was for: the suite could not tell an acceptor that kept its promise from one that did not until
+a schedule was written that made a stale leader's phase two land on a majority that had moved on.
+
+The other is [`check-durability-tests.sh`](scripts/check-durability-tests.sh), which rebuilds the
+crate under a feature and runs the suites again — a minute, against the seconds the others cost. It
 breaks the thing and requires the red: `--features lose-storage-on-restart` makes `Sim::restart`
 discard what was written, and the twenty-five tests registered in the script must then fail. One
 that passes is reading the network rather than the disk, and in this project the network is always
@@ -909,14 +933,15 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 | [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, the survivors still ordering after a process crashes for good, and a non-vacuity half requiring the run to have contained overlapping operations | 19 |
 | [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart **from its own storage** — the restarted process is cut off from the network first, because the retransmission backlog can silently rebuild it and a durability test that allows that asserts nothing — agrees with a process that never failed, recovers consistently from dying inside a write, settles rather than re-sending for ever, appends something *new* after recovering, and appends the growing halves rather than rewriting them | 7 |
+| [`tests/multi_paxos_synod.rs`](crates/recon-protocols/tests/multi_paxos_synod.rs) | the Synod protocol: a checker fed from the trace and run after **every** event, so a violation names the event that broke it; a seeded sweep beside hand-driven schedules for the edges randomness misses — adoption at exactly the majority, an acceptor reached cold by a retransmitted `p2a`, a stale leader whose phase two lands on a majority that has moved on, and each of the three lost-message liveness violations with that one message dropped rather than lossy links switched on | 26 |
 | [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded at the instant it was handled rather than scheduled, what a test can now ask that it could not, and an operation that never began recorded with why — crashed, stalled, or not a process | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-597 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
+623 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
 `compile_fail`, on the link, detector and total-order-log ports and on narrating without a
-vocabulary, and two worked examples of a storage slot — 612 in total,
+vocabulary, and two worked examples of a storage slot — 638 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.
