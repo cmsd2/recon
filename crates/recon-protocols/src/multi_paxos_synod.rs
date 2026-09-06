@@ -206,12 +206,34 @@
 //! | Where | What is lost | What happens | What this leader does |
 //! |---|---|---|---|
 //! | Phase 1 | `p1a` | no `p1b` majority and no preemption ever arrives, so the leader waits for ever | restarts phase one after a timeout |
-//! | Phase 2 | `p2b` | no decision for that slot, and if it happens at every leader the layer above stalls too | resends `p2a` for that slot on each tick |
+//! | Phase 2 | `p2b` | no decision for that slot, and if it happens at every leader the layer above stalls too | resends `p2a` for that slot once a round trip has passed |
 //! | Phase 2 | `preempt` | a majority has moved to a higher ballot, so `p2a` can never reach one — the leader sends for ever and decides nothing | restarts **phase one** after a timeout |
 //!
 //! The third is the one a naive design gets wrong. Resending `p2a` cannot help once a majority
 //! holds a higher ballot; the leader has to go back to phase 1. A single retransmission sweep over
 //! unanswered requests recovers from the first two and loops for ever on the third.
+//!
+//! # Retransmission: how often it is *asked*, and how often it is *done*
+//!
+//! One timer, at `Timing::retransmit`, runs the sweep. It used to decide both questions, and that
+//! was the mistake: every suite here configures `retransmit` at half the simulator's delivery
+//! bound, so a request went out again before an answer to it could possibly have arrived. Measured
+//! over ten entries at five processes, phase two cost **3.6× what the algorithm needs** — two
+//! thirds of it the protocol talking over itself.
+//!
+//! So the sweep decides how often the question is asked and `resend_after`
+//! decides the answer. **`Timing::retransmit` below the delivery bound is not a tuning choice, it
+//! is a mistake** — the same shape as `detect_after`'s own note about exceeding the bound by a
+//! margin, and with the same remedy: state what the parameter has to exceed. Here the sweep may be
+//! as fine as you like, because it is no longer what sets the rate.
+//!
+//! A tick-driven resend is a **stubborn link's** idiom in the first place — resend because the
+//! network may have dropped it — and this module runs over a session link, which drops nothing
+//! while a session holds. The only loss is at a session ending, and the establishment that follows
+//! is when a resend can succeed. That event is what `resend_to` acts on, which
+//! makes the sweep a backstop rather than the mechanism. This is the first module in the repository
+//! to act on `SessionEstablished` rather than merely propagate it; `docs/conditional-guarantees.md`
+//! records what that obliges.
 //!
 //! **Both restarts rerun phase one under the same ballot.** For a lost `p1a` the rerun is
 //! idempotent: an acceptor that already adopted the ballot answers again, and the scout recollects.
@@ -638,7 +660,7 @@ struct Scout<C> {
     /// When phase one began, for the escalation. Not the figure's: the figure waits for ever.
     started: Time,
     /// When its requests last went out, so a resend is timed against the delivery bound rather than
-    /// against how often the sweep happens to run. See [`MultiPaxosSynod::resend_after`].
+    /// against how often the sweep happens to run. See `resend_after`.
     last_sent: Time,
 }
 
@@ -658,7 +680,7 @@ struct Commander<C> {
     waitfor: BTreeSet<NodeId>,
     /// When phase two began for this slot, for the escalation.
     started: Time,
-    /// When its requests last went out. See [`MultiPaxosSynod::resend_after`].
+    /// When its requests last went out. See `resend_after`.
     last_sent: Time,
 }
 
@@ -1295,6 +1317,47 @@ where
         }
     }
 
+    /// Send again, to one peer, what that peer has not answered — because a session with it has
+    /// just been established.
+    ///
+    /// **The event this repository documents and nothing acted on.** `session_link.rs` calls an
+    /// establishment "the moment on which anything that must be resent can be", and until this
+    /// every module over a session link propagated it and did nothing else. A session ending is the
+    /// only way this stack loses a message, so the establishment that follows is the only moment a
+    /// resend can succeed; waiting out the threshold instead makes recovery slower than the
+    /// information already available, and it is why that threshold can afford to be generous.
+    ///
+    /// To the peer the event names, and to nobody else. A fan-out on every establishment would cost
+    /// membership squared as a cluster reconnects, for a peer that is owed nothing.
+    ///
+    /// `last_sent` is deliberately **not** reset. It belongs to the attempt rather than to a peer,
+    /// so moving it here would delay the sweep's resends to peers whose sessions never broke. The
+    /// cost is that one peer may be asked twice in quick succession after an ending, which is
+    /// bounded by how often sessions end and is the cheaper mistake.
+    fn resend_to(&mut self, peer: NodeId, cx: &mut ProtoCx<'_, Self>) {
+        if let Some(scout) = self.scout.as_ref() {
+            if scout.waitfor.contains(&peer) {
+                let ballot = scout.ballot;
+                self.transmit(peer, SynodMsg::P1a { ballot }, cx);
+            }
+            // A leader in phase one has no commanders: `preempted` clears them and `adopted` is
+            // what starts them. Nothing below applies.
+            return;
+        }
+        if !self.active {
+            return;
+        }
+        let owed: Vec<Pvalue<C>> = self
+            .commanders
+            .iter()
+            .filter(|(_, c)| c.waitfor.contains(&peer))
+            .map(|(slot, c)| Pvalue { ballot: c.ballot, slot: *slot, command: c.command.clone() })
+            .collect();
+        for pvalue in owed {
+            self.transmit(peer, SynodMsg::P2a { pvalue }, cx);
+        }
+    }
+
     /// Arm the sweep, or re-arm it after it fired.
     fn arm(&mut self, cx: &mut ProtoCx<'_, Self>) {
         self.tick = Some(cx.set_timer(self.retry));
@@ -1333,7 +1396,8 @@ where
                     cx.indicate(Ind::SessionEnded { peer, epoch })
                 }
                 LinkInd::Boundary(Boundary::Established { peer, epoch }) => {
-                    cx.indicate(Ind::SessionEstablished { peer, epoch })
+                    cx.indicate(Ind::SessionEstablished { peer, epoch });
+                    self.resend_to(peer, cx);
                 }
             }
         }

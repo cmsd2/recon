@@ -507,6 +507,144 @@ fn the_escalations_still_fire_at_their_own_threshold() {
     );
 }
 
+// ------------------------------------------------- the establishment is when a resend can succeed
+
+/// A run in which one session breaks with a request outstanding, and the threshold is set so far
+/// above the run that only the establishment can be what recovers it.
+///
+/// `escalate_after` is what `resend_after` is derived from, so raising it raises both — which is
+/// exactly what this needs: no sweep may resend inside the window, and no escalation may restart
+/// the phase either, leaving the establishment as the only candidate.
+fn patient(seed: u64) -> Sim<Synod> {
+    let timing = Timing { detect_after: Duration::from_secs(30), ..timing() };
+    let config = synchronous(seed).sessions();
+    let mut s: Sim<Synod> =
+        Sim::new(config, &FIVE, move |me| MultiPaxosSynod::new(me, FIVE, timing));
+    s.record_notes();
+    s.deliver_session_events();
+    s
+}
+
+#[test]
+fn an_establishment_is_what_recovers_a_request_lost_at_an_ending() {
+    // The event `session_link.rs` calls "the moment on which anything that must be resent can be",
+    // and which nothing in this repository acted on until now. With the threshold set thirty
+    // seconds out, neither the sweep nor the escalation can be what completes this round.
+    let mut s = patient(91);
+    // A leader, and a slot in flight.
+    s.run_for(Duration::from_millis(600));
+    assert!(s.at(E).is_active(), "E must lead before anything is lost");
+    s.command(E, Cmd::Propose { slot: 1, command: 111 });
+    s.step_now();
+
+    // Break E's session with a peer while its request is outstanding, and let the ending land.
+    s.break_session(E, A);
+    s.deliver_session_events();
+    s.run_for(Duration::from_millis(100));
+    let lost =
+        s.trace().drops_because(recon_sim::DropReason::NoSession) + s.trace().suffix_losses();
+    assert!(lost > 0, "the ending must actually have cost a message, or nothing needs recovering");
+
+    // Nothing else may resend inside the window: the threshold and the escalation are both far
+    // away. Whatever completes the round is the establishment.
+    let before = s.trace().send_count();
+    s.run_for(Duration::from_secs(3));
+    assert_eq!(
+        decisions(&s).get(&1),
+        Some(&111),
+        "the round must complete, and the establishment is the only thing that could have \
+         completed it — the threshold is {:?} away",
+        Duration::from_secs(30),
+    );
+    assert!(s.trace().send_count() > before, "and something really was sent again");
+    // Non-vacuity on the other side: the run is far shorter than the threshold, so no sweep resend
+    // and no escalation can have happened.
+    assert!(
+        s.now() < Time::from_secs(15),
+        "the run must finish well inside the threshold, or the threshold is not what is excluded",
+    );
+}
+
+#[test]
+fn an_establishment_resends_to_that_peer_and_to_nobody_else() {
+    // A fan-out on every establishment would cost membership squared as a cluster reconnects, for
+    // peers that are owed nothing.
+    let mut s = patient(92);
+    s.run_for(Duration::from_millis(600));
+    assert!(s.at(E).is_active(), "E leads");
+    s.command(E, Cmd::Propose { slot: 1, command: 111 });
+    s.step_now();
+    s.break_session(E, A);
+    s.deliver_session_events();
+
+    // Mark before anything can re-establish. The detector's heartbeats are what next attempt a
+    // send to A, so the session comes back within a heartbeat and the resend follows it.
+    let mark = s.trace().events().len();
+    s.run_for(Duration::from_secs(2));
+
+    // Phase two's request is what A is owed. B, C and D answered before the ending and owe nothing,
+    // so no `p2a` may go to them — the decision that follows is a fan-out and is not this.
+    let requests: Vec<NodeId> = s
+        .trace()
+        .events()
+        .iter()
+        .skip(mark)
+        .filter_map(|e| match e {
+            recon_sim::TraceEvent::Sent {
+                from,
+                to,
+                msg: Wire::Synod(SynodMsg::P2a { .. }),
+                ..
+            } if *from == E => Some(*to),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        requests.contains(&A),
+        "E must resend to the peer whose session came back: {requests:?}",
+    );
+    assert!(
+        requests.iter().all(|t| *t == A),
+        "E resent to a peer that owed it nothing: {requests:?}",
+    );
+}
+
+#[test]
+fn an_establishment_with_a_peer_that_owes_nothing_resends_nothing() {
+    // The other half of the guard, and the case a reconnecting cluster is full of: a session comes
+    // back for a peer with no outstanding request, and nothing goes out on account of it.
+    let mut s = patient(93);
+    s.run_for(Duration::from_millis(600));
+    s.command(E, Cmd::Propose { slot: 1, command: 111 });
+    s.run_for(Duration::from_millis(600));
+    assert_eq!(decisions(&s).get(&1), Some(&111), "everything is settled and nobody owes anything");
+
+    let before = s.trace().send_count();
+    s.break_session(E, A);
+    s.deliver_session_events();
+    s.run_for(Duration::from_secs(2));
+
+    // Heartbeats are the detector's and go out regardless; the algorithm's own traffic must not.
+    let synod_after = s
+        .trace()
+        .events()
+        .iter()
+        .filter(|e| matches!(e, recon_sim::TraceEvent::Sent { msg: Wire::Synod(_), .. }))
+        .count();
+    let synod_before = s
+        .trace()
+        .events()
+        .iter()
+        .take_while(|e| !matches!(e, recon_sim::TraceEvent::SessionEnded { .. }))
+        .filter(|e| matches!(e, recon_sim::TraceEvent::Sent { msg: Wire::Synod(_), .. }))
+        .count();
+    assert_eq!(
+        synod_after, synod_before,
+        "a session came back for a peer owed nothing, and the protocol sent on account of it",
+    );
+    let _ = before;
+}
+
 // ------------------------------------------------- a message to oneself is not a network message
 
 #[test]

@@ -55,21 +55,21 @@ depend on. It belongs to the simulator, which is what turns an effect into a pac
 - [x] 3.4 Verify the escalations are untouched — a lost `p1a` still restarts phase one and a stalled
       commander still goes back to it, at `escalate_after` as before. These are the cross-check's
       liveness fixes and this change is about cost
-- [ ] 3.5 Verify the module states that `retransmit` below the delivery bound is a mistake rather
+- [x] 3.5 Verify the module states that `retransmit` below the delivery bound is a mistake rather
       than a tuning choice, in the terms `detect_after`'s own note uses
 
 ## 4. Resending on a session establishment
 
-- [ ] 4.1 The scope handler resends outstanding requests to the peer an establishment names, and to
+- [x] 4.1 The scope handler resends outstanding requests to the peer an establishment names, and to
       that peer alone. Verify the module quotes `session_link.rs`'s own description of the event and
       says why this capability is the first to act on it
-- [ ] 4.2 Verify the resend goes to one peer: break one session, re-establish it, and assert nothing
+- [x] 4.2 Verify the resend goes to one peer: break one session, re-establish it, and assert nothing
       was sent to any other process on account of the establishment
-- [ ] 4.3 Verify it is the establishment and not the timeout that recovers: set the threshold well
+- [x] 4.3 Verify it is the establishment and not the timeout that recovers: set the threshold well
       above the run, break a session with a request outstanding, re-establish, and assert the
       exchange completes. Assert the non-vacuity half — the request really was lost, and the
       threshold really had not elapsed
-- [ ] 4.4 Verify nothing is resent on an establishment with a peer that owes nothing, so that a
+- [x] 4.4 Verify nothing is resent on an establishment with a peer that owes nothing, so that a
       reconnecting cluster does not produce a burst proportional to membership squared
 
 ## 5. The identity, asserted
@@ -101,14 +101,14 @@ depend on. It belongs to the simulator, which is what turns an effect into a pac
 
 ## 7. What this dates
 
-- [ ] 7.1 The module's documentation on the retry sweep and on `Timing`. Verify the table of the
+- [x] 7.1 The module's documentation on the retry sweep and on `Timing`. Verify the table of the
       three liveness fixes still reads correctly against the code, since the sweep now does two
       jobs on two schedules
-- [ ] 7.2 `README.md`'s real-world set section: the first half of the resource-use obligation is met
+- [x] 7.2 `README.md`'s real-world set section: the first half of the resource-use obligation is met
       and the second is not. Verify the wording does not now imply Multi-Paxos is in the set, because
       the state is still unbounded and §4.2 is what changes that
-- [ ] 7.3 `README.md`'s suite table and counts. Verify against `cargo test --workspace`
-- [ ] 7.4 `docs/conditional-guarantees.md`: this is the first module to act on `SessionEstablished`
+- [x] 7.3 `README.md`'s suite table and counts. Verify against `cargo test --workspace`
+- [x] 7.4 `docs/conditional-guarantees.md`: this is the first module to act on `SessionEstablished`
       rather than only propagate it, and that document is where what a scope event obliges is
       recorded. Verify it says so, and that it does **not** claim the other modules do
-- [ ] 7.5 `./scripts/check.sh` passes in full
+- [x] 7.5 `./scripts/check.sh` passes in full
