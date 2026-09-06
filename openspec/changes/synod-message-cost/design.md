@@ -82,26 +82,63 @@ the ending rather than at the establishment. Rejected because there is nothing t
 session is gone, and the link would drop it. The establishment is the moment, which is what
 `session_link.rs` says.
 
-### A self-addressed message becomes a call
+### A self-addressed message is the driver's business, not the protocol's
 
-`transmit(to, msg)` with `to == self.me` dispatches to the handler directly instead of going through
-the link. The handler is the same function the delivery would have reached, so nothing about the
-protocol's logic changes; what changes is that it is synchronous, cannot be delayed, and cannot be
-lost.
+Written first in `MultiPaxosSynod::transmit`: dispatch to the handler where `to == self.me`. It
+worked, and it was wrong for a reason the first draft did not see.
 
-That last point is the reason this is correctness and not only cost. A process cannot fail to
-deliver a message to itself, and the simulator currently can break a self-session and make it do so.
-Any run that depended on that was exercising an impossible fault.
+**It made the exchange invisible to the trace.** The hand-driven harness files every send into its
+wire and the sim-driven helpers read `trace().sends()`, so a hand-off that never becomes an effect
+is one neither can observe. Measured, `preemptions()` — the non-vacuity floor under
+`the_safety_suite_is_not_vacuous` and `at_most_one_proposal_is_chosen_per_slot_under_competing_
+ballots`, both **registered safety evidence** — returned exactly `0` in runs that still ran three
+and five distinct ballots and still chose proposals. Every preemption those runs contained was a
+leader learning of a higher ballot from its own acceptor, and no rewrite of the schedules brings it
+back, because the event genuinely stopped existing.
 
-The risk is re-entrancy: `transmit` is called from inside handlers, and dispatching to a handler
-from inside a handler is how a stack overflows. The chain is bounded in fact — a `p2a` to self
-produces a `p2b` to self, which either completes the commander or does not, and a `decision` is
-raised rather than sent to self — but "bounded in fact" is what the module has to argue rather than
-assume, and the tasks require the argument and a test that the depth is what the argument says.
+A protocol that hides an exchange from the trace weakens the suite's evidence in a way nothing
+would catch later. So the shortcut belongs where the distinction actually lives: **a driver is what
+turns an `Effect::Send` into a packet**, and it is what should notice the packet is addressed to
+the process it came from. The protocol goes on emitting the effect, the simulator hands it over at
+the current instant without a latency, and the trace records it as its own kind of event — so it
+remains observable while ceasing to be a network message. Every protocol gets it, not only this
+one.
 
-*Alternative considered:* keeping self-sends on the wire and excluding them from the count in the
-test. Rejected: it makes the test the place where the deployment's shape is stated, which is exactly
-backwards, and it leaves the impossible fault in place.
+*Alternative considered:* keeping the protocol-side dispatch and rewriting `preemptions` to read
+something else. Rejected: there is nothing else to read. The refusal only ever existed as a
+message.
+
+### What the hand-off actually removes, and what it does not
+
+The proposal first claimed it removed a fault — a session ending dropping a process's message to
+itself. **It does not, because that fault does not exist.** `Sim::connected(a, a)` is
+unconditionally true and `Sim::ensure_session(a, a)` returns without creating a session, so a
+self-addressed message has always been unloseable. The claim was wrong and is corrected in the
+proposal rather than quietly dropped.
+
+What it removes is real and is two things. The message is **counted** as a network send when it is
+not one, which is the identity's `n` against `n − 1`. And it is **delayed by a full network
+latency**, which is not bookkeeping: a leader waits a delivery bound for its own acceptor's answer,
+lengthening both phases, and a longer phase is more sweeps — so this is part of why the 3.6× figure
+is what it is. Correcting it makes the retransmission threshold's job smaller.
+
+### The simulator invariant, answered
+
+`CLAUDE.md` requires a new simulator capability to be checked against
+`docs/conditional-guarantees.md` with one question: **can it lose something without raising the
+event that says so?**
+
+No, and it strictly narrows what can be lost. A hand-off to oneself is delivered at the instant it
+is made, so it cannot be delayed, dropped, duplicated, reordered, or caught by a session ending; it
+bypasses every fault the network applies rather than being subject to one silently. There is no
+scope to end, because there is no session between a process and itself and never was. And it is
+recorded, so nothing that happens goes unrecorded.
+
+One thing follows that is worth stating rather than discovering: it is delivered **at** the current
+instant and not *within* the current handler. That is the ordinary effect model — every effect a
+handler emits is applied after it returns — and it means the simulator does not run a handler
+inside another handler's effect loop. The protocol-side draft would have had to argue that the
+nesting terminates; this one has no nesting to argue about.
 
 ## Risks / Trade-offs
 

@@ -45,6 +45,12 @@ fn timing() -> Timing {
     Timing { retransmit: Duration::from_millis(10), heartbeat: BOUND * 2, detect_after: BOUND * 6 }
 }
 
+/// How long an attempt goes unanswered before its requests are sent again — half the escalation, as
+/// the module derives it. Not `Timing::retransmit`, which is only how often the question is asked.
+fn resend_after() -> Duration {
+    timing().detect_after / 2
+}
+
 type Synod = MultiPaxosSynod<u32, SessionLink<SynodMsg<u32>>>;
 type Msg = Wire<SynodMsg<u32>>;
 
@@ -142,8 +148,10 @@ fn check(sim: &Sim<Synod>) -> Checked {
         c.proposed.insert((*slot, *command));
     }
     // Sends rather than deliveries: what an acceptor put on the wire is what it held at the time,
-    // whether or not anything received it.
-    for (from, _, msg) in sim.trace().sends() {
+    // whether or not anything received it. **Exchanges** rather than network sends, because an
+    // acceptor that is also the leader answers itself, and its promise is as much a fact then as
+    // when it answers a peer.
+    for (from, _, msg) in sim.trace().exchanges() {
         match msg {
             Wire::Synod(SynodMsg::P1b { ballot, .. })
             | Wire::Synod(SynodMsg::P2b { ballot, .. }) => {
@@ -230,7 +238,11 @@ fn announcements(sim: &Sim<Synod>, want: Slot) -> usize {
 fn preemptions(sim: &Sim<Synod>) -> usize {
     let mut asked: BTreeMap<(NodeId, NodeId), Ballot> = BTreeMap::new();
     let mut n = 0;
-    for (from, to, msg) in sim.trace().sends() {
+    // `exchanges`, not `sends`: a leader is one of its own acceptors, so it refuses its own ballot
+    // as readily as a peer's, and that hand-off is not a network message. Reading only the network
+    // makes this return zero for runs that contained several competing ballots — measured, when
+    // the hand-off was first written inside the protocol where the trace could not see it.
+    for (from, to, msg) in sim.trace().exchanges() {
         match msg {
             Wire::Synod(SynodMsg::P1a { ballot }) => {
                 asked.insert((from, to), *ballot);
@@ -254,13 +266,414 @@ fn preemptions(sim: &Sim<Synod>) -> usize {
 /// competing ballots rather than one leader having its way.
 fn ballots_seen(sim: &Sim<Synod>) -> BTreeSet<Ballot> {
     sim.trace()
-        .sends()
+        .exchanges()
         .filter_map(|(_, _, msg)| match msg {
             Wire::Synod(SynodMsg::P1a { ballot }) => Some(*ballot),
             Wire::Synod(SynodMsg::P2a { pvalue }) => Some(pvalue.ballot),
             _ => None,
         })
         .collect()
+}
+
+// ---------------------------------------------------------------- what a run costs
+
+/// Every message a run put on the wire, counted by kind.
+///
+/// Fed from the trace, and *not* from a total: what a run costs is a different number per kind, and
+/// an average over all of them hides the one thing worth showing — that phase one is paid per
+/// leadership change and phase two per entry.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Cost {
+    p1a: usize,
+    p1b: usize,
+    p2a: usize,
+    p2b: usize,
+    decision: usize,
+    propose: usize,
+    /// The detector's, which are per tick rather than per entry — see [`Cost::of`].
+    heartbeat: usize,
+    /// Messages a process addressed to itself. A deployment has none: the roles are co-located, so
+    /// a leader reaching its own acceptor is a function call.
+    self_addressed: usize,
+}
+
+impl Cost {
+    /// What the run has spent so far.
+    ///
+    /// **The heartbeats are counted and never asserted against the work done**, and that is worth
+    /// saying rather than leaving a reader to wonder why the totals do not add up. Ω is a failure
+    /// detector: it sends on a timer whether or not anything is happening, so its cost is a
+    /// function of how long a run lasts and not of what the run achieved. This capability therefore
+    /// cannot make the claim `an_idle_gossip_sends_nothing` makes for the gossip pair, and the
+    /// reason is the detector rather than the consensus.
+    fn of(sim: &Sim<Synod>) -> Cost {
+        let mut c = Cost::default();
+        for (from, to, msg) in sim.trace().sends() {
+            if from == to {
+                c.self_addressed += 1;
+            }
+            match msg {
+                Wire::Detector(_) => c.heartbeat += 1,
+                Wire::Synod(SynodMsg::P1a { .. }) => c.p1a += 1,
+                Wire::Synod(SynodMsg::P1b { .. }) => c.p1b += 1,
+                Wire::Synod(SynodMsg::P2a { .. }) => c.p2a += 1,
+                Wire::Synod(SynodMsg::P2b { .. }) => c.p2b += 1,
+                Wire::Synod(SynodMsg::Decision { .. }) => c.decision += 1,
+                Wire::Synod(SynodMsg::Propose { .. }) => c.propose += 1,
+            }
+        }
+        c
+    }
+
+    /// What this run has spent since `earlier`.
+    fn since(&self, earlier: &Cost) -> Cost {
+        Cost {
+            p1a: self.p1a - earlier.p1a,
+            p1b: self.p1b - earlier.p1b,
+            p2a: self.p2a - earlier.p2a,
+            p2b: self.p2b - earlier.p2b,
+            decision: self.decision - earlier.decision,
+            propose: self.propose - earlier.propose,
+            heartbeat: self.heartbeat - earlier.heartbeat,
+            self_addressed: self.self_addressed - earlier.self_addressed,
+        }
+    }
+}
+
+/// How many phase-one exchanges the run completed — a leadership change, counted from the trace
+/// rather than assumed, since the per-entry figure means nothing until phase one is attributed
+/// separately.
+fn adoptions(sim: &Sim<Synod>) -> usize {
+    sim.trace()
+        .sends()
+        .filter(|(_, _, m)| matches!(m, Wire::Synod(SynodMsg::P1a { .. })))
+        .map(|(_, _, m)| match m {
+            Wire::Synod(SynodMsg::P1a { ballot }) => *ballot,
+            _ => unreachable!(),
+        })
+        .collect::<BTreeSet<Ballot>>()
+        .len()
+}
+
+/// Decide `entries` slots at `leader` over a settled run, and report what phase two cost.
+///
+/// Leadership is settled *first* and the cost taken from that point, so phase one's own messages
+/// are not charged to the entries.
+fn phase_two_cost(members: &'static [NodeId], entries: u64, seed: u64) -> (Cost, usize) {
+    let mut s = sim_of(members, synchronous(seed));
+    let leader = members[members.len() - 1];
+    s.run_for(Duration::from_millis(600));
+    assert!(s.at(leader).is_active(), "leadership must settle before the entries are counted");
+    let settled = Cost::of(&s);
+    let settled_adoptions = adoptions(&s);
+
+    for slot in 1..=entries {
+        s.command(leader, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_millis(1500));
+    assert_eq!(decisions(&s).len(), entries as usize, "every slot must be decided");
+    assert_eq!(
+        adoptions(&s),
+        settled_adoptions,
+        "leadership must not change while the entries are counted, or phase one is charged to them",
+    );
+    (Cost::of(&s).since(&settled), members.len())
+}
+
+#[test]
+fn phase_two_costs_one_exchange_per_acceptor_per_entry_and_one_decision_to_everyone_else() {
+    // The identity, asserted **exactly** rather than as a bound. A bound of `≤ 4n` would pass a run
+    // spending three times what it needs, which is what this capability was doing before the
+    // retransmission threshold existed.
+    for (members, entries) in [(&THREE[..], 6u64), (&FIVE[..], 6)] {
+        let members: &'static [NodeId] = if members.len() == 3 { &THREE } else { &FIVE };
+        let (cost, n) = phase_two_cost(members, entries, 51);
+        let e = entries as usize;
+        assert_eq!(
+            (cost.p2a, cost.p2b, cost.decision),
+            ((n - 1) * e, (n - 1) * e, (n - 1) * e),
+            "n={n} entries={e}: phase two is one request and one reply per *other* acceptor per \
+             entry, and one decision to every other process — got {cost:?}",
+        );
+        assert_eq!(cost.p1a, 0, "n={n}: no leadership change, so no phase one — got {cost:?}");
+        assert_eq!(cost.p1b, 0, "n={n}: and no answers to one");
+        assert_eq!(cost.self_addressed, 0, "n={n}: a process must send itself nothing");
+    }
+}
+
+#[test]
+fn phase_one_is_paid_per_leadership_change_and_not_per_entry() {
+    // The whole difference between this capability and one consensus instance per entry. Six
+    // entries under one leader must cost the same phase one as one entry does: none at all, beyond
+    // the single adoption that made it leader.
+    let few = phase_two_cost(&FIVE, 1, 61).0;
+    let many = phase_two_cost(&FIVE, 6, 61).0;
+
+    assert_eq!((few.p1a, few.p1b), (0, 0), "one entry pays no phase one of its own");
+    assert_eq!((many.p1a, many.p1b), (0, 0), "and neither do six — got {many:?}");
+    // Non-vacuity: six entries really were decided, and really cost six times the phase two, or the
+    // amortisation above is a statement about a run that did nothing.
+    assert_eq!(many.p2a, few.p2a * 6, "six entries must cost six entries' worth of phase two");
+    assert!(few.p2a > 0, "and one entry must cost something");
+}
+
+#[test]
+fn the_whole_of_a_leadership_change_is_one_exchange_per_acceptor() {
+    // The other half of the identity: what a leadership change itself costs, which is what the
+    // per-entry figure above is amortised against.
+    let mut s = sim_of(&FIVE, synchronous(71));
+    s.run_for(Duration::from_millis(600));
+    assert!(s.at(E).is_active(), "E leads first");
+    let cost = Cost::of(&s);
+    let n = FIVE.len();
+
+    assert_eq!(adoptions(&s), 1, "exactly one ballot ran, so the count below is one change's");
+    assert_eq!(
+        (cost.p1a, cost.p1b),
+        ((n - 1), (n - 1)),
+        "a leadership change is one request and one reply per *other* acceptor — got {cost:?}",
+    );
+    assert_eq!(cost.self_addressed, 0, "and nothing addressed to the leader itself");
+}
+
+#[test]
+fn the_resend_threshold_sits_between_a_round_trip_and_the_escalation() {
+    // The two bounds the module states, pinned rather than left to whoever configures `Timing`.
+    // Below a round trip and a resend goes out for a message still in flight; at or above the
+    // escalation and a phase restarts before a retransmission was ever tried.
+    let round_trip = BOUND * 2;
+    assert!(
+        resend_after() > round_trip,
+        "the threshold {:?} must exceed one round trip {round_trip:?}, or it resends what is \
+         merely in flight",
+        resend_after(),
+    );
+    assert!(
+        resend_after() < timing().detect_after,
+        "the threshold {:?} must stay below the escalation {:?}, or an attempt escalates before \
+         it has been retried",
+        resend_after(),
+        timing().detect_after,
+    );
+    // And the sweep is finer than the threshold, or the threshold is not what decides the rate.
+    assert!(
+        timing().retransmit < resend_after(),
+        "the sweep must be finer than the threshold it checks",
+    );
+}
+
+#[test]
+fn the_escalations_still_fire_at_their_own_threshold() {
+    // This change is about cost, and the cross-check's liveness fixes are not cost. A lost `p1a`
+    // must still restart phase one at the escalation, unchanged by the resend threshold sitting
+    // below it.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    h.preempt(A, Ballot { round: 30, leader: C });
+    assert!(h.at(A).is_scouting(), "A is in phase one");
+    let ballot = h.at(A).leader_ballot();
+    h.wire.clear();
+
+    // Every `p1b` lost, so the scout is neither adopted nor preempted. Past the escalation it
+    // restarts, which is a fresh fan-out to *every* acceptor rather than to those that owe.
+    for _ in 0..20 {
+        h.advance(timing().retransmit);
+        h.tick(A);
+        h.settle(|_, to, msg| {
+            !(to == A && matches!(msg, Wire::Synod(SynodMsg::P1b { .. })))
+                && !matches!(msg, Wire::Detector(_))
+        });
+    }
+    assert!(h.at(A).is_scouting(), "it must still be scouting rather than having given up");
+    assert_eq!(h.at(A).leader_ballot(), ballot, "and at the same ballot — a restart, not a climb");
+
+    // One more escalation's worth, with nothing settled afterwards, so the restart's own fan-out is
+    // still in flight to be read. `start_scout` resets the clock, so each escalation earns its own.
+    h.wire.clear();
+    for _ in 0..14 {
+        h.advance(timing().retransmit);
+        h.tick(A);
+    }
+    let asked: Vec<NodeId> = h
+        .in_flight()
+        .iter()
+        .filter(|(from, _, m)| *from == A && matches!(m, Wire::Synod(SynodMsg::P1a { .. })))
+        .map(|(_, to, _)| *to)
+        .collect();
+    assert!(
+        asked.len() >= THREE.len(),
+        "the escalation restarts phase one against *every* acceptor, not only those that owe — \
+         got {asked:?}",
+    );
+}
+
+// ------------------------------------------------- a message to oneself is not a network message
+
+#[test]
+fn nothing_a_process_addresses_to_itself_reaches_the_network() {
+    // The roles are co-located — one process holds both the acceptor and the leader — so a leader
+    // reaching its own acceptor is a hand-off. The simulator delivers it without the network, and
+    // this asserts the consequence over a run that covers **both** phases: entries decided under
+    // one leader, and then a leadership change after it crashes.
+    let mut s = sim_of(&FIVE, synchronous(81));
+    s.run_for(Duration::from_millis(600));
+    for slot in 1..=3u64 {
+        s.command(E, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_millis(600));
+    s.crash(E);
+    // Wait for Ω to move before proposing: a process that is not yet trusted forwards to the one
+    // that is, which here is the crashed E, and nothing at this layer recovers that — the cost of
+    // colocation, which `a_proposal_forwarded_to_a_crashed_process_is_lost` covers.
+    for _ in 0..40 {
+        s.run_for(Duration::from_millis(100));
+        if s.at(D).is_trusted() {
+            break;
+        }
+    }
+    assert!(s.at(D).is_trusted(), "the detector must move to D before it can lead");
+    for slot in 4..=6u64 {
+        s.command(D, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_secs(2));
+
+    assert!(
+        s.trace().sends().all(|(from, to, _)| from != to),
+        "a process addressed the network to itself",
+    );
+    // Non-vacuity, and both halves of it: the run really did both phases, and hand-offs really did
+    // happen — an assertion that nothing self-addressed is on the network is satisfied by a run in
+    // which no process ever addressed itself at all.
+    assert!(decisions(&s).len() >= 6, "the run must decide under both leaders");
+    assert!(ballots_seen(&s).len() > 1, "and leadership must really have changed");
+    assert!(
+        s.trace().handed_to_self().count() > 0,
+        "and the run must contain hand-offs, or this asserts nothing",
+    );
+}
+
+#[test]
+fn a_leaders_own_acceptor_still_counts_toward_the_majority() {
+    // The regression the hand-off most easily causes: a leader that no longer counts itself needs
+    // one more remote answer than it should, and on three processes that is the difference between
+    // deciding and not. Driven so that the leader's own answer is the one completing the quorum —
+    // one peer answers, which is not a majority of three, and the leader's own makes it two.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    h.propose(A, 1, 111);
+
+    // Cut C out entirely, so the only answers are B's and A's own — and keep starving A of
+    // heartbeats, or it stops trusting itself and yields mid-schedule.
+    h.settle(|from, to, msg| {
+        from != C && to != C && !(to == A && matches!(msg, Wire::Detector(_)))
+    });
+    assert!(
+        h.decisions_at(A).contains(&(1, 111)),
+        "one peer's answer plus the leader's own is a majority of three, got {:?}",
+        h.decisions_at(A),
+    );
+    // Non-vacuity: C really was silent, so the leader really did count itself.
+    assert!(
+        h.at(A).accepted_for(1).is_some(),
+        "the leader's own acceptor must have accepted, or it was not part of the quorum",
+    );
+}
+
+#[test]
+fn a_hand_off_takes_no_time_where_a_network_message_takes_a_delivery_bound() {
+    // The half that is not bookkeeping. A leader used to wait a full delivery bound for its own
+    // acceptor's answer, which lengthened both phases and therefore how much the sweep resent.
+    // Asserted from the trace rather than from a duration: the hand-off and the delivery it causes
+    // are at the same instant, and the network's are not.
+    let mut s = sim_of(&THREE, synchronous(83));
+    s.run_for(Duration::from_millis(600));
+
+    let handed: Vec<(NodeId, Time)> = s
+        .trace()
+        .events()
+        .iter()
+        .filter_map(|e| match e {
+            recon_sim::TraceEvent::HandedToSelf { at, node, .. } => Some((*node, *at)),
+            _ => None,
+        })
+        .collect();
+    assert!(!handed.is_empty(), "the run must contain hand-offs");
+
+    // Every hand-off is followed by its delivery at the same instant.
+    for (node, at) in &handed {
+        let delivered_then = s.trace().events().iter().any(|e| match e {
+            recon_sim::TraceEvent::Delivered { at: d, from, to, .. } => {
+                from == node && to == node && d == at
+            }
+            _ => false,
+        });
+        assert!(delivered_then, "{node}'s hand-off at {at:?} was not delivered at that instant");
+    }
+    // And the contrast: a network message is not, under a synchronous bound.
+    let networked = s.trace().events().iter().any(|e| match e {
+        recon_sim::TraceEvent::Sent { at, from, to, .. } => {
+            from != to
+                && s.trace().events().iter().any(|d| match d {
+                    recon_sim::TraceEvent::Delivered { at: da, from: df, to: dt, .. } => {
+                        df == from && dt == to && da > at
+                    }
+                    _ => false,
+                })
+        }
+        _ => false,
+    });
+    assert!(
+        networked,
+        "a message that crossed the network must take time, or there is no contrast"
+    );
+}
+
+#[test]
+fn a_refusal_a_leader_hears_from_its_own_acceptor_is_visible_in_the_trace() {
+    // **The floor an earlier draft emptied.** Eliding the hand-off inside the protocol made a
+    // leader's own acceptor refusing its ballot invisible, and `preemptions` — the non-vacuity half
+    // under two registered safety tests — returned exactly zero for runs containing several
+    // competing ballots. Recording the hand-off is what keeps it readable, and this asserts that
+    // directly rather than trusting `exchanges` to cover it.
+    let mut h = Hand::new(&THREE);
+    // B takes up a high ballot, so A's own acceptor will refuse A's lower one.
+    let high = Ballot { round: 40, leader: C };
+    h.event(A, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
+    assert_eq!(h.at(A).adopted_ballot(), Some(high), "A's acceptor holds the high ballot");
+    h.wire.clear();
+
+    // A now scouts at its own, lower ballot. Its own acceptor refuses, and that refusal is the
+    // whole of what this test is about.
+    h.make_active_leader(A);
+    assert!(
+        h.at(A).leader_ballot() > high,
+        "A must have climbed above the ballot its own acceptor refused, which is the refusal \
+         having been acted on",
+    );
+
+    // And in the simulator the same refusal is a trace event rather than nothing at all.
+    let mut s = sim_of(&FIVE, unreliable(84));
+    for slot in 1..=3u64 {
+        s.command(A, Cmd::Propose { slot, command: slot as u32 });
+        s.command(E, Cmd::Propose { slot, command: 50 + slot as u32 });
+    }
+    s.run_for(Duration::from_millis(300));
+    s.partition(&[&[A, B], &[C, D, E]]);
+    churn(&mut s, 84, 4, Duration::from_millis(200));
+    s.heal();
+    s.deliver_session_events();
+    run_checking(&mut s, Duration::from_secs(3));
+
+    assert!(ballots_seen(&s).len() > 1, "the run must contain competing ballots");
+    assert!(
+        preemptions(&s) > 0,
+        "a refusal must be readable from the trace — this returned zero when the hand-off was \
+         elided inside the protocol, and two registered safety tests lost their floor",
+    );
+    assert!(
+        s.trace().handed_to_self().count() > 0,
+        "and the run must contain hand-offs, or the floor above was never at risk",
+    );
 }
 
 // ---------------------------------------------------------------- the hand-driven harness
@@ -1608,17 +2021,37 @@ fn a_lost_p2b_does_not_leave_a_slot_undecided() {
     assert!(h.decisions_at(A).is_empty(), "no p2b arrived, so nothing is decided yet");
     assert!(h.at(A).commanded_slots().any(|s| s == 3), "the commander is still outstanding");
 
-    // A tick below the escalation threshold resends the pvalue to whoever has not answered.
+    // A sweep *before* an answer could have arrived resends nothing. The sweep interval and the
+    // resend threshold are different things: the first decides how often the question is asked, the
+    // second decides the answer, and conflating them is what had this protocol resending inside one
+    // round trip.
+    let resent_p2a = |h: &Hand| {
+        h.in_flight()
+            .iter()
+            .filter(|(from, _, m)| {
+                *from == A && matches!(m, Wire::Synod(SynodMsg::P2a { pvalue }) if pvalue.slot == 3)
+            })
+            .count()
+    };
     h.wire.clear();
-    h.advance(timing().retransmit);
+    for _ in 0..3 {
+        h.advance(timing().retransmit);
+        h.tick(A);
+    }
+    assert_eq!(
+        resent_p2a(&h),
+        0,
+        "three sweeps inside one round trip must resend nothing — the threshold is {:?} and only \
+         {:?} has passed",
+        resend_after(),
+        timing().retransmit * 3,
+    );
+
+    // Past the threshold, the pvalue goes again to whoever has not answered.
+    h.wire.clear();
+    h.advance(resend_after());
     h.tick(A);
-    let resent = h
-        .in_flight()
-        .iter()
-        .filter(|(from, _, m)| {
-            *from == A && matches!(m, Wire::Synod(SynodMsg::P2a { pvalue }) if pvalue.slot == 3)
-        })
-        .count();
+    let resent = resent_p2a(&h);
     assert!(resent >= 2, "p2a must be resent to the acceptors that did not answer, got {resent}");
 
     // Let the answers through this time.

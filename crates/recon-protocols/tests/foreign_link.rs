@@ -119,7 +119,9 @@ fn the_foreign_link_really_is_a_different_stack() {
     s.command(A, Cmd::Broadcast(9));
     s.run_for(Duration::from_millis(200));
 
-    let sent: Vec<u32> = s.trace().sends().map(|(_, _, m)| *m).collect();
+    // `exchanges`, not `sends`: the claim is what the broadcast put on this link, and a fan-out
+    // reaches the sender itself, which is a hand-off rather than a network message.
+    let sent: Vec<u32> = s.trace().exchanges().map(|(_, _, m)| *m).collect();
     assert_eq!(sent.len(), ALL.len(), "one send per peer, and the wire is the bare payload");
     assert!(sent.iter().all(|m| *m == 9));
 }

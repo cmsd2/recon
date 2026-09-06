@@ -55,12 +55,32 @@ round trip stands in for it.
   Together these make the sweep a backstop rather than the mechanism, which is what running over a
   session link should mean.
 
-- **A message a process sends to itself becomes a call.** §4.4 colocates the roles — this module
-  "holds **both** the acceptor and the leader" — so a `p2a` from a leader to its own acceptor is an
-  intra-process function call that the wire currently carries. Counting it as a message overstates
-  the cost by `2` of every `3n − 1`; worse, the simulator can break the session and *drop* it,
-  modelling a process failing to deliver a message to itself. Removing it takes the identity to
-  `3(n − 1)` per entry and removes a fault that cannot happen.
+- **A message a process sends to itself stops crossing the network.** §4.4 colocates the roles —
+  this module "holds **both** the acceptor and the leader" — so a `p2a` from a leader to its own
+  acceptor is an intra-process hand-off that the simulated wire currently carries. Counting it as a
+  message overstates the cost by `2` of every `3n − 1`, taking the identity to `3(n − 1)` per entry.
+
+  **It is also delayed by a full network latency**, and that is not a bookkeeping point: it makes a
+  leader wait a delivery bound for its own acceptor's answer, which lengthens both phases and is
+  therefore part of why the retransmission figure above is what it is. A hand-off to oneself takes
+  no time.
+
+  *Corrected while implementing:* this was first proposed as also removing a fault — a session
+  ending dropping a process's message to itself. **That fault does not exist.** `connected(a, a)`
+  is unconditionally true and `ensure_session(a, a)` returns without creating a session, so a
+  self-addressed message is already unloseable. What it is is *slow* and *counted*, which is what
+  this fixes.
+
+- **The change belongs to the simulator, not to the protocol.** A driver is what turns an
+  `Effect::Send` into a packet, so a driver is what should notice the packet is addressed to the
+  process it came from. Putting it in `multi_paxos_synod` was tried and rejected: it made the
+  hand-off invisible to the trace, and `preemptions()` — the non-vacuity floor under two
+  **registered safety tests** — fell to exactly zero in runs that still ran three and five distinct
+  ballots, because every preemption those runs contained was a leader learning of a higher ballot
+  from its own acceptor. A protocol that hides an exchange from the trace weakens the suite's
+  evidence silently, which is the failure this repository has the safety guard for. In the
+  simulator the hand-off is recorded, so it stays observable while ceasing to be a network
+  message — and every protocol gets it, not only this one.
 
 - **The timing the suites configure is stated against the delivery bound.** `retransmit` below the
   bound is not a tuning choice, it is a mistake, and the module should say what the parameter has to
@@ -69,11 +89,16 @@ round trip stands in for it.
 ## Capabilities
 
 - `consensus/multi-paxos-synod` — modified
+- `simulation` — modified
 
 ## Impact
 
-- `crates/recon-protocols/src/multi_paxos_synod.rs` — the retry sweep, the scope handler, and
-  `transmit`.
+- `crates/recon-sim/src/sim.rs` and `trace.rs` — a message addressed to its own sender is handed
+  over at the current instant and recorded as its own kind of trace event, rather than being given
+  a latency and counted as a send.
+- `crates/recon-protocols/src/multi_paxos_synod.rs` — the retry sweep and the scope handler.
+  `transmit` is **not** touched: the protocol goes on emitting the effect, and the driver is what
+  knows the difference.
 - `crates/recon-protocols/tests/multi_paxos_synod.rs` and `multi_paxos_replica.rs` — the cost
   identity, the resend on establishment, and the schedules that currently depend on the sweep firing
   every 10 ms. Several hand-driven tests tick and settle; a sweep that no longer resends on every

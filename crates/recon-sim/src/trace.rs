@@ -62,6 +62,20 @@ pub enum TraceEvent<M, I, N, C> {
     Sent { at: Time, from: NodeId, to: NodeId, msg: M },
     /// A message was handed to the recipient protocol.
     Delivered { at: Time, from: NodeId, to: NodeId, msg: M },
+    /// A message a process addressed to **itself**, handed over without the network.
+    ///
+    /// Not a [`TraceEvent::Sent`], because it crosses no wire: a driver is what turns a request to
+    /// send into a packet, and a packet addressed to the process it came from is a hand-off between
+    /// two roles in one state machine. Counting it among what a run put on the network overstates
+    /// what a deployment costs, and giving it a delivery bound makes every phase of a co-located
+    /// protocol slower than it is.
+    ///
+    /// Recorded, and not merely elided, because ceasing to be a network message must not mean
+    /// ceasing to be observable. A leader learning of a higher ballot from its own acceptor is a
+    /// refusal like any other, and a suite that could not see it lost a non-vacuity floor two
+    /// registered safety tests depend on — which is what an earlier draft, eliding it inside the
+    /// protocol, actually did.
+    HandedToSelf { at: Time, node: NodeId, msg: M },
     /// A message was not delivered.
     Dropped { at: Time, from: NodeId, to: NodeId, msg: M, reason: DropReason },
     /// The network scheduled a second copy of a message.
@@ -126,6 +140,7 @@ impl<M, I, N, C> TraceEvent<M, I, N, C> {
     pub fn at(&self) -> Time {
         match self {
             TraceEvent::Sent { at, .. }
+            | TraceEvent::HandedToSelf { at, .. }
             | TraceEvent::Delivered { at, .. }
             | TraceEvent::Dropped { at, .. }
             | TraceEvent::Duplicated { at, .. }
@@ -247,10 +262,39 @@ impl<M, I, N, C> Trace<M, I, N, C> {
         })
     }
 
-    /// Every message a protocol asked to transmit.
+    /// Every message a protocol asked to transmit **over the network**.
+    ///
+    /// A message a process addressed to itself is not among these: it crosses no wire, so it is not
+    /// something the run put on the network, and a cost counted from here is a cost a deployment
+    /// would pay. [`ProtoTrace::exchanges`] is the one to ask when what matters is that the message
+    /// happened rather than where it went.
     pub fn sends(&self) -> impl Iterator<Item = (NodeId, NodeId, &M)> {
         self.events.iter().filter_map(|e| match e {
             TraceEvent::Sent { from, to, msg, .. } => Some((*from, *to, msg)),
+            _ => None,
+        })
+    }
+
+    /// Every message a process handed to itself, without the network.
+    pub fn handed_to_self(&self) -> impl Iterator<Item = (NodeId, &M)> {
+        self.events.iter().filter_map(|e| match e {
+            TraceEvent::HandedToSelf { node, msg, .. } => Some((*node, msg)),
+            _ => None,
+        })
+    }
+
+    /// Every message a protocol asked to transmit, wherever it went — the network's and the
+    /// hand-offs together, in the order they happened.
+    ///
+    /// This is what to ask when the question is whether an exchange *happened*: whether a ballot
+    /// was refused, whether a majority answered, whether two processes talked at all. A protocol
+    /// whose roles are co-located answers itself as readily as it answers a peer, and a reader that
+    /// saw only [`ProtoTrace::sends`] would conclude the exchange never took place. That is not
+    /// hypothetical: it emptied a non-vacuity floor two registered safety tests depend on.
+    pub fn exchanges(&self) -> impl Iterator<Item = (NodeId, NodeId, &M)> {
+        self.events.iter().filter_map(|e| match e {
+            TraceEvent::Sent { from, to, msg, .. } => Some((*from, *to, msg)),
+            TraceEvent::HandedToSelf { node, msg, .. } => Some((*node, *node, msg)),
             _ => None,
         })
     }
@@ -339,8 +383,19 @@ impl<M, I, N, C> Trace<M, I, N, C> {
         self.events.iter().filter(|e| matches!(e, TraceEvent::Delivered { .. })).count()
     }
 
+    /// How many messages the run put on the **network**. A hand-off to oneself is not among them;
+    /// see [`ProtoTrace::sends`].
     pub fn send_count(&self) -> usize {
         self.events.iter().filter(|e| matches!(e, TraceEvent::Sent { .. })).count()
+    }
+
+    /// How many messages a protocol asked to transmit, wherever they went — the counterpart of
+    /// [`ProtoTrace::exchanges`].
+    pub fn exchange_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Sent { .. } | TraceEvent::HandedToSelf { .. }))
+            .count()
     }
 
     pub fn indication_count(&self) -> usize {

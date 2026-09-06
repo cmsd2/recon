@@ -637,6 +637,9 @@ struct Scout<C> {
     pvalues: Pvalues<C>,
     /// When phase one began, for the escalation. Not the figure's: the figure waits for ever.
     started: Time,
+    /// When its requests last went out, so a resend is timed against the delivery bound rather than
+    /// against how often the sweep happens to run. See [`MultiPaxosSynod::resend_after`].
+    last_sent: Time,
 }
 
 /// Figure 6(a)'s commander, as a field rather than a thread.
@@ -655,6 +658,8 @@ struct Commander<C> {
     waitfor: BTreeSet<NodeId>,
     /// When phase two began for this slot, for the escalation.
     started: Time,
+    /// When its requests last went out. See [`MultiPaxosSynod::resend_after`].
+    last_sent: Time,
 }
 
 /// `pmax(pvalues) ≡ {⟨s, c⟩ | ∃b : ⟨b, s, c⟩ ∈ pvalues ∧ ∀b', c' : ⟨b', s, c'⟩ ∈ pvalues ⇒ b' ≤ b}`
@@ -934,6 +939,7 @@ where
             waitfor: self.acceptors.clone(),
             pvalues: BTreeMap::new(),
             started: cx.now(),
+            last_sent: cx.now(),
         });
         for a in self.acceptors.clone() {
             self.transmit(a, SynodMsg::P1a { ballot }, cx);
@@ -992,6 +998,7 @@ where
                 command: command.clone(),
                 waitfor: self.acceptors.clone(),
                 started: cx.now(),
+                last_sent: cx.now(),
             },
         );
         for a in self.acceptors.clone() {
@@ -1207,17 +1214,46 @@ where
 
     // ---------------------------------------------------------------- retries and escalation
 
+    /// How long an attempt may go unanswered before its requests are sent again.
+    ///
+    /// **Not the sweep interval, and the two must not be confused.** The sweep decides how often
+    /// this question is *asked*; this decides the answer. Conflating them is what made a resend
+    /// happen every `Timing::retransmit`, which every suite configures below the delivery bound —
+    /// so a request went out again before an answer to it could possibly have arrived, and two
+    /// thirds of phase two was the protocol talking over itself.
+    ///
+    /// It must **exceed one round trip**, or it resends what is merely in flight, and it must stay
+    /// **below `escalate_after`**, or an attempt is escalated before a retransmission has been
+    /// tried and a phase restarts for a message that was never lost. Half of `escalate_after`
+    /// satisfies both by construction and gives exactly one resend before escalating, which is the
+    /// shape worth having: ask once more, then conclude something is wrong.
+    ///
+    /// The lower bound is a constraint on the *configuration* rather than on this expression:
+    /// `escalate_after` must itself be more than twice the delivery bound, which is weaker than
+    /// what the detector already needs of `detect_after` and which
+    /// `the_resend_threshold_sits_between_a_round_trip_and_the_escalation` pins.
+    fn resend_after(&self) -> Duration {
+        self.escalate_after / 2
+    }
+
     /// The periodic sweep: resend what is outstanding, and escalate an attempt that has waited too
     /// long. See the module's table of the three liveness fixes.
     fn sweep(&mut self, cx: &mut ProtoCx<'_, Self>) {
         let now = cx.now();
+        let resend_after = self.resend_after();
         if let Some(scout) = self.scout.as_ref() {
             let ballot = scout.ballot;
             if now - scout.started >= self.escalate_after {
                 // Phase 1, lost `p1a`: neither adopted nor preempted. Restart, same ballot.
                 self.start_scout(ballot, cx);
-            } else {
-                for a in scout.waitfor.clone() {
+            } else if now - scout.last_sent >= self.resend_after() {
+                // Long enough that an answer would have arrived. Anything sooner would be
+                // resending what is still in flight.
+                let waiting = scout.waitfor.clone();
+                if let Some(scout) = self.scout.as_mut() {
+                    scout.last_sent = now;
+                }
+                for a in waiting {
                     self.transmit(a, SynodMsg::P1a { ballot }, cx);
                 }
             }
@@ -1240,11 +1276,14 @@ where
             self.start_scout(ballot, cx);
             return;
         }
-        // Phase 2, lost `p2b`: resend the pvalue to whoever has not answered.
+        // Phase 2, lost `p2b`: resend the pvalue to whoever has not answered — but only for a
+        // commander that has waited longer than an answer could take.
         let outstanding: Vec<(Slot, Ballot, C, Vec<NodeId>)> = self
             .commanders
-            .iter()
+            .iter_mut()
+            .filter(|(_, c)| now - c.last_sent >= resend_after)
             .map(|(slot, c)| {
+                c.last_sent = now;
                 (*slot, c.ballot, c.command.clone(), c.waitfor.iter().copied().collect())
             })
             .collect();

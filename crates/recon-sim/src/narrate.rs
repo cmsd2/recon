@@ -56,6 +56,9 @@ where
         TraceEvent::Sent { from, to, msg, .. } => {
             tracing::debug!(target: "recon_sim", ?at, node = %from, %to, ?msg, "sent");
         }
+        TraceEvent::HandedToSelf { node, msg, .. } => {
+            tracing::debug!(target: "recon_sim", ?at, node = %node, ?msg, "handed to self");
+        }
         TraceEvent::Delivered { from, to, msg, .. } => {
             tracing::debug!(target: "recon_sim", ?at, node = %to, %from, ?msg, "delivered");
         }
