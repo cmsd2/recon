@@ -288,6 +288,7 @@ restart.
 | Consensus-based total-order broadcast | [`consensus_based_total_order_broadcast.rs`](crates/recon-protocols/src/consensus_based_total_order_broadcast.rs) | Module 6.1, Alg. 6.1 | transcription | unbounded |
 | Logged uniform total-order broadcast | [`logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/src/logged_uniform_total_order_broadcast.rs) | Module 6.12, Alg. 6.12 | transcription | unbounded, in stable storage too |
 | Multi-Paxos — the Synod protocol | [`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) | **not in Cachin** — vRA (2015) §2, Figs. 4, 6, 7 | transcription | unbounded — grows with the slots handled |
+| Multi-Paxos — the replica | [`multi_paxos_replica.rs`](crates/recon-protocols/src/multi_paxos_replica.rs) | **not in Cachin** — vRA (2015) §2.1, Fig. 1 | transcription | unbounded — grows with the commands handled |
 
 Two things change besides the indication. **Startup becomes a branch** — a process with nothing in
 storage is initialised, one with something is recovered, exactly one runs, and both can emit
@@ -315,10 +316,12 @@ recovery phase repairs, at exactly `k` requests per gap. Identity at both layers
 originator's incarnation, so a restarted originator's broadcasts are neither discarded as duplicates
 by the eager layer nor as already-delivered by the lazy one — and a receiver keeps state for at most
 two incarnations of each originator, so a restart costs a purge rather than a leak.
-Multi-Paxos joins the set once it is bounded: `multi_paxos_synod` is written and runs over a session
-link, which is the set's first obligation, but its state still grows with the slots handled, which is
-the second. Single-instance Paxos will not join — it is the book's stepping stone, and is kept as
-one.
+Multi-Paxos joins the set once it is bounded. Both halves are now written — `multi_paxos_synod` and
+`multi_paxos_replica` — and both run over a session link, which is the set's first obligation. The
+second is not met: state still grows with the slots and the commands handled, so what is checked
+today is the send rate, which is flat once every slot has decided, and not the state, which is not
+bounded at all. Single-instance Paxos will not join — it is the book's stepping stone, and is kept
+as one.
 
 ### Detectors versus quorums
 
@@ -519,10 +522,14 @@ is what `G` and `H` were waiting for and what nothing before this could offer. `
 is the port, on the model of `link.rs` and `detector.rs`; the suite belongs to it and the
 implementations are type arguments, so a property is written once and both members are held to it.
 
-**Two implementations, and the pair is the point.** `consensus_based_total_order_broadcast` is
-Algorithm 6.1 in the crash-stop model; `logged_uniform_total_order_broadcast` is the fail-recovery
-one. All eight shared properties run against both, and what differs is exactly one thing — whether
-the sequence survives a restart — which is asserted where the second one is.
+**Three implementations, and the differences are the point.** `consensus_based_total_order_broadcast`
+is Algorithm 6.1 in the crash-stop model and `logged_uniform_total_order_broadcast` is the
+fail-recovery one; between those two, exactly one thing differs — whether the sequence survives a
+restart — and it is asserted where the second one is. `multi_paxos_replica` is the third, and it is
+a different algorithm: one consensus per *leader* rather than one per round, so six appends become
+six commanders outstanding together where the pair run one instance at a time. Every shared property
+runs against all three, and the suite's header says what makes each of them mean something against
+the third rather than assuming the pair's schedule carried over.
 
 **Both are transcriptions, and say so.** The book's construction runs one consensus instance per
 round in lock-step, so every entry pays a full consensus, and `unordered`, `delivered` and the
@@ -561,8 +568,18 @@ a faithful transcription of its source.
 
 [`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) is §2, the Synod protocol:
 ballots, acceptors, scouts, commanders and leaders, with safety holding unconditionally and progress
-claimed only where Ω settles. Two changes remain — slots, a replica and the `TotalOrderLog` port; and
-then §4.1 and §4.2's bounding, which is what admits it to the real-world set.
+claimed only where Ω settles. [`multi_paxos_replica.rs`](crates/recon-protocols/src/multi_paxos_replica.rs)
+is §2.1 and Figure 1 on top of it, and **there is a log**: `slot_in`, `slot_out`, `requests`,
+`proposals` and `decisions`, satisfying `TotalOrderLog` so the shared suite runs against it.
+
+The replica composes the Synod core and nothing else — no link, no broadcast, no wire of its own —
+which §4.4's colocation is what buys: a replica hands its proposal to the leader on its own machine,
+and a leader that cannot act on it forwards it once to the one Ω trusts. The cost is stated and
+tested rather than assumed, and it is that proposal *delivery* now rests on the detector.
+
+One change remains: §4.1 and §4.2's bounding, which is what admits it to the real-world set. Until
+then it is a transcription like the pair beside it, and `docs/bounded-space.md` carries a row for
+each half saying so.
 
 #### A. Non-transitive partitions — **built**
 
@@ -794,8 +811,9 @@ openspec/specs/
 └── consensus/                         flooding consensus, epoch-change, epoch
                                        consensus, leader-driven consensus, the
                                        logged version of each of the last three,
-                                       the total-order log port and its two
-                                       members
+                                       the total-order log port and its three
+                                       members, and the Multi-Paxos Synod
+                                       protocol beneath one of them
 ```
 
 Work is proposed, applied and archived through OpenSpec. In Claude Code these are slash commands
@@ -941,17 +959,18 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/leader_driven_consensus.rs`](crates/recon-protocols/tests/leader_driven_consensus.rs) | Paxos, run mostly where the leader detector is **wrong** — with a non-vacuity half reading from the trace that a rival began before the old epoch had finished everywhere, progress resuming when a healed partition restores the majority, and agreement holding across a bridge whose two quorums share one process | 17 |
 | `tests/logged_epoch_change.rs`, `logged_epoch_consensus.rs` | the same two abstractions over stable storage: durable before visible, what a restart must find, dying inside the write, and that a redelivered announcement is answered once | 11 / 12 |
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
-| [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, the survivors still ordering after a process crashes for good, and a non-vacuity half requiring the run to have contained overlapping operations | 19 |
+| [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, the survivors still ordering after a process crashes for good, and a non-vacuity half requiring the run to have contained overlapping operations — run against **three** implementations, with a header saying what makes each property mean something against the third, whose slots decide independently where the other two decide a batch per round | 29 |
 | [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart **from its own storage** — the restarted process is cut off from the network first, because the retransmission backlog can silently rebuild it and a durability test that allows that asserts nothing — agrees with a process that never failed, recovers consistently from dying inside a write, settles rather than re-sending for ever, appends something *new* after recovering, and appends the growing halves rather than rewriting them | 7 |
 | [`tests/multi_paxos_synod.rs`](crates/recon-protocols/tests/multi_paxos_synod.rs) | the Synod protocol: a checker fed from the trace and run after **every** event, so a violation names the event that broke it; a seeded sweep beside hand-driven schedules for the edges randomness misses — adoption at exactly the majority, an acceptor reached cold by a retransmitted `p2a`, a stale leader whose phase two lands on a majority that has moved on, a value chosen under a leader that then crashes and is not contradicted by its successor, and each of the three lost-message liveness violations with that one message dropped rather than lossy links switched on; and the colocated deployment §4.4 describes — a proposal forwarded once to the leader Ω trusts and never forwarded again, a decision announced to every process rather than held by the one that counted it, a leader answering a re-proposal for a decided slot to the asker alone, and the request lost when the process it was forwarded to has crashed | 35 |
+| [`tests/multi_paxos_replica.rs`](crates/recon-protocols/tests/multi_paxos_replica.rs) | the replica of Figure 1: a passive process's append ordered by the one that leads, the window stopping proposals and an advancing sequence releasing them, a command that loses its slot and comes back, decisions delivered in reverse and then again, and Liu et al.'s fourth liveness violation driven with **one decision dropped** rather than a lossy link switched on — wedged, then unwedged by the leader's answer to a re-proposal | 16 |
 | [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded at the instant it was handled rather than scheduled, what a test can now ask that it could not, and an operation that never began recorded with why — crashed, stalled, or not a process | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-632 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
+658 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
 `compile_fail`, on the link, detector and total-order-log ports and on narrating without a
-vocabulary, and two worked examples of a storage slot — 647 in total,
+vocabulary, and two worked examples of a storage slot — 673 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.

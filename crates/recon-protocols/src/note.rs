@@ -57,6 +57,21 @@ pub enum Note {
     /// `if ∄c' : ⟨s, c'⟩ ∈ proposals`, which is what keeps at most one commander per slot. The
     /// decision produces no effect whatever.
     ProposalIgnored { slot: u64 },
+    /// A replica held requests it was not allowed to propose for, because `slot_in` had reached
+    /// `slot_out + WINDOW` — Invariant R5. **Nothing at all reaches the trace from this decision**:
+    /// a replica whose window is full sends nothing and looks exactly like one with nothing to do,
+    /// which is the shape the fourth liveness violation wears.
+    WindowFull { slot_in: u64, slot_out: u64 },
+    /// A proposal outstanding past its threshold was proposed **again for the same slot** — the
+    /// replica's half of Liu et al.'s fourth liveness fix. Where the leader is on this machine the
+    /// proposal is a function call, so the repeat can reach the trace as nothing whatever; this
+    /// says it happened, and the trace cannot tell it from a first proposal in any case.
+    SlotReproposed { slot: u64 },
+    /// A replica's own command lost its slot to somebody else's and went back into `requests` —
+    /// Figure 1's `if c'' ≠ c' then requests := requests ∪ {c''}`. The decision produces no effect
+    /// until the command is proposed again at a later slot, and a replica that dropped it instead
+    /// would lose an append in silence.
+    ProposalDisplaced { slot: u64 },
 }
 
 /// Why something was refused or ignored.

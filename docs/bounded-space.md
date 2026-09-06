@@ -93,7 +93,21 @@ residual warning in the table.
 | `consensus_based_total_order_broadcast` | `unordered`, `delivered`, and one consensus instance per round | entries handled ❌ — **the page**, and the module says so |
 | `logged_uniform_total_order_broadcast` | the same three, and `delivered` and `proposals` **in stable storage** | entries handled ❌❌ — the page again |
 | `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership** for state and for work; inherits `logged_epoch_change`'s ⚠️ |
-| `multi_paxos_synod` | `accepted` (every pvalue, resent whole in every `p1b`), `proposals`, one commander per undecided slot | slots handled ❌ — **the page**: vRA §2 is explicitly the impractical version, and §4.1 and §4.2 are what bound it |
+| `multi_paxos_synod` | `accepted` (every pvalue, resent whole in every `p1b`), `proposals`, `decided`, one commander per undecided slot | slots handled ❌ — **the page**: vRA §2 is explicitly the impractical version, and §4.1 and §4.2 are what bound it |
+| `multi_paxos_replica` | `decisions`, `performed`, the ordered sequence; `requests` and `proposals` are bounded by `WINDOW` | commands handled ❌ — **the page**: Figure 1 keeps `decisions` for ever and §4.2's watermark is what collects it |
+
+`multi_paxos_synod`'s row gained `decided` and one line of *work* with the replica: a commander
+that counts a majority now announces `⟨decision, s, c⟩` to every process, and a leader answers a
+re-proposal for a decided slot with one directed message. Both are per decision rather than per
+tick, and both are bounded by membership for a given slot, so the shape of the row is unchanged —
+what grows is slots, as everything here does. §4.2's watermark collects `decided` alongside
+`proposals`.
+
+`multi_paxos_replica` inherits that and adds nothing new in kind. Its `requests` and `proposals` are
+held below `slot_out + WINDOW` by Invariant R5, which is the one bounded thing on the page; the
+`decisions` map and the sequence are what §4.2 exists for. Its periodic work is bounded by the
+outstanding proposals rather than by everything ever appended, so its send rate is flat once every
+slot has decided — asserted, because the sweep is exactly the mechanism that would make it not.
 
 The last two carry a double mark for their size, not for what they cost to write. Both had the
 second problem and no longer do: the durable state was one blob rewritten on every change, so a
