@@ -126,6 +126,15 @@ struct Checked {
 /// `synod-accept-below-promise` in `scripts/check-safety-tests.sh`, and the schedules registered
 /// against it — the same shape as the total-order log asserting a non-vacuity floor where the
 /// direct property is invisible to the trace.
+///
+/// **Reading the trace rather than acceptor state is also what makes this checker survive §4.1.**
+/// That reduction has an acceptor keep only the highest-ballot pvalue per slot, so a majority can
+/// stop holding a proposal that was nevertheless chosen — the paper's own worrisome effect, quoted
+/// in the module. A checker that reduced acceptor state would read that as a slot losing its
+/// choice and fail a correct run. This one reads what was sent and what was indicated, neither of
+/// which the reduction touches. `agreement_survives_the_record_of_it_being_overwritten` is where
+/// the case itself is driven, and it asserts over acceptor state deliberately, to pin that the
+/// evidence really is gone.
 fn check(sim: &Sim<Synod>) -> Checked {
     let mut c = Checked::default();
     for (_, _, cmd) in sim.trace().invocations() {
@@ -974,6 +983,264 @@ fn a_proposal_remembered_by_a_leader_that_then_yields_is_forwarded_when_asked_ag
         to_c.iter().any(|m| matches!(m, SynodMsg::Propose { slot: 5, command: 555 })),
         "a process that will not lead must forward, not sit on its own stale proposal: {to_c:?}",
     );
+}
+
+#[test]
+fn an_acceptor_keeps_one_pvalue_per_slot_however_many_ballots_command_it() {
+    // §4.1: "acceptors only maintain the most recently accepted pvalue for each slot". Three
+    // ballots command slot 1, and the acceptor must end with one entry for it, at the highest.
+    //
+    // Driven by hand: a seeded run has no reason to put three ballots against one slot, and the
+    // property is about what is *not* kept, which a run that never produces the case cannot show.
+    let mut h = Hand::new(&THREE);
+    let ballots = [
+        Ballot { round: 1, leader: A },
+        Ballot { round: 4, leader: B },
+        Ballot { round: 9, leader: C },
+    ];
+    for (i, ballot) in ballots.iter().enumerate() {
+        let pvalue = Pvalue { ballot: *ballot, slot: 1, command: 100 + i as u32 };
+        h.event(B, Event::Msg { from: ballot.leader, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+    }
+
+    assert_eq!(
+        h.at(B).accepted_for(1).map(|(b, c)| (b, *c)),
+        Some((ballots[2], 102)),
+        "the highest ballot's command is what is kept",
+    );
+    assert_eq!(h.at(B).accepted_count(), 1, "and one entry, not three");
+
+    // A fourth slot is a fourth entry: the reduction is per slot, not a cap.
+    let pvalue = Pvalue { ballot: ballots[2], slot: 2, command: 200 };
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+    assert_eq!(
+        h.at(B).accepted_count(),
+        2,
+        "state grows with slots, which is why this is still a \
+                                              transcription"
+    );
+}
+
+#[test]
+fn an_acceptors_record_for_a_slot_only_ever_moves_up() {
+    // §4.1 has the acceptor keep "the most recently accepted pvalue", with no comparison, and the
+    // module argues that the promise already makes the latest the highest. This is that argument
+    // driven: whatever order pvalues arrive in, the record for a slot never goes backwards.
+    let mut h = Hand::new(&THREE);
+    let low = Ballot { round: 2, leader: A };
+    let high = Ballot { round: 7, leader: C };
+
+    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: low }) });
+    let pvalue = Pvalue { ballot: high, slot: 3, command: 777 };
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+    assert_eq!(h.at(B).accepted_for(3).map(|(b, c)| (b, *c)), Some((high, 777)));
+    h.wire.clear();
+
+    // The low ballot's own `p2a`, arriving late — a retransmission across a session ending is how.
+    // The promise refuses it, which is the `b ≥ ballot_num` arm, so it never reaches the record.
+    // That is the whole of why the record needs no comparison of its own.
+    let stale = Pvalue { ballot: low, slot: 3, command: 111 };
+    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P2a { pvalue: stale }) });
+    assert_eq!(
+        h.at(B).accepted_for(3).map(|(b, c)| (b, *c)),
+        Some((high, 777)),
+        "a ballot the acceptor has superseded must not reach the slot's record",
+    );
+    match h.synod_from(B, A).as_slice() {
+        [SynodMsg::P2b { ballot, slot: 3 }] => {
+            assert_eq!(*ballot, high, "and the reply names the ballot the acceptor holds");
+        }
+        other => panic!("expected one p2b for slot 3, got {other:?}"),
+    }
+    h.wire.clear();
+
+    // The only pvalue the promise admits that is not strictly above the record is one at exactly
+    // the held ballot, and Invariant A4 makes that the same command. So the write is idempotent
+    // rather than a case needing a guard.
+    let same = Pvalue { ballot: high, slot: 3, command: 777 };
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P2a { pvalue: same }) });
+    assert_eq!(h.at(B).accepted_for(3).map(|(b, c)| (b, *c)), Some((high, 777)));
+    assert_eq!(h.at(B).accepted_count(), 1, "and still one entry");
+}
+
+#[test]
+fn a_scout_keeps_the_highest_ballot_reported_for_a_slot_not_the_last_one_to_arrive() {
+    // Where §4.1 puts the maximum: at the leader, across the majority that answers its phase one.
+    // Two acceptors report *different* ballots for one slot — reachable whenever a later ballot
+    // overwrote one acceptor's record and not another's — and nothing orders their answers. A scout
+    // that kept the last arrival would hand `pmax` a command a lower ballot proposed, and the slot
+    // would split.
+    //
+    // This test exists because a mutation found nothing: reducing `keep_max` to a plain insert left
+    // the whole suite green and `check-safety-tests.sh` passing. The property used to be carried by
+    // the old `⟨ballot, slot⟩` key's iteration order — structural, and so never named by a test.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    // Preempt A so it scouts again, and note the ballot its scout now runs.
+    h.preempt(A, Ballot { round: 20, leader: C });
+    assert!(h.at(A).is_scouting(), "A must be in phase one for its scout to collect");
+    let scouting = h.at(A).leader_ballot();
+    h.wire.clear();
+
+    let higher = Ballot { round: 9, leader: C };
+    let lower = Ballot { round: 4, leader: B };
+
+    // B answers first with the higher ballot for slot 1, C second with the lower. Last arrival and
+    // maximum therefore disagree, which is the whole point of the schedule.
+    let answer = |ballot: Ballot, command: u32| SynodMsg::P1b {
+        ballot: scouting,
+        accepted: vec![Pvalue { ballot, slot: 1, command }],
+    };
+    h.event(A, Event::Msg { from: B, msg: Wire::Synod(answer(higher, 999)) });
+    h.event(A, Event::Msg { from: C, msg: Wire::Synod(answer(lower, 111)) });
+
+    // Two of three is a majority, so the scout has adopted and the leader has commanded.
+    assert!(h.at(A).is_active(), "the scout must have adopted on the second answer");
+    let commanded: Vec<u32> = h
+        .synod_sent_by(A)
+        .iter()
+        .filter_map(|m| match m {
+            SynodMsg::P2a { pvalue } if pvalue.slot == 1 => Some(pvalue.command),
+            _ => None,
+        })
+        .collect();
+    assert!(!commanded.is_empty(), "the leader must command slot 1 after adopting");
+    for command in &commanded {
+        assert_eq!(
+            *command, 999,
+            "the leader commanded {command}, which the lower ballot proposed — `pmax` must read \
+             the maximum, not the last answer to arrive",
+        );
+    }
+    // Non-vacuity: the two answers really did carry different ballots, and the lower one really did
+    // arrive last.
+    assert!(lower < higher, "the schedule must actually put the maximum first");
+}
+
+#[test]
+fn a_phase_one_answer_carries_one_pvalue_per_slot() {
+    // The message §4.1 exists for. Its size must grow with the slots an acceptor has accepted for
+    // and not with the ballots the run has seen.
+    let mut h = Hand::new(&THREE);
+    let ballots = [
+        Ballot { round: 1, leader: A },
+        Ballot { round: 3, leader: A },
+        Ballot { round: 5, leader: A },
+    ];
+    // Three ballots against two slots, so ballots outnumber slots and the two growths are
+    // distinguishable.
+    for (i, ballot) in ballots.iter().enumerate() {
+        for slot in 1..=2u64 {
+            let pvalue =
+                Pvalue { ballot: *ballot, slot, command: (i as u32 + 1) * 10 + slot as u32 };
+            h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+        }
+    }
+    h.wire.clear();
+
+    let high = Ballot { round: 8, leader: C };
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
+    match h.synod_from(B, C).as_slice() {
+        [SynodMsg::P1b { ballot, accepted }] => {
+            assert_eq!(*ballot, high, "the acceptor answers with the ballot it now holds");
+            let mut slots: Vec<Slot> = accepted.iter().map(|p| p.slot).collect();
+            slots.sort_unstable();
+            assert_eq!(slots, vec![1, 2], "one entry per slot, not one per ⟨ballot, slot⟩");
+            for p in accepted {
+                assert_eq!(p.ballot, ballots[2], "and each is the highest ballot for its slot");
+            }
+        }
+        other => panic!("expected one p1b, got {other:?}"),
+    }
+    // Non-vacuity: the run really did contain more ballots than slots, which is the whole
+    // distinction being drawn.
+    assert!(ballots.len() > 2, "three ballots against two slots");
+}
+
+#[test]
+fn agreement_survives_the_record_of_it_being_overwritten() {
+    // §4.1's "worrisome effect", driven exactly as the paper sets it out. Three acceptors; α₁ and
+    // α₂ accept ⟨⟨0, λ⟩, 1, c⟩, so c is chosen for slot 1. λ crashes before learning it. λ′ gets
+    // α₂ and α₃ to adopt a higher ballot, must select c by pmax, and then α₂ accepts it under the
+    // new ballot — overwriting the only other copy of the evidence.
+    //
+    // At that point no majority stores the pvalue that was chosen, and the paper says so: "in fact
+    // no proof that ballot ⟨0, λ⟩ even chose proposal c, as that part of the history has been
+    // overwritten". What must still hold is that no other command is ever chosen for slot 1.
+    let mut h = Hand::new(&THREE);
+    let lo = Ballot { round: 0, leader: A }; // λ
+    let hi = Ballot { round: 0, leader: C }; // λ′, higher because the leader breaks the tie
+
+    // α₁ = A and α₂ = B accept ⟨lo, 1, 555⟩. That is a majority of three, so 555 is chosen.
+    for acceptor in [A, B] {
+        let pvalue = Pvalue { ballot: lo, slot: 1, command: 555 };
+        h.event(acceptor, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+    }
+    assert_eq!(h.at(A).accepted_for(1).map(|(_, c)| *c), Some(555));
+    assert_eq!(h.at(B).accepted_for(1).map(|(_, c)| *c), Some(555));
+    h.wire.clear();
+
+    // λ′ runs phase one against α₂ and α₃ — a different majority, which must intersect the first.
+    let mut reported: Vec<Pvalue<u32>> = Vec::new();
+    for acceptor in [B, C] {
+        h.event(acceptor, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: hi }) });
+        for msg in h.synod_from(acceptor, C) {
+            if let SynodMsg::P1b { accepted, .. } = msg {
+                reported.extend(accepted);
+            }
+        }
+        h.wire.clear();
+    }
+    // The intersection is what carries the choice: α₂ is in both majorities and still holds it.
+    let for_slot_one: Vec<u32> =
+        reported.iter().filter(|p| p.slot == 1).map(|p| p.command).collect();
+    assert_eq!(for_slot_one, vec![555], "the maximum λ′ must select is the chosen command");
+
+    // So λ′ commands 555 under `hi`, and α₂ accepts it — overwriting its record of `lo`.
+    let pvalue = Pvalue { ballot: hi, slot: 1, command: 555 };
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
+
+    // The paper's own observation, asserted: no majority now stores the pvalue that was chosen.
+    let still_hold_lo = [A, B, C]
+        .iter()
+        .filter(|n| h.at(**n).accepted_for(1).is_some_and(|(b, _)| b == lo))
+        .count();
+    assert_eq!(still_hold_lo, 1, "only α₁ still holds the record — not a majority of three");
+    assert!(
+        !is_majority_of(still_hold_lo, 3),
+        "the evidence is gone, which is the effect §4.1 warns about",
+    );
+
+    // And the fact stands: every acceptor that holds anything for slot 1 holds 555.
+    for node in THREE {
+        if let Some((_, command)) = h.at(node).accepted_for(1) {
+            assert_eq!(*command, 555, "{node} holds a command for slot 1 that was never chosen");
+        }
+    }
+
+    // A third ballot repeats the argument rather than escaping it: it reads a majority, and every
+    // majority of three contains an acceptor holding 555.
+    let third = Ballot { round: 1, leader: A };
+    h.wire.clear();
+    let mut seen: Vec<u32> = Vec::new();
+    for acceptor in [A, C] {
+        h.event(
+            acceptor,
+            Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: third }) },
+        );
+        for msg in h.synod_from(acceptor, A) {
+            if let SynodMsg::P1b { accepted, .. } = msg {
+                seen.extend(accepted.iter().filter(|p| p.slot == 1).map(|p| p.command));
+            }
+        }
+        h.wire.clear();
+    }
+    assert_eq!(seen, vec![555], "a later ballot can only select what was already chosen");
+}
+
+/// The figures' majority test, for a test that needs to say a count is *not* one.
+fn is_majority_of(held: usize, acceptors: usize) -> bool {
+    held * 2 > acceptors
 }
 
 #[test]

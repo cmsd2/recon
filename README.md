@@ -564,7 +564,7 @@ deployment needs, but the protocol they specify keeps a Global History that is n
 transcribing it faithfully would reproduce the defect this work exists to remove. The survey puts the
 bounding **on the page** — §4.1 has an acceptor keep only the most recently accepted pvalue per slot,
 and §4.2 collects state below a watermark — so the module can become an implementation while staying
-a faithful transcription of its source.
+a faithful transcription of its source. §4.1 is applied; §4.2 is the change that remains.
 
 [`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) is §2, the Synod protocol:
 ballots, acceptors, scouts, commanders and leaders, with safety holding unconditionally and progress
@@ -577,9 +577,19 @@ which §4.4's colocation is what buys: a replica hands its proposal to the leade
 and a leader that cannot act on it forwards it once to the one Ω trusts. The cost is stated and
 tested rather than assumed, and it is that proposal *delivery* now rests on the detector.
 
-One change remains: §4.1 and §4.2's bounding, which is what admits it to the real-world set. Until
-then it is a transcription like the pair beside it, and `docs/bounded-space.md` carries a row for
-each half saying so.
+**§4.1 is applied**, the first of the source's two reductions and the only one that costs no
+guarantee: an acceptor keeps one pvalue per slot rather than one per `⟨ballot, slot⟩`, and a `p1b`
+carries those rather than everything it has ever accepted, so phase one no longer grows with the
+ballots a run has seen. The paper raises a doubt against its own reduction — after it there may be
+no majority still holding a proposal that was nevertheless chosen — and the module quotes both the
+doubt and its answer, because what the reduction discards is the *evidence* of a choice and not the
+choice. Applying it also found that the acceptor's reduction and the leader's maximum are different
+operations and that only the second needed code, and that the second was tested by nothing until a
+mutation said so.
+
+What remains is §4.2's garbage collection, and that is what admits Multi-Paxos to the real-world
+set: the state still grows with slots, so both halves are transcriptions and
+`docs/bounded-space.md` carries a row for each saying so.
 
 #### A. Non-transitive partitions — **built**
 
@@ -961,16 +971,16 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries **and** a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 | [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against **both** members of the pair — total order, validity, no duplication, the read and its prefix-consistency, a flat send rate, the survivors still ordering after a process crashes for good, and a non-vacuity half requiring the run to have contained overlapping operations — run against **three** implementations, with a header saying what makes each property mean something against the third, whose slots decide independently where the other two decide a batch per round | 29 |
 | [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart **from its own storage** — the restarted process is cut off from the network first, because the retransmission backlog can silently rebuild it and a durability test that allows that asserts nothing — agrees with a process that never failed, recovers consistently from dying inside a write, settles rather than re-sending for ever, appends something *new* after recovering, and appends the growing halves rather than rewriting them | 7 |
-| [`tests/multi_paxos_synod.rs`](crates/recon-protocols/tests/multi_paxos_synod.rs) | the Synod protocol: a checker fed from the trace and run after **every** event, so a violation names the event that broke it; a seeded sweep beside hand-driven schedules for the edges randomness misses — adoption at exactly the majority, an acceptor reached cold by a retransmitted `p2a`, a stale leader whose phase two lands on a majority that has moved on, a value chosen under a leader that then crashes and is not contradicted by its successor, and each of the three lost-message liveness violations with that one message dropped rather than lossy links switched on; and the colocated deployment §4.4 describes — a proposal forwarded once to the leader Ω trusts and never forwarded again, a decision announced to every process rather than held by the one that counted it, a leader answering a re-proposal for a decided slot to the asker alone, and the request lost when the process it was forwarded to has crashed; and two schedules a review found by reading — a leader that commanded one thing, was preempted, and learned by announcement that another was decided must answer a re-proposal with the *decision*, and a leader that yielded must forward what it once remembered rather than sit on it | 37 |
+| [`tests/multi_paxos_synod.rs`](crates/recon-protocols/tests/multi_paxos_synod.rs) | the Synod protocol: a checker fed from the trace and run after **every** event, so a violation names the event that broke it; a seeded sweep beside hand-driven schedules for the edges randomness misses — adoption at exactly the majority, an acceptor reached cold by a retransmitted `p2a`, a stale leader whose phase two lands on a majority that has moved on, a value chosen under a leader that then crashes and is not contradicted by its successor, and each of the three lost-message liveness violations with that one message dropped rather than lossy links switched on; and the colocated deployment §4.4 describes — a proposal forwarded once to the leader Ω trusts and never forwarded again, a decision announced to every process rather than held by the one that counted it, a leader answering a re-proposal for a decided slot to the asker alone, and the request lost when the process it was forwarded to has crashed; and two schedules a review found by reading — a leader that commanded one thing, was preempted, and learned by announcement that another was decided must answer a re-proposal with the *decision*, and a leader that yielded must forward what it once remembered rather than sit on it; and §4.1's state reduction — one pvalue per slot however many ballots command it, a phase-one answer that grows with slots and not with ballots, the leader taking the maximum across acceptors rather than the last answer to arrive, and the paper's own worrisome case in which agreement survives every record of it being overwritten | 42 |
 | [`tests/multi_paxos_replica.rs`](crates/recon-protocols/tests/multi_paxos_replica.rs) | the replica of Figure 1: a passive process's append ordered by the one that leads, the window stopping proposals and an advancing sequence releasing them, a command that loses its slot and comes back, decisions delivered in reverse and then again, and Liu et al.'s fourth liveness violation driven with **one decision dropped** rather than a lossy link switched on — wedged, then unwedged by the leader's answer to a re-proposal | 16 |
 | [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded at the instant it was handled rather than scheduled, what a test can now ask that it could not, and an operation that never began recorded with why — crashed, stalled, or not a process | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a decision narrated reaching the trace with its process and instant, a decision to do nothing leaving only its note, that narrating changes nothing, and that a run still going has already reported | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value and executed from it, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and is rendered as Rust that is compiled and run by the test that checks it | 15 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project actually had, put back behind a test-only switch | 3 |
 
-660 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
+665 across the suites above, plus nine unit tests inside `recon-core` and six doctests — four
 `compile_fail`, on the link, detector and total-order-log ports and on narrating without a
-vocabulary, and two worked examples of a storage slot — 675 in total,
+vocabulary, and two worked examples of a storage slot — 680 in total,
 all in one process, no ports opened. One further test is `#[ignore]`d: it *generates*
 `rendered_scenario.rs.inc` rather than checking anything, and the checking is done by the test that
 compares its committed output against the renderer.

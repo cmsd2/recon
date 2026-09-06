@@ -228,17 +228,18 @@
 //!
 //! # Space
 //!
-//! **Unbounded, and this is a transcription.** An acceptor keeps every pvalue it has ever accepted
-//! and sends the whole set in every `p1b`; a leader keeps a proposal for every slot it has been
-//! asked about. Both grow with the number of slots handled, which `docs/bounded-space.md` forbids
-//! of an implementation.
+//! **Unbounded, and this is a transcription.** An acceptor keeps one pvalue per slot it has
+//! accepted for; a leader keeps a proposal for every slot it has been asked about. Both grow with
+//! the number of slots handled, which `docs/bounded-space.md` forbids of an implementation.
 //!
 //! That is the source's §2, which is explicitly the impractical version — §4 opens by saying "the
-//! described protocol is not practical" and gives the reductions that bound it: §4.1 has an
-//! acceptor keep only the most recently accepted pvalue per slot, and §4.2 collects state below a
-//! watermark once at least `f + 1` replicas have learned a decision, carrying the collected slot
-//! number in `p1b` so a later leader does not read absence as "nothing was ever accepted". Both
-//! belong to a later change, because bounding weakens a guarantee to a scope.
+//! described protocol is not practical" and gives the reductions. **§4.1 is applied here** and is
+//! the section below. §4.2 is not: it collects state below a watermark once at least `f + 1`
+//! replicas have learned a decision, carrying the collected slot number in `p1b` so a later leader
+//! does not read absence as "nothing was ever accepted". It belongs to a later change, because
+//! bounding weakens a guarantee to a scope — and note that §4.1 alone does not create that
+//! ambiguity, which is why the watermark is not here: an empty answer for a slot still means
+//! nothing was accepted for it.
 //!
 //! The set of decided slots grows the same way, and the announcement is work per decision rather
 //! than per tick: one fan-out when a commander completes, plus one directed answer per re-proposal
@@ -251,6 +252,73 @@
 //! costs membership times the slots in flight. A decision retires its commander and leaves the
 //! sweep, so once the work completes the sweep is empty, which is the window
 //! `tests/common::assert_send_rate_flat!` measures. Nothing here resends history.
+//!
+//! # §4.1: an acceptor keeps only the highest-ballot pvalue per slot
+//!
+//! The first of the source's reductions, applied. §4.1 gives the reason in one sentence:
+//!
+//! > First, note that although a leader obtains for each slot a set of all accepted pvalues from a
+//! > majority of acceptors, it only needs to know if this set is empty or not, and if not, what the
+//! > maximum pvalue is. Thus, a large step toward practicality is that acceptors only maintain the
+//! > most recently accepted pvalue for each slot (`⊥` if no pvalue has been accepted) and return
+//! > only these pvalues in a `p1b` message to the scout. This gives the leader all information
+//! > needed to enforce Invariant C2.
+//!
+//! So `accepted` is keyed by slot, the scout reduces per slot as it collects, and `p1b` carries one
+//! entry per slot. What this removes is growth in the number of *ballots* a run has seen; what it
+//! leaves is growth in slots, which is §4.2's and not this section's.
+//!
+//! **The comparison is the leader's, not the acceptor's**, and the sentence quoted above splits it
+//! that way: an acceptor keeps "the most recently accepted pvalue", and the leader is what "needs
+//! to know … what the maximum pvalue is". An acceptor writes over its record with no comparison,
+//! because its own promise has already ordered the writes — a stored pvalue's ballot became
+//! `ballot_num` when it was stored, `ballot_num` never falls, and the `b ≥ ballot_num` arm admits
+//! nothing below it. The one case where an arriving ballot is not strictly above the stored one is
+//! equality, where A4 makes the command the same. A guard there would be a branch nothing can take.
+//!
+//! The scout is where the maximum is genuinely taken: two acceptors answering one phase one can
+//! report different ballots for one slot, and nothing orders their answers. That is `keep_max`, and
+//! it is load-bearing — a scout keeping the last arrival instead of the highest would hand `pmax` a
+//! command a lower ballot proposed, which is a split slot. **Nothing in the suite caught that**
+//! until this change measured it: the property used to be structural, carried by the old
+//! `⟨ballot, slot⟩` key's iteration order rather than by any code, and a structural property is one
+//! no test has to name. Moving the reduction to collection time made it code, and code gets a test.
+//!
+//! **Invariant A4 stops being structural, and does not stop being true.** The old key was
+//! `⟨ballot, slot⟩`, which made "at most one command per ballot and slot" the map's own property.
+//! A4 was never the acceptor's to enforce: Invariant C1 gives it — at most one commander per
+//! `⟨ballot, slot⟩` — and the leader is what holds C1. The old key bought a second, redundant
+//! enforcement and cost a dimension of growth.
+//!
+//! ## The record of a choice may be overwritten while the choice stands
+//!
+//! The paper raises this against its own reduction, and it is worth stating in full because a
+//! reader who assumes otherwise would take a correct run for a broken one:
+//!
+//! > This optimization leads to a worrisome effect. We know that when a majority of acceptors have
+//! > accepted the same pvalue `⟨b, s, c⟩`, then proposal `c` is chosen for slot `s`. Consider now
+//! > the following scenario. […] Acceptors `α₁` and `α₂` accept `⟨⟨0, λ⟩, 1, c⟩`, and thus proposal
+//! > `c` is chosen for slot 1 by ballot `⟨0, λ⟩`. However, leader `λ` crashes before learning this.
+//! > Now leader `λ′` gets acceptors `α₂` and `α₃` to adopt ballot `⟨0, λ′⟩`. After determining the
+//! > maximum pvalue among the responses, leader `λ′` has to select proposal `c`. Now suppose that
+//! > acceptor `α₂` accepts `⟨⟨0, λ′⟩, 1, c⟩`. At this point, there is no majority of acceptors that
+//! > store the same most recently accepted pvalue, and in fact no proof that ballot `⟨0, λ⟩` even
+//! > chose proposal `c`, as that part of the history has been overwritten.
+//!
+//! And the answer: "However, the leader of any ballot `b` after `⟨0, λ⟩` can only select
+//! `⟨b, 1, c⟩`. This is by Invariant C2 and because acceptors `α₁` and `α₂` both accepted
+//! `⟨⟨0, λ⟩, 1, c⟩` and together form a majority."
+//!
+//! What the reduction discards is **evidence**, not agreement. The fact outlives the record because
+//! every later ballot had to read the maximum from a majority, and any two majorities intersect —
+//! so the choice is carried forward by a chain of adoptions rather than by anything still stored.
+//! `agreement_survives_the_record_of_it_being_overwritten` drives exactly the paper's scenario and
+//! asserts the non-vacuity half from acceptor state: no majority still holds the chosen proposal at
+//! the instant the assertion is made.
+//!
+//! One consequence for the suite, and it is why the checker was built the way it was: **a checker
+//! reading acceptor state would now be wrong.** `tests/multi_paxos_synod.rs` feeds its checker from
+//! the trace — what was sent, what was indicated — so the reduction does not reach it.
 //!
 //! # The boundary this module does not cross
 //!
@@ -449,13 +517,37 @@ pub struct Pvalue<C> {
     pub command: C,
 }
 
-/// A set of pvalues, keyed so that Invariant A4 — at most one command per ballot and slot — is the
-/// map's own property rather than something to be checked.
+/// The pvalues held for a set of slots: **one per slot**, the one carrying the highest ballot.
 ///
-/// The book writes this as a set and unions into it. A `BTreeMap` keyed by `⟨ballot, slot⟩` is the
-/// same object with the invariant made structural, and it keeps the ordered-map rule without asking
-/// the command type for an ordering.
-pub type Pvalues<C> = BTreeMap<(Ballot, Slot), C>;
+/// The book writes a set and unions into it, and this module first held one — a `BTreeMap` keyed by
+/// `⟨ballot, slot⟩`, which made Invariant A4 the map's own property. §4.1 is why it no longer does;
+/// see `MultiPaxosSynod::accepted`. A4 is unaffected, because it was never the acceptor's to
+/// enforce: Invariant C1 — at most one commander per `⟨ballot, slot⟩` — is what gives it, and the
+/// leader is what holds C1. What the old key bought was a second, redundant enforcement at the
+/// acceptor; what it cost was a whole dimension of growth.
+pub type Pvalues<C> = BTreeMap<Slot, (Ballot, C)>;
+
+/// Union `pvalue` into `into`, keeping the higher ballot for the slot.
+///
+/// **The scout's, and only the scout's.** §4.1 splits the work in two: an acceptor keeps "the most
+/// recently accepted pvalue for each slot", and the leader takes the maximum across the majority
+/// that answers it. The acceptor needs no comparison — see `MultiPaxosSynod::on_p2a`, where its
+/// own promise already makes the latest acceptance the highest. The scout does, because two
+/// acceptors can report different ballots for one slot and nothing orders their answers: they
+/// arrive as the network delivers them.
+///
+/// This is where the safety argument's `pmax` really happens, so it is where a mistake is a split
+/// slot rather than a tidiness question. `a_scout_keeps_the_highest_ballot_reported_for_a_slot_not
+/// _the_last_one_to_arrive` is the test, and it was written because a mutation showed the whole
+/// suite green with this reduced to a plain insert.
+fn keep_max<C>(into: &mut Pvalues<C>, ballot: Ballot, slot: Slot, command: C) {
+    match into.get(&slot) {
+        Some((held, _)) if *held >= ballot => {}
+        _ => {
+            into.insert(slot, (ballot, command));
+        }
+    }
+}
 
 /// What this layer puts on the wire, beneath the link.
 ///
@@ -470,7 +562,10 @@ pub type Pvalues<C> = BTreeMap<(Ballot, Slot), C>;
 pub enum SynodMsg<C> {
     /// `⟨p1a, λ, b⟩` — phase one, from a scout.
     P1a { ballot: Ballot },
-    /// `⟨p1b, α, ballot_num, accepted⟩` — an acceptor's answer, carrying everything it has accepted.
+    /// `⟨p1b, α, ballot_num, accepted⟩` — an acceptor's answer, carrying **one pvalue per slot** it
+    /// has accepted for rather than everything it has ever accepted. §4.1; see the module
+    /// documentation. This message is what grew fastest in the book's version, because it grew with
+    /// the ballots the run had seen as well as with the slots.
     P1b { ballot: Ballot, accepted: Vec<Pvalue<C>> },
     /// `⟨p2a, λ, ⟨b, s, c⟩⟩` — phase two, from a commander.
     P2a { pvalue: Pvalue<C> },
@@ -568,14 +663,13 @@ struct Commander<C> {
 /// command unique — there cannot be two different commands for the same ballot and slot — which is
 /// why taking one is well defined rather than a choice.
 ///
-/// The map iterates in `⟨ballot, slot⟩` order, so a later entry for a slot always carries a
-/// strictly higher ballot than an earlier one and the last one written wins.
+/// **After §4.1 this is the identity on the map's commands**, because the collection that built the
+/// map already kept only the maximum per slot — see [`keep_max`]. It stays because what it names is
+/// the algorithm's step, Figure 7's `proposals := proposals ◁ pmax(pvals)`, and a reader checking
+/// the code against the page needs to find it. Where the maximum is now *taken* is the one thing
+/// that moved.
 fn pmax<C: Clone>(pvalues: &Pvalues<C>) -> BTreeMap<Slot, C> {
-    let mut best: BTreeMap<Slot, C> = BTreeMap::new();
-    for ((_, slot), command) in pvalues {
-        best.insert(*slot, command.clone());
-    }
-    best
+    pvalues.iter().map(|(slot, (_, command))| (*slot, command.clone())).collect()
 }
 
 /// `|waitfor| < |acceptors|/2` — the figures' majority test.
@@ -605,7 +699,12 @@ pub struct MultiPaxosSynod<C: Clone, L: VolatileLink<SynodMsg<C>> = SessionLink<
     // ---- the acceptor, Figure 4 ----
     /// `α.ballot_num`, initially `⊥`.
     ballot_num: Option<Ballot>,
-    /// `α.accepted`, initially `∅`. Grows with the slots handled; see the module's space section.
+    /// `α.accepted`, initially `∅` — **one pvalue per slot**, the one carrying the highest ballot.
+    ///
+    /// §4.1, quoted in the module documentation. The book keeps every pvalue ever accepted; a
+    /// leader reads only the maximum per slot, so everything below it is read by nothing. Still
+    /// grows with the slots handled, which is why this is still a transcription; what it no longer
+    /// grows with is the ballots the run has seen.
     accepted: Pvalues<C>,
 
     // ---- the leader, Figure 7 ----
@@ -721,8 +820,9 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
         self.decided.len()
     }
 
-    /// How many pvalues this acceptor holds. Grows with the slots handled — the measurement
-    /// `docs/bounded-space.md` wants for a transcription.
+    /// How many pvalues this acceptor holds — after §4.1, the number of **slots** it has accepted
+    /// for, not the number of `⟨ballot, slot⟩` pairs. Grows with the slots handled, which is the
+    /// measurement `docs/bounded-space.md` wants for a transcription.
     pub fn accepted_count(&self) -> usize {
         self.accepted.len()
     }
@@ -730,6 +830,12 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
     /// The slots this leader currently has a commander for.
     pub fn commanded_slots(&self) -> impl Iterator<Item = Slot> + '_ {
         self.commanders.keys().copied()
+    }
+
+    /// The pvalue this acceptor holds for `slot`, if any — after §4.1, at most one, carrying the
+    /// highest ballot it has accepted for that slot.
+    pub fn accepted_for(&self, slot: Slot) -> Option<(Ballot, &C)> {
+        self.accepted.get(&slot).map(|(ballot, command)| (*ballot, command))
     }
 
     /// Whether a scout is running phase one.
@@ -764,10 +870,13 @@ where
         // Always `Some` here: either it just adopted, or it already held something at least as
         // high, and a real ballot is above `⊥`.
         let held = self.ballot_num.expect("an acceptor answering p1a has adopted something");
+        // §4.1: "return only these pvalues in a p1b message to the scout". One per slot, so this
+        // message grows with the slots this acceptor has accepted for and not with the ballots the
+        // run has seen.
         let accepted = self
             .accepted
             .iter()
-            .map(|((ballot, slot), command)| Pvalue {
+            .map(|(slot, (ballot, command))| Pvalue {
                 ballot: *ballot,
                 slot: *slot,
                 command: command.clone(),
@@ -794,7 +903,15 @@ where
             // Still monotonic even under the mutation: A1 is a separate claim and stays true, so
             // exactly one invariant is removed at a time.
             self.ballot_num = Some(self.ballot_num.map_or(ballot, |held| held.max(ballot)));
-            self.accepted.insert((ballot, slot), command);
+            // §4.1: "acceptors only maintain the most recently accepted pvalue for each slot".
+            // The latest acceptance, written over whatever was there — and no comparison, because
+            // the promise has already made the latest the highest. Any stored pvalue's ballot
+            // became `ballot_num` when it was stored and `ballot_num` never falls, so
+            // `stored ≤ ballot_num ≤ b` for every `b` this arm admits. The one case where `stored`
+            // is not strictly below `b` is `stored = ballot_num = b`, and A4 makes that the same
+            // command. A guard here would be a branch nothing can take; the comparison that does
+            // the work is the leader's, in `keep_max`.
+            self.accepted.insert(slot, (ballot, command));
         }
         let held = if sabotaged {
             ballot
@@ -846,8 +963,12 @@ where
             return;
         }
         // `pvalues := pvalues ∪ r; waitfor := waitfor − {α};`
+        //
+        // The union reduces per slot as it collects, for the same reason §4.1 gives the acceptor: a
+        // majority's answers still hold one ballot each for a slot, and keeping them all would put
+        // the growth §4.1 took off the acceptor straight back onto the leader.
         for Pvalue { ballot, slot, command } in accepted {
-            scout.pvalues.insert((ballot, slot), command);
+            keep_max(&mut scout.pvalues, ballot, slot, command);
         }
         scout.waitfor.remove(&from);
         if is_majority(scout.waitfor.len(), self.acceptors.len()) {

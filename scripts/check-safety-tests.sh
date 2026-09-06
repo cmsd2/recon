@@ -44,6 +44,7 @@ SUITE=multi_paxos_synod
 REGISTERED_ignore_pmax=$(cat <<'NAMES'
 a_later_ballot_proposes_what_an_earlier_majority_accepted
 a_majority_that_has_taken_up_a_ballot_cannot_afterwards_accept_a_lower_one
+a_scout_keeps_the_highest_ballot_reported_for_a_slot_not_the_last_one_to_arrive
 a_slot_decided_twice_is_announced_twice_and_names_one_command
 a_value_chosen_under_a_crashed_leader_is_what_its_successor_proposes
 at_most_one_proposal_is_chosen_per_slot_under_competing_ballots
@@ -53,8 +54,14 @@ NAMES
 )
 
 # Every test that must go red when an acceptor accepts below its own promise.
+#
+# The second name is §4.1's: with the acceptor keeping one pvalue per slot and no comparison of its
+# own, the promise is the *only* thing keeping a superseded ballot out of the record. That makes
+# what used to be a claim about replies a claim about stored state too, and it is registered here
+# because the mutation is exactly what would break it.
 REGISTERED_accept_below_promise=$(cat <<'NAMES'
 a_majority_that_has_taken_up_a_ballot_cannot_afterwards_accept_a_lower_one
+an_acceptors_record_for_a_slot_only_ever_moves_up
 NAMES
 )
 
