@@ -21,6 +21,14 @@
 #                                 answers as though it had not. Invariant A1 is untouched, so
 #                                 exactly one invariant is removed. Without the promise, two
 #                                 majorities need not agree.
+#   synod-skip-collected          a leader treats a slot below an acceptor's collection watermark
+#                                 as free rather than skipping it. §4.2 warns of exactly this — "we
+#                                 must prevent other leaders from mistakenly concluding that the
+#                                 acceptors have not accepted any pvalues for the garbage-collected
+#                                 slots" — because after collection an acceptor's silence about a
+#                                 slot means one of two things and only the watermark tells them
+#                                 apart. Reading it as free puts a second command up for a slot
+#                                 already decided.
 #
 # Registered per mutation rather than in one list, because the two are evidence for different
 # clauses and a test that cannot detect one may be perfectly good evidence for the other. What the
@@ -119,8 +127,16 @@ audit() {
     fi
 }
 
+# Every test that must go red when a leader proposes into a collected slot.
+REGISTERED_skip_collected=$(cat <<'NAMES'
+agreement_holds_across_a_collection
+a_leader_does_not_propose_for_a_slot_an_acceptor_has_collected
+NAMES
+)
+
 audit synod-ignore-pmax "$REGISTERED_ignore_pmax"
 audit synod-accept-below-promise "$REGISTERED_accept_below_promise"
+audit synod-skip-collected "$REGISTERED_skip_collected"
 
 echo
 if [ "$fail" -ne 0 ]; then

@@ -72,6 +72,17 @@ pub enum Note {
     /// until the command is proposed again at a later slot, and a replica that dropped it instead
     /// would lose an append in silence.
     ProposalDisplaced { slot: u64 },
+    /// State for every slot below `slot` was discarded, because enough replicas have applied it —
+    /// the source's §4.2. **Nothing at all reaches the trace from this decision**: collecting sends
+    /// no message, sets no timer and raises no indication, so a run that collects and one that has
+    /// stopped collecting look identical from outside. Which matters, because stopping is the
+    /// specified behaviour when too few replicas remain to report.
+    CollectedBelow { slot: u64 },
+    /// A replica asked a peer for the decisions from `slot` onwards, because the consensus beneath
+    /// it has collected them and can no longer answer. **Nothing at all reaches the trace from the
+    /// decision itself**, and the request that follows is indistinguishable on the wire from any
+    /// other; this says why it was made.
+    CaughtUpFrom { slot: u64 },
 }
 
 /// Why something was refused or ignored.

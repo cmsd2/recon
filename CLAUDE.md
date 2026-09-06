@@ -289,8 +289,10 @@ Most modules here are the book's algorithms, transcribed faithfully and tested a
 guarantees. A **small number** are maintained as useful in the real world, and those carry a second
 obligation. Membership, as of 2026-09:
 
-- **In**: the gossip pair, `probabilistic_broadcast` and `lazy_probabilistic_broadcast`. Multi-Paxos,
-  when it is written.
+- **In**: the gossip pair, `probabilistic_broadcast` and `lazy_probabilistic_broadcast`; and
+  Multi-Paxos, both halves — `multi_paxos_synod` and `multi_paxos_replica`. Multi-Paxos joined by
+  applying the survey's own §4.1 and §4.2, so it is in the set *and* faithful to its page; what it
+  still lacks is durability, which is §4.3 and a different obligation.
 - **Out**: single-instance Paxos and everything beneath it that exists to build it — epoch-change,
   epoch consensus, the logged variants. They are the book's stepping stones and are kept faithful
   to the page, not tuned. Stubborn links are academic; nothing in the real-world set runs over one.

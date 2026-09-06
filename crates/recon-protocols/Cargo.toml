@@ -20,6 +20,7 @@ lose-storage-on-restart = ["recon-sim/lose-storage-on-restart"]
 # under each. Never enable one outside that script.
 synod-ignore-pmax = []
 synod-accept-below-promise = []
+synod-skip-collected = []
 
 [dev-dependencies]
 recon-sim = { workspace = true }

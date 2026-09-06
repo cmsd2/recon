@@ -144,8 +144,9 @@ struct Checked {
 fn check(sim: &Sim<Synod>) -> Checked {
     let mut c = Checked::default();
     for (_, _, cmd) in sim.trace().invocations() {
-        let Cmd::Propose { slot, command } = cmd;
-        c.proposed.insert((*slot, *command));
+        if let Cmd::Propose { slot, command } = cmd {
+            c.proposed.insert((*slot, *command));
+        }
     }
     // Sends rather than deliveries: what an acceptor put on the wire is what it held at the time,
     // whether or not anything received it. **Exchanges** rather than network sends, because an
@@ -292,6 +293,8 @@ struct Cost {
     propose: usize,
     /// The detector's, which are per tick rather than per entry — see [`Cost::of`].
     heartbeat: usize,
+    /// §4.2's periodic reports, also per tick rather than per entry.
+    applied: usize,
     /// Messages a process addressed to itself. A deployment has none: the roles are co-located, so
     /// a leader reaching its own acceptor is a function call.
     self_addressed: usize,
@@ -320,6 +323,12 @@ impl Cost {
                 Wire::Synod(SynodMsg::P2b { .. }) => c.p2b += 1,
                 Wire::Synod(SynodMsg::Decision { .. }) => c.decision += 1,
                 Wire::Synod(SynodMsg::Propose { .. }) => c.propose += 1,
+                // §4.2's periodic update. Counted, and never asserted against the work done: it is
+                // per tick like the detector's heartbeats, not per entry.
+                Wire::Synod(SynodMsg::Applied { .. }) => c.applied += 1,
+                // §4.2's replica-to-replica transfer, counted with the reports: neither is per
+                // entry, and both exist only because collection happens.
+                Wire::Synod(SynodMsg::CatchUp { .. }) => c.applied += 1,
             }
         }
         c
@@ -335,6 +344,7 @@ impl Cost {
             decision: self.decision - earlier.decision,
             propose: self.propose - earlier.propose,
             heartbeat: self.heartbeat - earlier.heartbeat,
+            applied: self.applied - earlier.applied,
             self_addressed: self.self_addressed - earlier.self_addressed,
         }
     }
@@ -505,6 +515,185 @@ fn the_escalations_still_fire_at_their_own_threshold() {
         "the escalation restarts phase one against *every* acceptor, not only those that owe — \
          got {asked:?}",
     );
+}
+
+// ------------------------------------------------- §4.2: collecting what enough replicas hold
+
+#[test]
+fn nothing_is_collected_until_f_plus_one_members_have_applied() {
+    // Three members, so `f` is one and `f + 1` is two. One report moves nothing; the second moves
+    // the watermark. Driven by hand, because a seeded run reports from everybody at once and never
+    // shows the boundary.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    h.propose(A, 1, 111);
+    h.propose(A, 2, 222);
+    h.settle_without_heartbeats_to(A);
+    assert!(h.at(A).accepted_count() > 0, "A holds pvalues to collect");
+
+    // A's own replica reports first: one of three.
+    h.event(A, Event::Cmd(Cmd::Applied { slot_out: 3 }));
+    assert_eq!(
+        h.at(A).collected_below(),
+        0,
+        "one member of three is not `f + 1`, so nothing may be collected",
+    );
+    assert!(h.at(A).accepted_count() > 0, "and the state is still there");
+
+    // B's report makes two of three, which is `f + 1`.
+    h.event(A, Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 3 }) });
+    assert_eq!(h.at(A).collected_below(), 3, "two of three is a majority, so the watermark moves");
+    assert_eq!(h.at(A).accepted_count(), 0, "and everything below it is gone");
+    assert_eq!(h.at(A).decided_count(), 0, "including the record of what was decided");
+}
+
+#[test]
+fn the_watermark_only_ever_rises() {
+    // A member that reports a lower `slot_out` than it did before — a stale report overtaking a
+    // fresh one — must not un-collect anything. Nothing can be brought back, so a watermark that
+    // fell would leave the process claiming state it no longer has.
+    let mut h = Hand::new(&THREE);
+    h.event(A, Event::Cmd(Cmd::Applied { slot_out: 9 }));
+    h.event(A, Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 9 }) });
+    assert_eq!(h.at(A).collected_below(), 9);
+
+    h.event(A, Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 2 }) });
+    assert_eq!(h.at(A).collected_below(), 9, "a stale report must not lower the watermark");
+}
+
+#[test]
+fn a_phase_one_answer_says_how_far_the_acceptor_has_collected() {
+    // §4.2: "This slot number must be included in `p1b` messages so that leaders can skip the lower
+    // numbered slots."
+    let mut h = Hand::new(&THREE);
+    h.event(B, Event::Cmd(Cmd::Applied { slot_out: 5 }));
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::Applied { slot_out: 5 }) });
+    assert_eq!(h.at(B).collected_below(), 5, "B has collected below slot 5");
+    h.wire.clear();
+
+    h.event(
+        B,
+        Event::Msg {
+            from: A,
+            msg: Wire::Synod(SynodMsg::P1a { ballot: Ballot { round: 3, leader: A } }),
+        },
+    );
+    match h.synod_from(B, A).as_slice() {
+        [SynodMsg::P1b { collected, .. }] => {
+            assert_eq!(*collected, 5, "the answer must carry how far this acceptor has collected");
+        }
+        other => panic!("expected one p1b, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_leader_does_not_propose_for_a_slot_an_acceptor_has_collected() {
+    // **The clause the collection's safety rests on.** An acceptor reporting nothing for a slot
+    // below its `collected` has not said the slot is free; it has said it no longer remembers, and
+    // `f + 1` replicas do. A leader that proposed there would put a second command up for a slot
+    // already decided.
+    //
+    // Driven by hand: a seeded run does not offer a leader a fresh proposal for a collected slot,
+    // because its own replica has applied past it.
+    let mut h = Hand::new(&THREE);
+    // A is trusted and scouting, and holds proposals for slots 1 and 2 — remembered while trusted,
+    // for an adoption that has not happened yet.
+    let starve = |_: NodeId, to: NodeId, msg: &Msg| {
+        !(to == A && matches!(msg, Wire::Detector(_) | Wire::Synod(SynodMsg::P1b { .. })))
+    };
+    for _ in 0..3 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle(starve);
+    }
+    assert!(h.at(A).is_trusted() && h.at(A).is_scouting());
+    h.propose(A, 1, 111);
+    h.propose(A, 2, 222);
+    h.propose(A, 7, 777);
+    h.wire.clear();
+
+    // Both acceptors answer, and both say they have collected below slot 5.
+    let ballot = h.at(A).leader_ballot();
+    for from in [B, C] {
+        h.event(
+            A,
+            Event::Msg {
+                from,
+                msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new(), collected: 5 }),
+            },
+        );
+    }
+    assert!(h.at(A).is_active(), "two of three answered, so A adopted");
+
+    let commanded: Vec<Slot> = h
+        .synod_sent_by(A)
+        .iter()
+        .filter_map(|m| match m {
+            SynodMsg::P2a { pvalue } => Some(pvalue.slot),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        commanded.iter().all(|s| *s >= 5),
+        "the leader proposed for a collected slot: {commanded:?} — slots below 5 are decided and \
+         `f + 1` replicas hold them",
+    );
+    assert!(commanded.contains(&7), "and it must still command the slot above the watermark");
+}
+
+#[test]
+fn agreement_holds_across_a_collection() {
+    // The whole point, end to end: a proposal is chosen, every process's record of it is collected,
+    // and a later leader takes up a higher ballot against acceptors that no longer remember. The
+    // decision must stand — carried now by `f + 1` replicas rather than by the acceptors.
+    let mut s = sim_of(&FIVE, synchronous(121));
+    for slot in 1..=4u64 {
+        s.command(E, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_millis(800));
+    let chosen = decisions(&s);
+    assert_eq!(chosen.len(), 4, "four slots must be chosen first");
+
+    // Everybody applies past them, so everything for those slots is collected everywhere.
+    for node in FIVE {
+        s.command(node, Cmd::Applied { slot_out: 5 });
+    }
+    s.run_for(Duration::from_millis(400));
+    for node in FIVE {
+        assert_eq!(
+            s.at(node).collected_below(),
+            5,
+            "{node} must have collected below slot 5 before the handover",
+        );
+        assert_eq!(s.at(node).accepted_count(), 0, "{node} must remember no pvalue for them");
+    }
+
+    // Now leadership changes, and the successor scouts against acceptors that remember nothing.
+    s.crash(E);
+    assert!(s.is_stopped(E), "the leader really went, and after the collection");
+    for _ in 0..40 {
+        s.run_for(Duration::from_millis(100));
+        if s.at(D).is_trusted() {
+            break;
+        }
+    }
+    assert!(s.at(D).is_trusted(), "D must take over");
+    // And is asked for different commands for the slots that were decided.
+    for slot in 1..=4u64 {
+        s.command(D, Cmd::Propose { slot, command: 900 + slot as u32 });
+    }
+    let checked = run_checking(&mut s, Duration::from_secs(3));
+
+    for (slot, command) in &chosen {
+        for (node, learned) in checked.chosen.get(slot).into_iter().flatten() {
+            assert_eq!(
+                learned, command,
+                "slot {slot} was chosen as {command} and {node} learned {learned} after the \
+                 collection — the acceptors forgot, and the decision did not stand",
+            );
+        }
+    }
+    assert!(ballots_seen(&s).len() > 1, "leadership must really have changed hands");
 }
 
 // ------------------------------------------------- the establishment is when a resend can succeed
@@ -1029,7 +1218,11 @@ impl Hand {
                 node,
                 Event::Msg {
                     from,
-                    msg: Wire::Synod(SynodMsg::P1b { ballot: high, accepted: Vec::new() }),
+                    msg: Wire::Synod(SynodMsg::P1b {
+                        ballot: high,
+                        accepted: Vec::new(),
+                        collected: 0,
+                    }),
                 },
             );
             return;
@@ -1641,6 +1834,7 @@ fn a_scout_keeps_the_highest_ballot_reported_for_a_slot_not_the_last_one_to_arri
     let answer = |ballot: Ballot, command: u32| SynodMsg::P1b {
         ballot: scouting,
         accepted: vec![Pvalue { ballot, slot: 1, command }],
+        collected: 0,
     };
     h.event(A, Event::Msg { from: B, msg: Wire::Synod(answer(higher, 999)) });
     h.event(A, Event::Msg { from: C, msg: Wire::Synod(answer(lower, 111)) });
@@ -1692,7 +1886,7 @@ fn a_phase_one_answer_carries_one_pvalue_per_slot() {
     let high = Ballot { round: 8, leader: C };
     h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
     match h.synod_from(B, C).as_slice() {
-        [SynodMsg::P1b { ballot, accepted }] => {
+        [SynodMsg::P1b { ballot, accepted, .. }] => {
             assert_eq!(*ballot, high, "the acceptor answers with the ballot it now holds");
             let mut slots: Vec<Slot> = accepted.iter().map(|p| p.slot).collect();
             slots.sort_unstable();
@@ -1845,13 +2039,19 @@ fn adoption_needs_a_majority_and_not_one_fewer() {
     // would demand all three.
     h.event(
         A,
-        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new() }) },
+        Event::Msg {
+            from: B,
+            msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new(), collected: 0 }),
+        },
     );
     assert!(!h.at(A).is_active(), "one answer of three is not a majority");
     // The second makes it: |waitfor| = 1, and 1 * 2 < 3.
     h.event(
         A,
-        Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new() }) },
+        Event::Msg {
+            from: C,
+            msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new(), collected: 0 }),
+        },
     );
     assert!(h.at(A).is_active(), "two of three is a majority and must adopt");
 }
@@ -1882,7 +2082,11 @@ fn a_later_ballot_proposes_what_an_earlier_majority_accepted() {
             A,
             Event::Msg {
                 from: peer,
-                msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: reported.clone() }),
+                msg: Wire::Synod(SynodMsg::P1b {
+                    ballot,
+                    accepted: reported.clone(),
+                    collected: 0,
+                }),
             },
         );
     }

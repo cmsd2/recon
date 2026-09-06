@@ -1,10 +1,36 @@
 //! The Multi-Paxos replica: slots become positions in a log.
 //!
-//! **Status: transcription. Space: unbounded — `decisions`, `performed` and the ordered sequence
-//! all grow with the number of commands handled, and nothing collects them.** That is the page:
-//! §4.2's watermark is what bounds a replica, and it is a later change. `docs/bounded-space.md`
-//! is explicit that inheriting the source's omissions is correct of a transcription and
-//! disqualifying of an implementation.
+//! **Status: implementation. Space: the bookkeeping is bounded — `decisions` and `performed` by a
+//! retention window, `requests` and `proposals` by `WINDOW` — and the ordered sequence is
+//! deliberately not, because it is the data rather than the bookkeeping.**
+//!
+//! §4.2 is applied, and it is worth being clear which half. The section separates state that is
+//! *unnecessary* — the leader's and acceptor's, collected below a watermark once `f + 1` replicas
+//! have applied past it, which is [`crate::multi_paxos_synod`]'s — from state that is
+//! **unavoidable**, which is this module's:
+//!
+//! > because commands may be decided in multiple slots, replicas each maintain a set of all
+//! > decisions to filter out such duplicates. In practice, it is often sufficient if such
+//! > information is only kept for a certain amount of time, making the probability of duplicate
+//! > execution negligible.
+//!
+//! So the filter is bounded by a **retention window** rather than by the watermark beneath it, and
+//! the reason is worth stating because using the watermark is the obvious wrong move: that
+//! watermark says `f + 1` replicas have *applied* up to a slot, which says nothing whatever about
+//! whether a command decided below it may be decided again above it. A duplicate filter has to
+//! outlive every slot a duplicate could span, and no watermark bounds that.
+//!
+//! **What that weakens, stated rather than discovered.** "A command decided in two slots takes one
+//! position" holds *within the retention window*. A duplicate arriving more than [`RETAIN`] slots
+//! after the first would take a second position. As things stand that is a weakening of something
+//! unreachable — a command is minted at one replica and occupies one slot at a time, so a duplicate
+//! needs the client-retry deployment this port does not have — but it is the honest bound and it is
+//! in the specification.
+//!
+//! **The ordered sequence is exempt and is not collected.** A log grows with what is appended to
+//! it; that is the data, and a log that discarded its entries would not be one. What would bound it
+//! is a snapshot, which is outside the paper and is also the point past which a lagging replica
+//! can no longer be caught up — see the catch-up below.
 //!
 //! # Source
 //!
@@ -154,6 +180,17 @@
 //!   rather than dropped so that R5 reads against the page, and this note is here so that a reader
 //!   does not take the cap for the whole reason.
 //!
+//! - **§4.2's periodic report, and the catch-up that pays for collecting.** A replica tells the
+//!   consensus beneath it how far it has applied, periodically and not as a consequence of doing
+//!   work — a replica applying nothing is the one whose position others most need, and a report
+//!   riding its own traffic would fall silent exactly then.
+//!
+//!   Collecting at `f + 1` means `f` correct replicas may be behind, and what would have helped
+//!   them is what was collected. §4.2's own remedy is that "replicas can learn decisions […] from
+//!   one another", so a replica whose proposal is refused as collected asks a peer, and the peer
+//!   answers from *its* `decisions` — the one place that still holds them. A replica further behind
+//!   than [`RETAIN`] cannot be caught up, because nobody holds those decisions any more.
+//!
 //! - **The fourth liveness violation, and its fix.** Liu, Y.A., Chand, S. and Stoller, S.D. (2019)
 //!   'Moderately Complex Paxos Made Simple', PPDP '19, is the cross-check this module's source is
 //!   read against. Its fourth liveness violation is this layer's: if no decision arrives for a
@@ -204,6 +241,13 @@ use crate::link::{Boundary, VolatileLink};
 use crate::multi_paxos_synod::{self as synod, MultiPaxosSynod, Slot, SynodMsg};
 use crate::session_link::SessionLink;
 use crate::total_order_log::{LogInd, TotalOrderLog};
+
+/// How many decided slots a replica keeps for the duplicate filter — §4.2's retention window.
+///
+/// Generously more than [`WINDOW`], because the filter has to outlive every slot a duplicate could
+/// span and the window only bounds how far ahead proposals may run. See
+/// `MultiPaxosReplica::retain`.
+pub const RETAIN: Slot = 64;
 
 /// How far `slot_in` may run ahead of `slot_out` — the source's `WINDOW`.
 ///
@@ -304,6 +348,19 @@ pub struct MultiPaxosReplica<V: Clone + Ord, L: VolatileLink<Carried<V>> = Sessi
     repropose_after: Duration,
     /// How often the outstanding set is swept.
     sweep_every: Duration,
+    /// How often this replica tells the consensus beneath how far it has applied — §4.2's periodic
+    /// update, which is the only thing that lets anything below collect.
+    report_every: Duration,
+    /// When it last did.
+    last_report: Time,
+    /// How many decided slots this replica keeps for the duplicate filter — §4.2's "kept for a
+    /// certain amount of time, making the probability of duplicate execution negligible", measured
+    /// in slots rather than in seconds.
+    ///
+    /// Slots rather than time because a duplicate's risk is a function of how far apart two slots
+    /// deciding one command can be, not of how long the run has lasted: a fast run and a slow one
+    /// with the same slots in flight need the same window, and only the slot count says that.
+    retain: Slot,
     /// The sweep's handle. Compared before acting, because an expiry is offered to every layer.
     tick: Option<TimerId>,
 
@@ -333,6 +390,9 @@ impl<V: Clone + Ord> MultiPaxosReplica<V> {
             proposed_at: BTreeMap::new(),
             repropose_after: timing.detect_after * 3,
             sweep_every: timing.retransmit,
+            report_every: timing.heartbeat,
+            last_report: Time::ZERO,
+            retain: RETAIN,
             tick: None,
             synod: Child::new(MultiPaxosSynod::new(me, peers, timing)),
         }
@@ -347,6 +407,12 @@ impl<V: Clone + Ord> MultiPaxosReplica<V> {
     /// The re-proposal threshold, for a test that needs to reach it inside a settle window.
     pub fn with_repropose_after(mut self, after: Duration) -> Self {
         self.repropose_after = after;
+        self
+    }
+
+    /// The retention window, for a test that needs to fill one without deciding sixty-four slots.
+    pub fn with_retain(mut self, retain: Slot) -> Self {
+        self.retain = retain;
         self
     }
 }
@@ -402,6 +468,11 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
     /// The command decided for `slot`, if this replica has heard.
     pub fn decision(&self, slot: Slot) -> Option<&Command<V>> {
         self.decisions.get(&slot)
+    }
+
+    /// How far this replica has told the consensus beneath it that it has applied.
+    pub fn reported_slot_out(&self) -> Slot {
+        self.slot_out
     }
 
     /// The Synod protocol beneath, for a test that asks who leads.
@@ -515,6 +586,7 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
             }
             self.perform(decided, cx);
         }
+        self.forget_below();
     }
 
     /// Liu et al.'s fourth violation, swept: anything outstanding past the threshold is proposed
@@ -549,6 +621,52 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
         self.tick = Some(cx.set_timer(self.sweep_every));
     }
 
+    /// §4.2's periodic update: tell the consensus beneath how far this replica has applied, so that
+    /// leaders and acceptors can discard what enough replicas already hold.
+    ///
+    /// **Periodic, and not a consequence of doing work.** A replica applying nothing is exactly the
+    /// one whose position the others most need — a run in which one replica is idle is a run in
+    /// which the watermark is pinned by it — and a report carried on this replica's own traffic
+    /// would fall silent precisely then. It rides the sweep's timer at its own coarser interval,
+    /// so it costs one message per member per `report_every` and nothing per entry: the cost
+    /// identity counts it as its own kind for that reason.
+    fn maybe_report(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let now = cx.now();
+        if self.last_report + self.report_every > now && now != Time::ZERO {
+            return;
+        }
+        self.last_report = now;
+        let slot_out = self.slot_out;
+        self.through_synod(cx, |s, ccx| s.on_cmd(synod::Cmd::Applied { slot_out }, ccx));
+    }
+
+    /// §4.2's retention window on the duplicate filter, which is the *other* half of that section
+    /// and a different mechanism from the watermark beneath.
+    ///
+    /// The source calls this state unavoidable and bounds it by time rather than by a watermark:
+    /// "it is often sufficient if such information is only kept for a certain amount of time,
+    /// making the probability of duplicate execution negligible".
+    ///
+    /// **Not the collection watermark, and this is the obvious wrong move.** That watermark says
+    /// `f + 1` replicas have *applied* up to a slot, which says nothing whatever about whether a
+    /// command decided below it may be decided again above it. A duplicate filter has to outlive
+    /// every slot a duplicate could span, and no watermark bounds that.
+    ///
+    /// What it costs is stated in the module: the no-duplication guarantee is scoped to the window,
+    /// and a command decided again more than `retain` slots later would take a second position.
+    fn forget_below(&mut self) {
+        let keep_from = self.slot_out.saturating_sub(self.retain);
+        if keep_from == 0 {
+            return;
+        }
+        let dropped: Vec<Command<V>> =
+            self.decisions.range(..keep_from).map(|(_, command)| command.clone()).collect();
+        self.decisions.retain(|slot, _| *slot >= keep_from);
+        for command in dropped {
+            self.performed.remove(&command);
+        }
+    }
+
     /// Run `f` against the child, then handle everything that falls out of it — including the
     /// proposals this replica makes in response, which go back into the same child.
     ///
@@ -560,12 +678,41 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
         &mut self,
         mut pending: Vec<synod::Ind<Command<V>>>,
         cx: &mut ProtoCx<'_, Self>,
-        mut extra: Vec<(Slot, Command<V>)>,
+        mut extra: Vec<synod::Cmd<Command<V>>>,
     ) {
         loop {
             for ind in pending.drain(..) {
                 match ind {
                     synod::Ind::Decision { slot, command } => self.decided(slot, command, cx),
+                    // §4.2: the slot is decided and the consensus beneath has collected it, so it
+                    // cannot answer. "Replicas can learn decisions … from one another" — ask one.
+                    synod::Ind::Collected { slot } => {
+                        cx.note(crate::Note::CaughtUpFrom { slot });
+                        extra.push(synod::Cmd::CatchUp { from_slot: slot });
+                    }
+                    // The other side of it. What this replica still holds is what the asker needs,
+                    // and it is the only place left that holds it.
+                    // Everything this replica still holds from that slot on, in one answer.
+                    //
+                    // Bounded by the retention window rather than by the proposal window: a
+                    // capped answer leaves the asker behind with nothing to ask again *with*,
+                    // because it asks only when a proposal of its own is refused and it has no
+                    // proposal for a slot somebody else filled. Measured — a `WINDOW`-sized answer
+                    // left the asker one entry short for ever.
+                    //
+                    // **A replica more than the retention window behind cannot be caught up**, and
+                    // nothing here can change that: nobody holds those decisions any more. That is
+                    // where a real deployment takes a snapshot, which is outside the paper.
+                    synod::Ind::CatchUpWanted { peer, from_slot } => {
+                        let teach: Vec<(Slot, Command<V>)> = self
+                            .decisions
+                            .range(from_slot..)
+                            .map(|(slot, command)| (*slot, command.clone()))
+                            .collect();
+                        for (slot, command) in teach {
+                            extra.push(synod::Cmd::Teach { to: peer, slot, command });
+                        }
+                    }
                     // The child bridges no session ending and neither does this layer: its
                     // redundancy is the other processes, which a session ending does not restore.
                     synod::Ind::SessionEnded { peer, epoch } => {
@@ -578,17 +725,17 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
             }
             // `propose();`
             let now = cx.now();
-            let mut outgoing = self.transfer(now, cx);
+            let mut outgoing: Vec<synod::Cmd<Command<V>>> = self
+                .transfer(now, cx)
+                .into_iter()
+                .map(|(slot, command)| synod::Cmd::Propose { slot, command })
+                .collect();
             outgoing.append(&mut extra);
             if outgoing.is_empty() {
                 break;
             }
-            for (slot, command) in outgoing {
-                let mut inds = self.synod.run(
-                    cx,
-                    |m| m,
-                    |s, ccx| s.on_cmd(synod::Cmd::Propose { slot, command }, ccx),
-                );
+            for cmd in outgoing {
+                let mut inds = self.synod.run(cx, |m| m, |s, ccx| s.on_cmd(cmd, ccx));
                 pending.append(&mut inds);
                 self.synod.reclaim(inds);
             }
@@ -656,7 +803,12 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> Protocol for MultiPaxosReplica
             return;
         }
         self.arm(cx);
-        let due = self.resweep(cx);
+        self.maybe_report(cx);
+        let due: Vec<synod::Cmd<Command<V>>> = self
+            .resweep(cx)
+            .into_iter()
+            .map(|(slot, command)| synod::Cmd::Propose { slot, command })
+            .collect();
         self.pump(Vec::new(), cx, due);
     }
 

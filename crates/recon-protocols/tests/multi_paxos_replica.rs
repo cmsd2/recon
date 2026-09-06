@@ -627,6 +627,216 @@ fn the_state_grows_with_commands_and_the_module_says_so() {
     assert_eq!(s.at(A).slot_out() as usize - 1, large, "and every one of them was applied");
 }
 
+// ---------------------------------------------------------------- task 4.2: garbage collection
+
+/// What every process is holding, so a bound can be asserted over all of them rather than one.
+fn held(s: &Sim<Replica>) -> Vec<(usize, usize, usize)> {
+    FIVE.iter()
+        .filter(|n| !s.is_stopped(**n))
+        .map(|n| {
+            let r = s.at(*n);
+            (r.synod().accepted_count(), r.synod().decided_count(), r.decisions_held())
+        })
+        .collect()
+}
+
+#[test]
+fn state_does_not_grow_with_the_slots_handled() {
+    // The claim `docs/bounded-space.md` marked ❌ and §4.2 fixes, asserted rather than described.
+    // Two runs, one four times the other: what each process holds must be bounded by the same
+    // figure in both, rather than by the slots decided.
+    let measure = |entries: u32, seed: u64| {
+        let mut s = sim_of(&FIVE, synchronous(seed));
+        for i in 0..entries {
+            s.command(A, Cmd::Append(i));
+        }
+        settle(&mut s);
+        settle(&mut s);
+        assert_eq!(ordered_at(&s, A).len(), entries as usize, "everything must be ordered first");
+        // Non-vacuity, and it is the one that matters: a bound holds trivially over a run that
+        // never collected. Assert the watermark moved before asserting what it bounded.
+        assert!(
+            s.at(A).synod().collected_below() > 0,
+            "nothing was collected, so the bound below is satisfied by a run that did not collect",
+        );
+        held(&s)
+    };
+    let small = measure(10, 111);
+    let large = measure(40, 111);
+
+    let worst = |v: &[(usize, usize, usize)]| {
+        v.iter().map(|(a, d, _)| *a.max(d)).max().expect("five processes")
+    };
+    assert!(
+        worst(&large) <= worst(&small).max(FIVE.len()),
+        "the consensus state grew with the slots handled: {} at ten entries, {} at forty — \
+         {small:?} against {large:?}",
+        worst(&small),
+        worst(&large),
+    );
+}
+
+#[test]
+fn collection_stalls_when_too_few_members_remain_to_report() {
+    // §4.2's own caveat: "if there are fewer than 2f + 1 replicas, the crash of f replicas would
+    // leave fewer than f + 1 replicas to send periodic updates and no garbage collection could be
+    // done". A run that stops collecting after `f` crashes is behaving as specified. This test
+    // exists so that nobody later reads the stall as a defect and 'fixes' it.
+    //
+    // Five members, so `f` is two and `f + 1` is three. Crash three, leaving two — one short.
+    let mut s = sim_of(&FIVE, synchronous(112));
+    for i in 0..6u32 {
+        s.command(A, Cmd::Append(i));
+    }
+    settle(&mut s);
+    let collected_before = s.at(A).synod().collected_below();
+    assert!(collected_before > 0, "collection must be working before it is taken away");
+
+    s.crash(C);
+    s.crash(D);
+    s.crash(E);
+    assert!(
+        s.is_stopped(C) && s.is_stopped(D) && s.is_stopped(E),
+        "the crashes really happened, and before the assertion that depends on them",
+    );
+    settle(&mut s);
+    settle(&mut s);
+
+    assert_eq!(
+        s.at(A).synod().collected_below(),
+        collected_before,
+        "with two of five reporting, the watermark cannot move — and must not",
+    );
+}
+
+#[test]
+fn the_duplicate_filter_is_bounded_by_the_retention_window() {
+    // §4.2's *other* half, and a different mechanism from the watermark beneath: the decisions a
+    // replica keeps to filter duplicates are bounded by time — here by slots — because no watermark
+    // bounds them. `f + 1` replicas having applied up to a slot says nothing about whether a
+    // command decided below it may be decided again above it.
+    const RETAIN: Slot = 4;
+    let config = synchronous(113).sessions();
+    let mut s: Sim<Replica> = Sim::new(config, &FIVE, |me| {
+        MultiPaxosReplica::new(me, FIVE, timing()).with_retain(RETAIN)
+    });
+    s.record_notes();
+    s.deliver_session_events();
+
+    for i in 0..20u32 {
+        s.command(A, Cmd::Append(i));
+    }
+    settle(&mut s);
+    settle(&mut s);
+    assert_eq!(ordered_at(&s, A).len(), 20, "everything must be ordered");
+
+    for node in FIVE {
+        let r = s.at(node);
+        assert!(
+            r.decisions_held() as u64 <= RETAIN + 1,
+            "{node} kept {} decisions against a window of {RETAIN}",
+            r.decisions_held(),
+        );
+    }
+    // And the sequence is **not** collected — it is the data, not the bookkeeping.
+    assert_eq!(
+        s.at(A).len(),
+        20,
+        "the ordered sequence must survive the window: it is the log, and a log that discarded \
+         its entries would not be one",
+    );
+}
+
+#[test]
+fn the_ordered_sequence_is_read_back_in_full_after_collection() {
+    // The exemption, end to end and through the port rather than through an accessor: a reader asks
+    // for the sequence from the start long after everything beneath it has been collected.
+    let mut s = sim_of(&FIVE, synchronous(114));
+    for i in 0..30u32 {
+        s.command(A, Cmd::Append(i));
+    }
+    settle(&mut s);
+    settle(&mut s);
+    assert!(s.at(A).synod().collected_below() > 0, "the run must have collected");
+
+    s.command(A, Cmd::Read { from: Position::START });
+    s.step_now();
+    let read = s
+        .trace()
+        .indications_at(A)
+        .filter_map(|i| match i {
+            Ind::Contents { entries, .. } => Some(entries.clone()),
+            _ => None,
+        })
+        .last()
+        .expect("the read must be answered");
+    assert_eq!(read.len(), 30, "a read after collection must still serve the whole sequence");
+    assert_eq!(read, (0..30u32).collect::<Vec<_>>(), "and in order");
+}
+
+#[test]
+fn a_replica_stranded_by_a_collection_catches_up_from_a_peer() {
+    // **The case that made replica-to-replica transfer part of this change rather than a later
+    // one.** Collecting at `f + 1` means `f` correct replicas may be behind, and everything that
+    // could have helped them is exactly what was collected: the consensus layer no longer holds the
+    // decision, and the leader's answer to a re-proposal needs that record.
+    //
+    // §4.2's own justification is the remedy: "replicas can learn decisions, and the application
+    // state that results from those decisions, from one another". Without it a correct process that
+    // missed one decision is stranded for ever, which is what this drove before the transfer
+    // existed — measured at `B slot_out=1` with the leader holding zero decisions.
+    let drop_decisions_to_b = |_: NodeId, to: NodeId, msg: &Msg| {
+        !(to == B && matches!(msg, Wire::Synod(SynodMsg::Decision { .. })))
+    };
+    let mut h = Hand::new(&THREE);
+    h.settle_until_active(C);
+
+    // B appends, and is the one process never told the answer.
+    h.append(B, 77);
+    h.pump(2, drop_decisions_to_b);
+    assert!(ordered_at_hand(&h, B).is_empty(), "B was never told — the precondition");
+
+    // A and C run on and apply past it, so two of three is `f + 1` and everything for B's slot is
+    // collected everywhere — including at the leader that would otherwise have answered B.
+    for v in 0..8u32 {
+        h.append(C, 200 + v);
+    }
+    h.pump(30, drop_decisions_to_b);
+    assert!(
+        h.at(C).synod().collected_below() > 1,
+        "the leader must have collected past B's slot, or the strand does not arise",
+    );
+    assert_eq!(
+        h.at(C).synod().decided_count(),
+        0,
+        "and must hold no decision record — which is what used to leave B with nowhere to ask",
+    );
+    assert!(ordered_at_hand(&h, B).is_empty(), "B is still stranded at this point");
+
+    // Now let everything through. B's re-proposal is refused as collected, it asks a peer, and the
+    // peer teaches it from the decisions the *replica* still holds.
+    h.pump(40, |_, _, _| true);
+    assert_eq!(
+        ordered_at_hand(&h, B).first(),
+        Some(&77),
+        "B must catch up from a peer: {:?}",
+        ordered_at_hand(&h, B),
+    );
+    assert!(
+        h.notes_at(B).any(|n| matches!(n, Note::CaughtUpFrom { .. })),
+        "and it must be the catch-up that did it, not luck",
+    );
+    // And it catches up in full, not just past the one slot it missed — converging on what the
+    // process that never fell behind holds.
+    h.pump(40, |_, _, _| true);
+    assert_eq!(
+        ordered_at_hand(&h, B),
+        ordered_at_hand(&h, C),
+        "B must converge on the leader's sequence, not merely unstick",
+    );
+    assert!(ordered_at_hand(&h, B).len() >= 9, "and that sequence must be the whole run's");
+}
+
 // ---------------------------------------------------------------- the hand-driven harness
 
 /// Several processes, one timer-identity source, and a wire the test decides what to do with.

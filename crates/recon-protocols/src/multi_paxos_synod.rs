@@ -1,6 +1,8 @@
 //! The Synod protocol of Multi-Paxos: ballots, acceptors, scouts, commanders and leaders.
 //!
-//! **Status: transcription. Space: unbounded — see the section on it below.**
+//! **Status: implementation. Space: bounded by membership and by the distance between the
+//! collection watermark and the frontier — see the section on it below, and the condition it
+//! carries.**
 //!
 //! van Renesse, R. and Altinbuken, D. (2015) 'Paxos Made Moderately Complex', *ACM Computing
 //! Surveys*, 47(3), pp. 1–36, §2. Figures 4, 6 and 7 are quoted above the code that implements
@@ -250,18 +252,22 @@
 //!
 //! # Space
 //!
-//! **Unbounded, and this is a transcription.** An acceptor keeps one pvalue per slot it has
-//! accepted for; a leader keeps a proposal for every slot it has been asked about. Both grow with
-//! the number of slots handled, which `docs/bounded-space.md` forbids of an implementation.
+//! **Bounded, and this is an implementation.** An acceptor keeps one pvalue per slot between the
+//! collection watermark and the frontier; a leader keeps one proposal and one decision record over
+//! the same range; and what each member last said it had applied is one entry per member. None of
+//! them grows with the slots handled, which is what `docs/bounded-space.md` asks of an
+//! implementation.
 //!
-//! That is the source's §2, which is explicitly the impractical version — §4 opens by saying "the
-//! described protocol is not practical" and gives the reductions. **§4.1 is applied here** and is
-//! the section below. §4.2 is not: it collects state below a watermark once at least `f + 1`
-//! replicas have learned a decision, carrying the collected slot number in `p1b` so a later leader
-//! does not read absence as "nothing was ever accepted". It belongs to a later change, because
-//! bounding weakens a guarantee to a scope — and note that §4.1 alone does not create that
-//! ambiguity, which is why the watermark is not here: an empty answer for a slot still means
-//! nothing was accepted for it.
+//! Both of the source's reductions are applied. §4 opens by saying "the described protocol is not
+//! practical" and gives them: **§4.1**, one pvalue per slot rather than one per `⟨ballot, slot⟩`,
+//! is the section below; **§4.2**, collecting below a watermark, is the one after it.
+//!
+//! **The bound is conditional, and the condition is the source's own.** Collection needs `f + 1` of
+//! the `2 f + 1` members reporting their progress, so a run in which `f` have crashed collects
+//! nothing and grows again — "no garbage collection could be done", as §4.2 puts it. That is
+//! specified behaviour rather than a defect, and
+//! `collection_stalls_when_too_few_members_remain_to_report` is there so nobody later reads a stall
+//! as one.
 //!
 //! The set of decided slots grows the same way, and the announcement is work per decision rather
 //! than per tick: one fan-out when a commander completes, plus one directed answer per re-proposal
@@ -341,6 +347,68 @@
 //! One consequence for the suite, and it is why the checker was built the way it was: **a checker
 //! reading acceptor state would now be wrong.** `tests/multi_paxos_synod.rs` feeds its checker from
 //! the trace — what was sent, what was indicated — so the reduction does not reach it.
+//!
+//! # §4.2: collecting what enough replicas already hold
+//!
+//! The second reduction, and what makes this an implementation. §4.2 separates two things, and only
+//! the second is this module's:
+//!
+//! > In our description of Paxos, much information is kept about slots that have already been
+//! > decided. Some of this is unavoidable. For example, because commands may be decided in multiple
+//! > slots, replicas each maintain a set of all decisions to filter out such duplicates. […] But
+//! > some state, and indeed some work that results from having that state, is unnecessary. The
+//! > leader maintains state for each slot in which it has a proposal. […] Similarly, even if the
+//! > state reduction of Section 4.1 is implemented, each acceptor maintains state for each slot.
+//! > However, once at least `f + 1` replicas have learned about the decision of some slot, it is no
+//! > longer necessary for leaders and acceptors to maintain this state — replicas can learn
+//! > decisions, and the application state that results from those decisions, from one another.
+//!
+//! So each replica reports its `slot_out` periodically, every process keeps what it was told, and
+//! everything below the highest slot `f + 1` members have applied to is discarded: the acceptor's
+//! pvalues, the leader's proposals, the record of which slots are decided. The replica's own
+//! duplicate filter is the *unavoidable* half and is bounded by a retention window instead — see
+//! [`crate::multi_paxos_replica`], which explains why no watermark bounds it.
+//!
+//! ## The hazard the section names, and the clause that answers it
+//!
+//! > However, we must prevent other leaders from mistakenly concluding that the acceptors have not
+//! > accepted any pvalues for the garbage-collected slots. To achieve this, the state of an
+//! > acceptor can be extended with a new variable that contains a slot number: all pvalues lower
+//! > than that slot number have been garbage collected. This slot number must be included in `p1b`
+//! > messages so that leaders can skip the lower numbered slots.
+//!
+//! Before collection, an acceptor reporting nothing for a slot meant nothing had been accepted for
+//! it. Afterwards it means one of two things, and `collected` is the only thing that tells them
+//! apart. A leader that read a collected slot as free would put a second command up for a slot
+//! already decided — a split slot, reached from the opposite direction to `synod-ignore-pmax`.
+//!
+//! **The skip is in two places, and the second is not on the page.** `adopted` drops proposals
+//! below the watermark it was told about, which covers what a leader already held; `on_propose`
+//! refuses a slot below the watermark, which covers one arriving *afterwards*. Only the first was
+//! written at first, and `agreement_holds_across_a_collection` split a slot on the second: the
+//! successor adopted cleanly and was then asked for a different command for a collected slot, and
+//! commanded it. The page does not need the second clause because there a `propose` comes from a
+//! replica whose `slot_in` never falls below its own `slot_out`; nothing in a *port* guarantees
+//! that, and a layer that assumes its caller is well behaved is not one.
+//!
+//! `synod-skip-collected` is the mutation registered against both.
+//!
+//! ## What collecting costs, and the transfer that pays for it
+//!
+//! Collecting at `f + 1` means `f` correct replicas may be behind — and everything that could have
+//! helped them is precisely what was discarded. This layer no longer holds the decision, and the
+//! leader's answer to a re-proposal needs that record. A correct process that missed one decision
+//! would be **stranded for ever**, which is what `a_replica_stranded_by_a_collection_catches_up_
+//! from_a_peer` drove before the transfer existed: one replica at `slot_out = 1` with the leader
+//! holding zero decisions.
+//!
+//! The section's own justification is the remedy — "replicas can learn decisions […] from one
+//! another" — so this layer carries the ask and the answer without holding either. A refused
+//! proposal raises [`Ind::Collected`]; the layer above asks with [`Cmd::CatchUp`]; the peer's layer
+//! above answers with [`Cmd::Teach`], from *its* decisions, and the answers arrive as the ordinary
+//! `⟨decision, s, c⟩` the replica already handles. A replica further behind than the retention
+//! window cannot be caught up at all, because nobody holds those decisions any more; that is where
+//! a deployment takes a snapshot, which is outside the paper.
 //!
 //! # The boundary this module does not cross
 //!
@@ -588,7 +656,7 @@ pub enum SynodMsg<C> {
     /// has accepted for rather than everything it has ever accepted. §4.1; see the module
     /// documentation. This message is what grew fastest in the book's version, because it grew with
     /// the ballots the run had seen as well as with the slots.
-    P1b { ballot: Ballot, accepted: Vec<Pvalue<C>> },
+    P1b { ballot: Ballot, accepted: Vec<Pvalue<C>>, collected: Slot },
     /// `⟨p2a, λ, ⟨b, s, c⟩⟩` — phase two, from a commander.
     P2a { pvalue: Pvalue<C> },
     /// `⟨p2b, α, ballot_num⟩`, **plus the slot it answers for**. Figure 4 has no slot, because the
@@ -603,6 +671,13 @@ pub enum SynodMsg<C> {
     /// alone. A decision is announced once and its commander then exits, so a process the
     /// announcement never reached has no other way back; asking is the way, and this is the answer.
     Decision { slot: Slot, command: C },
+    /// A request for the decisions from `from_slot` onwards, from a process that has fallen behind
+    /// and whose consensus layer has collected them. §4.2's replica-to-replica transfer; see
+    /// [`Cmd::CatchUp`].
+    CatchUp { from_slot: Slot },
+    /// `⟨applied, ρ, s⟩` — how far the replica on the sending machine has applied. Not on any
+    /// figure; §4.2's periodic update, which is what makes collection possible at all.
+    Applied { slot_out: Slot },
     /// A proposal for a slot, from a replica on this machine or from a leader that could not act on
     /// it. Not on any figure — §4.4's colocation; see the module documentation.
     ///
@@ -625,6 +700,23 @@ pub enum Wire<M> {
 pub enum Cmd<C> {
     /// `⟨propose, s, c⟩` — propose `command` for `slot`.
     Propose { slot: Slot, command: C },
+    /// How far the replica on this machine has applied — §4.2's "each replica periodically updates
+    /// leaders and acceptors about its `slot out` variable".
+    ///
+    /// A command rather than a message, because §4.4 puts the replica on this machine: it tells its
+    /// own leader and acceptor by a call, and this layer is what tells everybody else's.
+    Applied { slot_out: Slot },
+    /// Ask a peer that is ahead for the decisions from `from_slot` onwards.
+    ///
+    /// §4.2's other half: "replicas can learn decisions, and the application state that results
+    /// from those decisions, from one another". Once a slot is collected this layer cannot answer
+    /// for it, and a replica that missed it has nowhere else to ask.
+    CatchUp { from_slot: Slot },
+    /// Answer a peer's catch-up with one decision the replica above still holds.
+    ///
+    /// The decision comes from the *replica's* store, not this layer's: this layer collected it,
+    /// which is what provoked the request.
+    Teach { to: NodeId, slot: Slot, command: C },
 }
 
 /// Indications to the layer above.
@@ -634,6 +726,16 @@ pub enum Ind<C> {
     /// chosen for `slot`. Figure 6(a) addresses this to the replicas; there is no replica here, so
     /// it is raised to whatever is above.
     Decision { slot: Slot, command: C },
+    /// A proposal was refused because the slot is below this process's collection watermark: it is
+    /// decided, `f + 1` members hold the decision, and this layer no longer does.
+    ///
+    /// **The layer above must catch up from a peer**, which is what [`Cmd::CatchUp`] asks for.
+    /// Without it a correct process that missed one decision is stranded for ever, because the only
+    /// other way back — a leader answering a re-proposal — needs the record this layer discarded.
+    Collected { slot: Slot },
+    /// `peer` has fallen behind and wants the decisions from `from_slot` onwards. The layer above
+    /// answers with [`Cmd::Teach`] for what it still holds.
+    CatchUpWanted { peer: NodeId, from_slot: Slot },
     /// The scope with `peer` ended at `epoch`. **Propagated, not absorbed**: this layer holds no
     /// redundancy that outlives a session — what it knows of a ballot is in memory a crash takes,
     /// and its redundancy is the other processes rather than a resend across an ending. A layer
@@ -657,6 +759,11 @@ struct Scout<C> {
     waitfor: BTreeSet<NodeId>,
     /// `pvalues` — the union of what the answers carried.
     pvalues: Pvalues<C>,
+    /// The highest slot any answering acceptor said it had collected below. §4.2: a leader must
+    /// "skip the lower numbered slots", or it reads a collected slot as one nothing was accepted
+    /// for. The **highest**, because a slot collected at any acceptor of the answering majority is
+    /// one whose decision `f + 1` replicas hold.
+    collected: Slot,
     /// When phase one began, for the escalation. Not the figure's: the figure waits for ever.
     started: Time,
     /// When its requests last went out, so a resend is timed against the delivery bound rather than
@@ -726,6 +833,13 @@ pub struct MultiPaxosSynod<C: Clone, L: VolatileLink<SynodMsg<C>> = SessionLink<
     // ---- the acceptor, Figure 4 ----
     /// `α.ballot_num`, initially `⊥`.
     ballot_num: Option<Ballot>,
+    /// The slot below which this acceptor has discarded its pvalues — §4.2's "new variable that
+    /// contains a slot number: all pvalues lower than that slot number have been garbage
+    /// collected". Travels in every `p1b`, and only ever rises.
+    collected: Slot,
+    /// How far each member last said it had applied — §4.2's periodic update. One entry per member,
+    /// so bounded by membership by construction.
+    reported: BTreeMap<NodeId, Slot>,
     /// `α.accepted`, initially `∅` — **one pvalue per slot**, the one carrying the highest ballot.
     ///
     /// §4.1, quoted in the module documentation. The book keeps every pvalue ever accepted; a
@@ -800,6 +914,8 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
             )),
             acceptors,
             ballot_num: None,
+            collected: 0,
+            reported: BTreeMap::new(),
             accepted: BTreeMap::new(),
             leader_ballot: Ballot::initial(me),
             active: false,
@@ -865,6 +981,18 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
         self.accepted.get(&slot).map(|(ballot, command)| (*ballot, command))
     }
 
+    /// The slot below which this process has discarded its state — §4.2's watermark, as it has
+    /// been acted on. Only ever rises.
+    pub fn collected_below(&self) -> Slot {
+        self.collected
+    }
+
+    /// How many members have said how far they have applied. Bounded by membership; the
+    /// measurement `docs/bounded-space.md` wants beside the two that are now bounded.
+    pub fn reports_held(&self) -> usize {
+        self.reported.len()
+    }
+
     /// Whether a scout is running phase one.
     pub fn is_scouting(&self) -> bool {
         self.scout.is_some()
@@ -909,7 +1037,11 @@ where
                 command: command.clone(),
             })
             .collect();
-        self.transmit(from, SynodMsg::P1b { ballot: held, accepted }, cx);
+        // §4.2: "This slot number must be included in p1b messages so that leaders can skip the
+        // lower numbered slots." Without it a leader reads absence as "nothing was accepted", which
+        // after collection is one of two possible meanings and the wrong one.
+        let collected = self.collected;
+        self.transmit(from, SynodMsg::P1b { ballot: held, accepted, collected }, cx);
     }
 
     /// `case ⟨p2a, λ, ⟨b, s, c⟩⟩ : if b ≥ ballot_num then ballot_num := b; accepted := accepted ∪
@@ -960,6 +1092,7 @@ where
             ballot,
             waitfor: self.acceptors.clone(),
             pvalues: BTreeMap::new(),
+            collected: 0,
             started: cx.now(),
             last_sent: cx.now(),
         });
@@ -975,6 +1108,7 @@ where
         from: NodeId,
         ballot: Ballot,
         accepted: Vec<Pvalue<C>>,
+        collected: Slot,
         cx: &mut ProtoCx<'_, Self>,
     ) {
         let Some(scout) = self.scout.as_mut() else { return };
@@ -998,11 +1132,12 @@ where
         for Pvalue { ballot, slot, command } in accepted {
             keep_max(&mut scout.pvalues, ballot, slot, command);
         }
+        scout.collected = scout.collected.max(collected);
         scout.waitfor.remove(&from);
         if is_majority(scout.waitfor.len(), self.acceptors.len()) {
             // `send(λ, ⟨adopted, b, pvalues⟩); exit();`
             let scout = self.scout.take().expect("borrowed above");
-            self.adopted(scout.ballot, scout.pvalues, cx);
+            self.adopted(scout.ballot, scout.pvalues, scout.collected, cx);
         }
     }
 
@@ -1110,7 +1245,13 @@ where
     /// this leader's own proposal for a slot nobody reported. **This is the step the whole safety
     /// argument rests on**: a proposal already accepted by a majority under a lower ballot is what
     /// the new leader proposes, whatever it set out to propose.
-    fn adopted(&mut self, ballot: Ballot, pvalues: Pvalues<C>, cx: &mut ProtoCx<'_, Self>) {
+    fn adopted(
+        &mut self,
+        ballot: Ballot,
+        pvalues: Pvalues<C>,
+        collected: Slot,
+        cx: &mut ProtoCx<'_, Self>,
+    ) {
         // "If an `adopted` message arrives for an old ballot number, it is ignored."
         if ballot != self.leader_ballot {
             return;
@@ -1124,6 +1265,17 @@ where
             }
         }
         self.active = true;
+        // §4.2: "This slot number must be included in `p1b` messages so that leaders can skip the
+        // lower numbered slots." **This is the clause the collection's safety rests on.** An
+        // acceptor that reports nothing for a slot below `collected` has not told us the slot is
+        // free — it has told us it no longer remembers, and `f + 1` replicas do. Proposing there
+        // would put a second command up for a slot already decided.
+        //
+        // `synod-skip-collected` is the mutation the safety guard compiles against this line.
+        if !cfg!(feature = "synod-skip-collected") {
+            self.proposals.retain(|slot, _| *slot >= collected);
+            self.collected = self.collected.max(collected);
+        }
         // `∀⟨s, c⟩ ∈ proposals : spawn(Commander(…))`
         for (slot, command) in self.proposals.clone() {
             self.start_commander(slot, command, cx);
@@ -1189,6 +1341,21 @@ where
             && let Some(decided) = self.decided.get(&slot).cloned()
         {
             self.transmit(asker, SynodMsg::Decision { slot, command: decided }, cx);
+            return;
+        }
+        // §4.2's skip, and it has to be here as well as in `adopted`. Filtering at adoption covers
+        // the proposals a leader *already held*; it does nothing about one arriving afterwards, and
+        // an active leader would command it. `agreement_holds_across_a_collection` split a slot on
+        // exactly that: everything for slots 1–4 was collected everywhere, the successor adopted
+        // cleanly, and was then asked for a different command for slot 1 — and commanded it.
+        //
+        // A slot below the watermark is decided and `f + 1` replicas hold the decision. There is
+        // nothing to propose for and nothing this layer could safely put there.
+        if !cfg!(feature = "synod-skip-collected") && slot < self.collected {
+            cx.note(Note::ProposalIgnored { slot });
+            // And say so, rather than dropping it silently. The asker is a replica that missed a
+            // decision this layer has collected, and the only thing that can help it now is a peer.
+            cx.indicate(Ind::Collected { slot });
             return;
         }
         // §4.4: "If λ is active, it will start a commander." An adopted ballot stands until
@@ -1358,6 +1525,64 @@ where
         }
     }
 
+    /// `case ⟨applied, ρ, s⟩` — §4.2's periodic update, from a replica's machine.
+    ///
+    /// Recording it is all that happens here; the collection is [`MultiPaxosSynod::collect`], run
+    /// once afterwards because a new report is the only thing that can move the watermark.
+    fn on_applied(&mut self, from: NodeId, slot_out: Slot, cx: &mut ProtoCx<'_, Self>) {
+        let held = self.reported.entry(from).or_insert(slot_out);
+        *held = (*held).max(slot_out);
+        self.collect(cx);
+    }
+
+    /// `case ⟨catchup, ρ, s⟩` — a peer has fallen behind. This layer holds nothing to answer with,
+    /// so it asks the layer above, which does.
+    fn on_catch_up(&mut self, from: NodeId, from_slot: Slot, cx: &mut ProtoCx<'_, Self>) {
+        cx.indicate(Ind::CatchUpWanted { peer: from, from_slot });
+    }
+
+    /// The highest slot at least `f + 1` members have applied every decision up to.
+    ///
+    /// §4.2: "Once a leader or acceptor learns that at least `f + 1` replicas have received all
+    /// decisions up to some slot `s`, all information about lower numbered slots can be garbage
+    /// collected."
+    ///
+    /// `f + 1` of `2 f + 1` is a majority, and it is the *same* majority the rest of this module
+    /// counts, because §4.4 puts a replica on every acceptor's machine — the replica set and the
+    /// acceptor set are one here, so there is one membership and one quorum size.
+    ///
+    /// **With fewer than `f + 1` members reporting, this stays where it is and nothing is
+    /// collected.** The source says so directly: "if there are fewer than `2 f + 1` replicas, the
+    /// crash of `f` replicas would leave fewer than `f + 1` replicas to send periodic updates and
+    /// no garbage collection could be done". A run that stops collecting after `f` crashes is
+    /// behaving as specified, not failing.
+    fn watermark(&self) -> Slot {
+        let quorum = self.acceptors.len() / 2 + 1;
+        let mut applied: Vec<Slot> = self.reported.values().copied().collect();
+        applied.sort_unstable_by(|a, b| b.cmp(a));
+        applied.get(quorum - 1).copied().unwrap_or(0)
+    }
+
+    /// Discard everything below the watermark — §4.2, and the whole of what makes this module an
+    /// implementation rather than a transcription.
+    ///
+    /// The three things the audit in `docs/bounded-space.md` lists: the acceptor's pvalues, the
+    /// leader's proposals, and the record of which slots are decided. Discarding them destroys no
+    /// information, it *moves* it — "replicas can learn decisions, and the application state that
+    /// results from those decisions, from one another" — and what stops a later leader reading the
+    /// gap as emptiness is `collected` travelling in `p1b`.
+    fn collect(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let wm = self.watermark();
+        if wm <= self.collected {
+            return;
+        }
+        self.collected = wm;
+        self.accepted.retain(|slot, _| *slot >= wm);
+        self.proposals.retain(|slot, _| *slot >= wm);
+        self.decided.retain(|slot, _| *slot >= wm);
+        cx.note(Note::CollectedBelow { slot: wm });
+    }
+
     /// Arm the sweep, or re-arm it after it fired.
     fn arm(&mut self, cx: &mut ProtoCx<'_, Self>) {
         self.tick = Some(cx.set_timer(self.retry));
@@ -1408,7 +1633,11 @@ where
     fn on_synod_msg(&mut self, from: NodeId, msg: SynodMsg<C>, cx: &mut ProtoCx<'_, Self>) {
         match msg {
             SynodMsg::P1a { ballot } => self.on_p1a(from, ballot, cx),
-            SynodMsg::P1b { ballot, accepted } => self.on_p1b(from, ballot, accepted, cx),
+            SynodMsg::P1b { ballot, accepted, collected } => {
+                self.on_p1b(from, ballot, accepted, collected, cx)
+            }
+            SynodMsg::Applied { slot_out } => self.on_applied(from, slot_out, cx),
+            SynodMsg::CatchUp { from_slot } => self.on_catch_up(from, from_slot, cx),
             SynodMsg::P2a { pvalue } => self.on_p2a(from, pvalue, cx),
             SynodMsg::P2b { ballot, slot } => self.on_p2b(from, ballot, slot, cx),
             SynodMsg::Decision { slot, command } => self.on_decision(slot, command, cx),
@@ -1436,8 +1665,41 @@ where
 
     /// A request from the layer above carries no sender, which is what distinguishes it from a
     /// forwarded one: only a proposal that has *not* travelled may be forwarded.
-    fn on_cmd(&mut self, Cmd::Propose { slot, command }: Cmd<C>, cx: &mut ProtoCx<'_, Self>) {
-        self.on_propose(None, slot, command, cx);
+    fn on_cmd(&mut self, cmd: Cmd<C>, cx: &mut ProtoCx<'_, Self>) {
+        match cmd {
+            Cmd::Propose { slot, command } => self.on_propose(None, slot, command, cx),
+            // §4.2's periodic update. Recorded here as this machine's own — the replica is on it —
+            // and passed to everybody else's leader and acceptor, which is what colocation makes
+            // this layer's job rather than the replica's.
+            // Ask **one** peer, the one furthest ahead of us. A fan-out would have every member
+            // answer the same request, which costs membership times the gap for information one
+            // process could have supplied.
+            Cmd::CatchUp { from_slot } => {
+                let ahead = self
+                    .reported
+                    .iter()
+                    .filter(|(peer, applied)| **peer != self.me && **applied > from_slot)
+                    .max_by_key(|(_, applied)| **applied)
+                    .map(|(peer, _)| *peer);
+                match ahead {
+                    Some(peer) => self.transmit(peer, SynodMsg::CatchUp { from_slot }, cx),
+                    // Nobody has said they are ahead. Nothing to do, and nothing lost: the layer
+                    // above asks again, and a report will arrive.
+                    None => cx.note(Note::ProposalIgnored { slot: from_slot }),
+                }
+            }
+            Cmd::Teach { to, slot, command } => {
+                self.transmit(to, SynodMsg::Decision { slot, command }, cx);
+            }
+            Cmd::Applied { slot_out } => {
+                self.on_applied(self.me, slot_out, cx);
+                for peer in self.acceptors.clone() {
+                    if peer != self.me {
+                        self.transmit(peer, SynodMsg::Applied { slot_out }, cx);
+                    }
+                }
+            }
+        }
     }
 
     fn on_msg(&mut self, from: NodeId, msg: Self::Msg, cx: &mut ProtoCx<'_, Self>) {

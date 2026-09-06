@@ -93,15 +93,43 @@ residual warning in the table.
 | `consensus_based_total_order_broadcast` | `unordered`, `delivered`, and one consensus instance per round | entries handled ❌ — **the page**, and the module says so |
 | `logged_uniform_total_order_broadcast` | the same three, and `delivered` and `proposals` **in stable storage** | entries handled ❌❌ — the page again |
 | `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership** for state and for work; inherits `logged_epoch_change`'s ⚠️ |
-| `multi_paxos_synod` | `accepted` (**one pvalue per slot**, §4.1 applied), `proposals`, `decided`, one commander per undecided slot | slots handled ❌ — **the page**: vRA §2 is explicitly the impractical version, and §4.2 is what bounds what remains |
-| `multi_paxos_replica` | `decisions`, `performed`, the ordered sequence; `requests` and `proposals` are bounded by `WINDOW` | commands handled ❌ — **the page**: Figure 1 keeps `decisions` for ever and §4.2's watermark is what collects it |
+| `multi_paxos_synod` | `accepted`, `proposals`, `decided` — all between the collection watermark and the frontier; `reported`, one entry per member | **membership and the window** ✅ — §4.1 and §4.2 both applied, conditional on `f + 1` members reporting |
+| `multi_paxos_replica` | `decisions` and `performed` by a **retention window**; `requests` and `proposals` by `WINDOW` | **a window** ✅ — the ordered sequence is exempt and says so: it is the data, not the bookkeeping |
+
+**Both Multi-Paxos rows are now ✅, and they are the only ones in this audit that got there by
+applying reductions their own source spells out.** §4 of the survey opens by saying "the described
+protocol is not practical" and gives two: §4.1, one pvalue per slot, and §4.2, collecting below a
+watermark once `f + 1` replicas have applied past it. Both are applied, and the audit's original
+verdict on them — the worst rows in the table — no longer holds.
+
+Three things about that are worth keeping, because each was learned rather than read.
+
+**The bound is conditional, and the condition is on the page.** Collection needs `f + 1` of
+`2 f + 1` members reporting, so a run in which `f` have crashed collects nothing and grows again.
+That is specified behaviour, not a defect, and the suite says so — the alternative is somebody later
+"fixing" a stall that the source describes.
+
+**Collecting destroys evidence, so something has to carry the fact.** An acceptor's silence about a
+slot used to mean nothing was accepted for it; afterwards it means one of two things, and the
+`collected` watermark in `p1b` is the only thing that tells them apart. A leader that read a
+collected slot as free would put a second command up for a slot already decided. `agreement_holds_
+across_a_collection` split a slot on the half of that clause which is *not* on the page — the page
+filters proposals at adoption, and a proposal arriving at an already-active leader needs the same
+guard, which a port cannot assume its caller will avoid.
+
+**Collecting at `f + 1` strands the other `f`, and the transfer is not optional.** Everything that
+could help a replica that missed a decision is exactly what gets collected: the consensus layer no
+longer holds it, and a leader's answer to a re-proposal needs that record. Measured, a correct
+replica sat at `slot_out = 1` for ever while the leader held zero decisions. §4.2's own justification
+is the remedy — "replicas can learn decisions […] from one another" — so replica-to-replica transfer
+is part of the same change rather than a later one. A replica further behind than the retention
+window still cannot be caught up; that is where a snapshot would go, and snapshots are outside the
+paper.
 
 `multi_paxos_synod` has had **§4.1 applied**, which is why its row no longer says "every pvalue".
 An acceptor keeps one pvalue per slot rather than one per `⟨ballot, slot⟩`, and returns those rather
 than everything it has ever accepted, so a `p1b` no longer grows with the ballots a run has seen.
-That removes a dimension and does not remove the growth: slots still accumulate, so the row keeps
-its mark and the module stays a transcription. §4.2's watermark is what would change the mark, and
-it is a change with a proposal because it weakens a guarantee to a scope.
+That removed a dimension and not the growth; §4.2 removed the growth.
 
 Applying it turned up something the audit had not: the reduction the acceptor performs and the
 maximum the leader takes are *different operations*, and only the second needed code. The acceptor's
@@ -118,9 +146,13 @@ tick, and both are bounded by membership for a given slot, so the shape of the r
 what grows is slots, as everything here does. §4.2's watermark collects `decided` alongside
 `proposals`.
 
-`multi_paxos_replica` inherits that and adds nothing new in kind. Its `requests` and `proposals` are
-held below `slot_out + WINDOW` by Invariant R5, which is the one bounded thing on the page; the
-`decisions` map and the sequence are what §4.2 exists for. Its periodic work is bounded by the
+`multi_paxos_replica`'s `requests` and `proposals` are held below `slot_out + WINDOW` by Invariant
+R5, which is the one bounded thing on the page. Its `decisions` map is bounded by a **retention
+window** rather than by the watermark beneath it, and the distinction matters: the watermark says
+`f + 1` replicas have *applied* up to a slot, which says nothing about whether a command decided
+below it may be decided again above it. A duplicate filter has to outlive every slot a duplicate
+could span, and only time bounds that — which weakens no-duplication to "within the window", stated
+in the specification. Its periodic work is bounded by the
 outstanding proposals rather than by everything ever appended, so its send rate is flat once every
 slot has decided — asserted, because the sweep is exactly the mechanism that would make it not.
 
