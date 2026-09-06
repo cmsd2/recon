@@ -860,6 +860,123 @@ fn a_proposal_for_a_slot_proposed_but_not_yet_decided_draws_no_answer() {
 }
 
 #[test]
+fn the_answer_names_the_decided_command_not_the_answerers_own_stale_proposal() {
+    // A safety hole in the answer path, found by reading. The answer takes its command from
+    // `proposals[slot]`, and the module argued that for a decided slot that is the decided command
+    // — true of the leader that decided it and of any leader that adopted afterwards, because
+    // `pmax` rewrites it. It is **false** of a leader that commanded something else, was preempted,
+    // and never adopted again: nothing rewrites its `proposals`, the announcement of the real
+    // decision still marks the slot decided, and a forwarded re-proposal is then answered with the
+    // wrong command. A replica whose detector names that process would apply it.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    // A commands 333 for slot 3, and nothing A sends reaches anyone: no acceptor ever holds it.
+    h.propose(A, 3, 333);
+    let nothing_from_a = |from: NodeId, to: NodeId, msg: &Msg| {
+        from != A && !(to == C && matches!(msg, Wire::Detector(_)))
+    };
+    h.settle(nothing_from_a);
+    assert!(h.at(A).commanded_slots().any(|s| s == 3), "A holds a commander for slot 3");
+
+    // C takes over with a higher ballot, finds nothing accepted for slot 3, and decides 777 there.
+    for _ in 0..8 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle(nothing_from_a);
+        if h.at(C).is_active() {
+            break;
+        }
+    }
+    assert!(h.at(C).is_active(), "C must lead for the slot to be decided under it");
+    h.propose(C, 3, 777);
+    h.settle(nothing_from_a);
+    assert!(h.decisions_at(C).contains(&(3, 777)), "C decided 777");
+    assert!(h.decisions_at(A).contains(&(3, 777)), "and A was told — so A knows slot 3 is decided");
+    h.wire.clear();
+
+    // B asks A. Whatever A answers must be what was decided.
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Propose { slot: 3, command: 999 }) },
+    );
+    let answered = h.synod_from(A, B);
+    let decisions: Vec<u32> = answered
+        .iter()
+        .filter_map(|m| match m {
+            SynodMsg::Decision { slot: 3, command } => Some(*command),
+            _ => None,
+        })
+        .collect();
+    assert!(!decisions.is_empty(), "A knows the slot is decided and must answer: {answered:?}");
+    assert_eq!(decisions, vec![777], "A answered with a command that was never chosen");
+}
+
+#[test]
+fn a_proposal_remembered_by_a_leader_that_then_yields_is_forwarded_when_asked_again() {
+    // A liveness hole beside the safety one, and with the same root: `proposals` outliving the
+    // leadership that filled it. A trusted-but-not-yet-adopted process remembers a proposal for
+    // `adopted` to command. If it is preempted before adopting and Ω has moved on, it yields, and
+    // the entry stays. Every later proposal for that slot from its own replica then meets the
+    // `∄c'` guard and is dropped — never forwarded, never commanded by anyone. The slot is never
+    // filled, `slot_out` never passes it, and the replica's re-proposal — the one fix for exactly
+    // this — is defeated by the process's own memory.
+    let mut h = Hand::new(&THREE);
+
+    // A trusts itself and scouts, but its `p1b` answers never arrive, so it never adopts.
+    let starve_a = |_: NodeId, to: NodeId, msg: &Msg| {
+        !(to == A && matches!(msg, Wire::Detector(_) | Wire::Synod(SynodMsg::P1b { .. })))
+    };
+    for _ in 0..3 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle(starve_a);
+    }
+    assert!(h.at(A).is_trusted() && h.at(A).is_scouting() && !h.at(A).is_active());
+
+    // Its replica proposes. Remembered, for an adoption that will never come.
+    h.propose(A, 5, 555);
+    assert!(
+        !h.synod_sent_by(A).iter().any(|m| matches!(m, SynodMsg::Propose { .. })),
+        "trusted, so nothing is forwarded: it is remembered for `adopted`",
+    );
+
+    // C rises while nothing of A's reaches anyone, so every acceptor ends up above A's ballot.
+    let nothing_from_a = |from: NodeId, to: NodeId, msg: &Msg| {
+        from != A && !(to == C && matches!(msg, Wire::Detector(_)))
+    };
+    for _ in 0..8 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle(nothing_from_a);
+        if h.at(C).is_active() {
+            break;
+        }
+    }
+    assert!(h.at(C).is_active());
+
+    // Now A hears everyone: its detector moves to C, and its scout is answered with C's ballot
+    // and preempted. Not trusted, it yields.
+    for _ in 0..4 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle_without_heartbeats_to(C);
+    }
+    assert_eq!(h.at(A).trusted_leader(), Some(C), "Ω at A must have moved to C");
+    assert!(!h.at(A).is_active() && !h.at(A).is_scouting(), "and A must have yielded");
+    assert!(h.decisions_at(A).is_empty(), "slot 5 is undecided — the precondition");
+    h.wire.clear();
+
+    // The replica asks again. The only thing that can fill slot 5 now is C, so this must reach C.
+    h.propose(A, 5, 555);
+    let to_c = h.synod_from(A, C);
+    assert!(
+        to_c.iter().any(|m| matches!(m, SynodMsg::Propose { slot: 5, command: 555 })),
+        "a process that will not lead must forward, not sit on its own stale proposal: {to_c:?}",
+    );
+}
+
+#[test]
 fn a_proposal_forwarded_to_a_crashed_process_is_lost() {
     // The cost of colocation, tested rather than assumed: a proposal now goes to one process, so a
     // detector naming one that has died loses it. Nothing at this layer recovers it — the replica's

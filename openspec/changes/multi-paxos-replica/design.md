@@ -142,13 +142,22 @@ every proposal, and that fires least in exactly the run that matters most: a sta
 the answer, a re-proposal for a decided slot hits the `∄c'` guard, is noted `ProposalIgnored`, and
 the asker re-proposes for ever while its `WINDOW` fills.
 
-So the leader keeps `decided: BTreeSet<Slot>`, marked when a commander completes, and a `Propose`
-for a member is answered with `Decision { slot, command }` sent to the **asker alone** — one message
-where the original announcement was a fan-out. The command comes from `proposals[slot]`, which for a
-decided slot is the decided command: it was the commanded value in the deciding ballot, and any
-later adoption's `pmax` writes the same command back by Invariant A5. The set grows with slots
-decided, which changes nothing about the capability's stated bound — the leader's `proposals` map
-already grows identically — and §4.2's watermark collects both in change 3.
+So every process keeps `decided: BTreeMap<Slot, C>`, filled when its own commander completes and
+when another's announcement arrives, and a forwarded `Propose` for a member is answered with
+`Decision { slot, command }` sent to the **asker alone** — one message where the original
+announcement was a fan-out. The map grows with slots decided, which changes nothing about the
+capability's stated bound — the leader's `proposals` map already grows identically — and §4.2's
+watermark collects both in change 3.
+
+*Rejected in review:* answering from `proposals[slot]`, on the argument that for a decided slot it
+holds the decided command because it was the commanded value in the deciding ballot and any later
+adoption's `pmax` writes it back. That is true of the deciding leader and of any leader that adopts
+afterwards, and false of a leader that commanded something else, was preempted, and never adopted
+again — its proposal is never rewritten, the announcement still marks the slot decided, and it would
+answer with a command that was never chosen. The first draft shipped with it; a hand-driven
+schedule in the Synod suite is what caught it, and the same review found that a yielded leader's
+retained `proposals` entry also blocks its own replica's re-proposal for ever, so a passive,
+untrusted process now forwards and forgets.
 
 *Alternative considered:* restart a commander for the slot instead of answering, avoiding the
 `decided` set. Rejected as a full phase-2 fan-out and round trip to re-deliver one message to one

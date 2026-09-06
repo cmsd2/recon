@@ -340,29 +340,55 @@ fn decisions_out_of_order_and_twice_extend_the_sequence_only_in_order() {
 fn a_replica_does_not_act_on_the_childs_timers() {
     // A timer is named by an opaque handle the driver issues and an expiry is offered to *every*
     // layer, so a layer that registered one must compare before acting. Nothing in the type system
-    // enforces that; this does. The child registers its retry sweep at `⟨ Init ⟩` and the replica
-    // registers its own, and each must ignore the other's.
+    // enforces that; this does. The child registers its retry sweep at `⟨ Init ⟩`, the detector
+    // beneath it registers its own, the replica registers a third, and the replica must act on
+    // exactly the one it registered.
+    //
+    // Fired one handle at a time, deliberately. The first draft fired them all at once and counted
+    // one re-proposal, and a replica that swept on *every* expiry passed it: the first sweep
+    // re-proposed and reset the clock, so the second found nothing due. Breaking the comparison
+    // and requiring the red is what found that.
     let mut h = Hand::new(&THREE);
-    let before = h.notes_at(A).count();
-
-    // Every timer the process holds, fired. Both handles are among them, so this passes if and only
-    // if the replica acted on exactly one.
-    h.advance(timing().detect_after * 4);
-    h.tick(A);
-    let sweeps = h.notes_at(A).skip(before).filter(|n| matches!(n, Note::SlotReproposed { .. }));
-    assert_eq!(sweeps.count(), 0, "nothing was outstanding, so no sweep should have found work");
-
-    // And with something outstanding, the sweep fires once per due slot rather than once per timer.
     h.make_active_leader(A);
     h.append(A, 1);
-    h.settle(|_, _, _| false); // every message lost, so the slot stays open
+    h.settle(|_, _, _| false); // every message lost, so the slot stays open and stays due
     assert_eq!(h.at(A).outstanding(), 1, "a proposal is outstanding");
-    let before = h.notes_at(A).count();
+
+    // Round one: fire each handle on its own and see which one the replica acts on. Whatever that
+    // handler registers in response is the replica's *next* handle, and the only one it may act
+    // on next time.
     h.advance(timing().detect_after * 4);
-    h.tick(A);
-    let sweeps: Vec<&Note> =
-        h.notes_at(A).skip(before).filter(|n| matches!(n, Note::SlotReproposed { .. })).collect();
-    assert_eq!(sweeps.len(), 1, "one due slot, one re-proposal, however many timers fired");
+    let mut owned_next = None;
+    for id in h.take_timers(A) {
+        let before = h.notes_at(A).count();
+        let registered = h.fire(A, id);
+        let swept = h.notes_at(A).skip(before).any(|n| matches!(n, Note::SlotReproposed { .. }));
+        if swept {
+            assert!(owned_next.is_none(), "two different handles made the replica sweep");
+            assert_eq!(registered.len(), 1, "the sweep re-arms exactly one timer");
+            owned_next = Some(registered[0]);
+        }
+    }
+    let mine =
+        owned_next.expect("one handle must have made the replica sweep, or the fix is absent");
+
+    // Round two: the slot is due again. Every handle that is not the replica's fires first, and
+    // none of them may move it; then the replica's own does, once.
+    h.advance(timing().detect_after * 4);
+    let ids = h.take_timers(A);
+    assert!(ids.contains(&mine), "the replica's re-armed handle is among those registered");
+    let before = h.notes_at(A).count();
+    for id in ids.iter().copied().filter(|id| *id != mine) {
+        h.fire(A, id);
+    }
+    assert!(
+        !h.notes_at(A).skip(before).any(|n| matches!(n, Note::SlotReproposed { .. })),
+        "the replica acted on a handle it did not register",
+    );
+    h.fire(A, mine);
+    let swept =
+        h.notes_at(A).skip(before).filter(|n| matches!(n, Note::SlotReproposed { .. })).count();
+    assert_eq!(swept, 1, "and on its own handle, once");
 }
 
 #[test]
@@ -671,6 +697,19 @@ impl Hand {
 
     fn notes_at(&self, node: NodeId) -> impl Iterator<Item = &Note> {
         self.notes.iter().filter(move |(n, _)| *n == node).map(|(_, note)| note)
+    }
+
+    /// Every handle this node currently holds, taken: firing one is the caller's business.
+    fn take_timers(&mut self, node: NodeId) -> Vec<TimerId> {
+        core::mem::take(self.timers.get_mut(&node).expect("a member"))
+    }
+
+    /// Fire one handle, and hand back whatever the process registered while handling it — which
+    /// is the same layer's next handle, since a layer re-arms in its own expiry.
+    fn fire(&mut self, node: NodeId, id: TimerId) -> Vec<TimerId> {
+        let before = self.timers.get(&node).map_or(0, Vec::len);
+        self.event(node, Event::Timer(id));
+        self.timers.get(&node).expect("a member")[before..].to_vec()
     }
 
     /// Fire every timer this node holds. The protocol compares before acting, so handing it all of

@@ -173,9 +173,31 @@
 //! Without the answer, a re-proposal for a decided slot meets the `∄c'` guard, is dropped, and the
 //! asker re-proposes for ever.
 //!
-//! The command in the answer comes from this leader's own proposal for the slot, which for a
-//! decided slot is the decided command: it was the commanded value in the ballot that decided, and
-//! any later adoption's `pmax` writes the same command back by Invariant A5.
+//! **The command in the answer comes from the decision, never from `proposals`.** The first draft
+//! took it from `proposals[slot]`, arguing that for a decided slot that is the decided command — it
+//! was the commanded value in the ballot that decided, and any later adoption's `pmax` writes it
+//! back. That argument holds for the leader that decided and for any leader that adopted afterwards,
+//! and it is **false** for the third case: a leader that commanded something else for the slot, was
+//! preempted, and never adopted again. Nothing rewrites that leader's `proposals`; the announcement
+//! of the real decision still marks the slot decided; and a forwarded re-proposal would then be
+//! answered with a command that was never chosen, which a replica whose detector names that process
+//! would apply. `the_answer_names_the_decided_command_not_the_answerers_own_stale_proposal` is the
+//! schedule. So `decided` keeps the command beside the slot, filled from the same two places every
+//! process learns a decision — its own commander counting a majority, and another's announcement —
+//! and R1 is what makes either source the right one. A consequence worth having: any process that
+//! knows the decision can answer, not only the leader that made it.
+//!
+//! **A leader that has yielded forwards even for a slot it remembered.** The same root, on the
+//! liveness side. A trusted process that has not yet adopted remembers a proposal for `adopted` to
+//! command; if it is preempted first and Ω has moved on, it yields with the entry still in
+//! `proposals`, and the `∄c'` guard would then drop every later proposal its own replica makes for
+//! that slot — never forwarded, never commanded by anyone, the one slot nobody else will propose
+//! for, and the re-proposal that exists for exactly this wedge defeated by the process's own memory.
+//! So the guard applies only where this process can act, and a passive, untrusted process forwards
+//! and forgets: what it remembered is dead weight, and anything a majority accepted comes back
+//! through `pmax` if it ever leads again.
+//! `a_proposal_remembered_by_a_leader_that_then_yields_is_forwarded_when_asked_again` is that
+//! schedule.
 //!
 //! # Departure: three liveness fixes from the cross-check
 //!
@@ -599,13 +621,14 @@ pub struct MultiPaxosSynod<C: Clone, L: VolatileLink<SynodMsg<C>> = SessionLink<
     /// The commanders, keyed by slot **within the current ballot** — Invariant C1. Cleared when the
     /// ballot changes, which is what makes the key a slot rather than a `⟨ballot, slot⟩` pair.
     commanders: BTreeMap<Slot, Commander<C>>,
-    /// The slots this leader has seen decided, so that a `Propose` for one can be answered with the
-    /// decision instead of ignored. Not on any figure; see the module documentation on why the
-    /// answer is what makes a re-proposal a recovery rather than a loop.
+    /// Every decision this process has learned, so that a `Propose` for a decided slot can be
+    /// answered with the decision instead of ignored. Not on any figure; see the module
+    /// documentation on why the answer is what makes a re-proposal a recovery rather than a loop,
+    /// and on why the command lives here rather than being read back out of `proposals`.
     ///
     /// Grows with slots decided. That is the same growth `proposals` already has, so it changes
     /// nothing about this module's stated bound, and §4.2's watermark collects both.
-    decided: BTreeSet<Slot>,
+    decided: BTreeMap<Slot, C>,
     /// Whether Ω currently trusts this process. The departure from §3: a leader is passive by
     /// default and competes only while trusted.
     ///
@@ -657,7 +680,7 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
             proposals: BTreeMap::new(),
             scout: None,
             commanders: BTreeMap::new(),
-            decided: BTreeSet::new(),
+            decided: BTreeMap::new(),
             trusted: None,
             tick: None,
             retry: retransmit,
@@ -887,7 +910,7 @@ where
     /// addressees are the processes of the run: §4.4 colocates a replica with every acceptor, so
     /// the two sets are one here.
     fn decide(&mut self, slot: Slot, command: C, cx: &mut ProtoCx<'_, Self>) {
-        self.decided.insert(slot);
+        self.decided.insert(slot, command.clone());
         for peer in self.acceptors.clone() {
             if peer != self.me {
                 let command = command.clone();
@@ -922,7 +945,9 @@ where
     /// mutation there is, and it is the evidence. Silencing a contradiction is not the same as not
     /// having one.
     fn on_decision(&mut self, slot: Slot, command: C, cx: &mut ProtoCx<'_, Self>) {
-        self.decided.insert(slot);
+        // A union, as the page has it: R1 makes a second arrival the same command, so the first
+        // one stays.
+        self.decided.entry(slot).or_insert_with(|| command.clone());
         cx.indicate(Ind::Decision { slot, command });
     }
 
@@ -1007,42 +1032,52 @@ where
         // never reached has no other way back. To the asker alone, where the announcement was a
         // fan-out. Liu et al.: a leader "can then work on deciding for that slot if a decision for
         // it has not been made; otherwise, it can send back the decision for that slot".
-        if self.decided.contains(&slot)
-            && let Some(asker) = from
-            && let Some(decided) = self.proposals.get(&slot).cloned()
+        //
+        // From `decided`, never from `proposals`: the module documentation has the schedule in
+        // which the two differ. Any process that knows the decision may answer.
+        if let Some(asker) = from
+            && let Some(decided) = self.decided.get(&slot).cloned()
         {
             self.transmit(asker, SynodMsg::Decision { slot, command: decided }, cx);
-            return;
-        }
-        if self.proposals.contains_key(&slot) {
-            // No effect at all: the proposal is dropped on the floor because this leader already
-            // has one for the slot, which is what enforces C1 against a second commander. The
-            // attempt already in flight is what fills it.
-            cx.note(Note::ProposalIgnored { slot });
             return;
         }
         // §4.4: "If λ is active, it will start a commander." An adopted ballot stands until
         // something preempts it, so an active leader commands even where Ω has moved on — standing
         // down means starting no new ballots, not abandoning one a majority already adopted.
         if self.active {
+            if self.proposals.contains_key(&slot) {
+                // No effect at all: dropped because this leader already has one for the slot,
+                // which is what enforces C1 against a second commander. The attempt already in
+                // flight is what fills it.
+                cx.note(Note::ProposalIgnored { slot });
+                return;
+            }
             self.proposals.insert(slot, command.clone());
             self.start_commander(slot, command, cx);
             return;
         }
         if self.is_trusted() {
             // Trusted but not yet adopted: remembered, and `adopted` commands it. Figure 7's
-            // `if active then` arm doing nothing.
+            // `if active then` arm doing nothing. Remembered once; a repeat changes nothing.
+            if self.proposals.contains_key(&slot) {
+                cx.note(Note::ProposalIgnored { slot });
+                return;
+            }
             self.proposals.insert(slot, command);
             return;
         }
         // §4.4: "If λ is passive, monitoring another leader λ′, it forwards the proposal to λ′."
-        // Remembering here would be the same as dropping — this process will not lead.
+        // Remembering here would be the same as dropping — this process will not lead — and so is
+        // anything it remembered *before* it stopped leading: the `∄c'` guard is C1's, and C1 is
+        // about commanders, of which a passive process has none. What it forgets here comes back
+        // through `pmax` if a majority accepted it and this process ever leads again.
         //
         // **A `Propose` that arrived is never forwarded again.** Two processes whose detectors
         // disagree would pass one back and forth for as long as they disagree, so the path is at
         // most two hops by construction and the asker's own timeout is what recovers a drop.
         match (from, self.trusted) {
             (None, Some(leader)) if leader != self.me => {
+                self.proposals.remove(&slot);
                 self.transmit(leader, SynodMsg::Propose { slot, command }, cx);
             }
             _ => cx.note(Note::ProposalIgnored { slot }),

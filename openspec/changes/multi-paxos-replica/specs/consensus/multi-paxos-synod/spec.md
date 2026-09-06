@@ -14,10 +14,10 @@ cannot be built from a decision that only one process ever learns.
 A process MAY learn a decision for a slot more than once, because a later ballot can command a slot
 that has already been decided, and because a leader answers a re-proposal for a decided slot with
 the decision again. Invariant A5 makes the command the same one, so the repetition is safe, and the
-layer above SHALL be idempotent rather than this capability suppressing it: suppression would need
-every *receiving* process to remember every decided slot, where the answering requirement below
-needs the set only at the leader that decided, and the repetition is anyway inherent in a later
-ballot re-commanding.
+layer above SHALL be idempotent rather than this capability suppressing it. Every process does keep
+what it has learned decided — the answering requirement below needs it — but suppressing a repeat
+with that record would make the layer above's recovery depend on this layer's volatile memory, and
+the repetition is anyway inherent in a later ballot re-commanding.
 
 #### Scenario: Every process learns a chosen proposal
 
@@ -32,8 +32,8 @@ ballot re-commanding.
 
 ### Requirement: A proposal for a decided slot is answered with the decision
 
-Where a leader receives a proposal for a slot it knows to be decided, it SHALL answer the asker
-with the decision for that slot, rather than ignoring the request.
+Where a process receives a forwarded proposal for a slot it knows to be decided, it SHALL answer
+the asker with the decision for that slot, rather than ignoring the request.
 
 This is the leader-side half of the re-proposal fix, and the half without which the other cannot
 work. A decision is broadcast once, by the commander that counted the majority; a process the
@@ -44,9 +44,18 @@ decision once its commander has exited. The source of the fix is the cross-check
 it directly: a leader "can then work on deciding for that slot if a decision for it has not been
 made; otherwise, it can send back the decision for that slot".
 
-The answer goes to the asker alone — one message, not a fan-out — and it carries the decided
-command, which the leader's own proposal for that slot holds: it was the commanded value in the
-ballot that decided, and any later adoption writes the same command back.
+The answer goes to the asker alone — one message, not a fan-out — and it SHALL carry the decided
+command as the answerer learned it — from its own commander counting a majority, or from another
+process's announcement — and NOT the answerer's own proposal for the slot. The two differ for a
+leader that commanded something else for the slot, was preempted, and never adopted again: nothing
+rewrites its proposal, the announcement still marks the slot decided, and answering from the
+proposal would hand the asker a command that was never chosen.
+
+#### Scenario: The answer is the decision, not the answerer's proposal
+
+- **WHEN** a process commanded one command for a slot, was preempted before any acceptor took it,
+  and learned by announcement that a different command was decided for that slot
+- **THEN** its answer to a forwarded proposal for that slot carries the decided command
 
 #### Scenario: A re-proposal for a decided slot is answered
 
@@ -74,6 +83,18 @@ A forwarded request SHALL NOT be forwarded again. Two processes that disagree ab
 otherwise pass one back and forth for as long as they disagree, and the request would occupy the
 network rather than waiting. Where the second process also cannot act, the request is dropped and
 the layer above is responsible for asking again.
+
+A process that is neither active nor trusted SHALL forward even for a slot it remembered a proposal
+for while it was trusted, and SHALL forget what it remembered. A proposal remembered for an adoption
+that never came is not a commander, so the one-proposal-per-slot guard — which exists for
+commanders — has nothing to protect there; holding to it would drop every later request for that
+slot from the process's own replica, and nothing else would ever fill it.
+
+#### Scenario: A yielded leader forwards what it once remembered
+
+- **WHEN** a process remembered a proposal for a slot while trusted, was preempted before adopting,
+  is no longer trusted, and is asked to propose for that slot again
+- **THEN** it forwards the request to the process the detector now trusts
 
 #### Scenario: A proposal made at a passive process reaches the leader
 
