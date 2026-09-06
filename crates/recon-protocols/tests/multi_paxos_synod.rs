@@ -207,6 +207,15 @@ fn decisions(sim: &Sim<Synod>) -> BTreeMap<Slot, u32> {
     out
 }
 
+/// How many times a slot was announced as decided, across every process. More than once is the
+/// normal case once a later ballot re-commands it, and what A5 makes harmless.
+fn announcements(sim: &Sim<Synod>, want: Slot) -> usize {
+    sim.trace()
+        .indications()
+        .filter(|(_, ind)| matches!(ind, Ind::Decision { slot, .. } if *slot == want))
+        .count()
+}
+
 /// Did the run really contain a preemption? An acceptor answering with a ballot above the one it
 /// was asked about is the only thing that produces one, so it is what the trace can be asked.
 fn preemptions(sim: &Sim<Synod>) -> usize {
@@ -624,25 +633,262 @@ fn an_acceptor_that_missed_phase_one_still_counts_in_phase_two() {
 // ---------------------------------------------------------------- task 4: the leader
 
 #[test]
-fn a_proposal_arriving_while_passive_is_remembered_and_sent_once_the_ballot_is_adopted() {
+fn a_proposal_arriving_before_the_ballot_is_adopted_is_remembered_and_sent_on_adoption() {
+    // Figure 7's `if active then` guard doing nothing. "Passive" here means **trusted but not yet
+    // adopted** — a process Ω does not trust forwards instead, which is the test below.
     let mut h = Hand::new(&THREE);
-    // Nobody has trusted A, so it is passive: Figure 7's `if active then` guard does nothing.
-    assert!(!h.at(A).is_active() && !h.at(A).is_scouting(), "A starts passive");
-    h.wire.clear();
+    h.make_active_leader(A);
+    // Put A back into phase one, where it is trusted and scouting but not active.
+    h.preempt(A, Ballot { round: 40, leader: C });
+    assert!(h.at(A).is_trusted() && h.at(A).is_scouting() && !h.at(A).is_active());
+    // The wire is left alone: it holds the scout's own `p1a`, and clearing it would leave the
+    // attempt unanswerable and this test asserting adoption that could never happen.
     h.propose(A, 4, 400);
     assert!(
-        h.synod_sent_by(A).is_empty(),
-        "a passive leader sends nothing at all: {:?}",
+        h.synod_sent_by(A).iter().all(|m| !matches!(
+            m,
+            SynodMsg::P2a { pvalue } if pvalue.slot == 4
+        )),
+        "a leader that has not adopted commands nothing: {:?}",
         h.synod_sent_by(A),
     );
+    assert!(
+        h.synod_sent_by(A).iter().all(|m| !matches!(m, SynodMsg::Propose { .. })),
+        "and a trusted leader forwards nothing — it will lead itself",
+    );
 
-    // Now let A become trusted and complete phase one. `adopted` spawns a commander for every
-    // proposal it was holding, so the one made while passive must be the one that gets chosen.
-    h.make_active_leader(A);
-    assert_eq!(
+    // Adoption spawns a commander for every proposal it was holding.
+    h.settle_without_heartbeats_to(A);
+    assert!(
+        h.decisions_at(A).contains(&(4, 400)),
+        "the remembered proposal must be commanded once the ballot is adopted, got {:?}",
         h.decisions_at(A),
-        vec![(4, 400)],
-        "the proposal remembered while passive must be commanded once the ballot is adopted",
+    );
+}
+
+#[test]
+fn a_proposal_at_a_process_that_will_not_lead_is_forwarded_to_the_one_that_will() {
+    // §4.4: "If λ is passive, monitoring another leader λ′, it forwards the proposal to λ′."
+    // Without this a proposal made at a process Ω never trusts is never acted on at all.
+    let mut h = Hand::new(&THREE);
+    // C is the highest, so Ω trusts C everywhere. A is passive and will stay so.
+    h.advance(timing().detect_after);
+    h.tick_all();
+    h.settle_all();
+    assert!(!h.at(A).is_trusted(), "A is not trusted, which is the premise");
+    assert_eq!(h.at(A).trusted_leader(), Some(C), "and it knows who is");
+    h.wire.clear();
+
+    h.propose(A, 4, 400);
+    let forwarded: Vec<_> = h.synod_from(A, C);
+    assert!(
+        forwarded.iter().any(|m| matches!(m, SynodMsg::Propose { slot: 4, command: 400 })),
+        "the proposal must reach the trusted leader, got {forwarded:?}",
+    );
+    assert!(
+        h.synod_from(A, B).is_empty(),
+        "and only that one — a forward is directed, not a fan-out",
+    );
+
+    // It is commanded under the leader's own ballot, and decided.
+    h.settle_all();
+    assert!(
+        h.decisions_at(C).contains(&(4, 400)),
+        "the forwarded proposal must be commanded by the leader, got {:?}",
+        h.decisions_at(C),
+    );
+    assert!(
+        h.decisions_at(A).contains(&(4, 400)),
+        "and the decision must reach the process that asked",
+    );
+}
+
+#[test]
+fn a_forwarded_proposal_is_not_forwarded_again() {
+    // Two processes whose detectors disagree would pass one back and forth for as long as they
+    // disagree. A `Propose` that arrived is handled locally or dropped, so the path is two hops.
+    let mut h = Hand::new(&THREE);
+    h.advance(timing().detect_after);
+    h.tick_all();
+    h.settle_all();
+    assert!(!h.at(B).is_trusted(), "B is passive and trusts someone else");
+    h.wire.clear();
+
+    // A forwarded proposal arrives at B, which also cannot act on it.
+    h.event(
+        B,
+        Event::Msg { from: A, msg: Wire::Synod(SynodMsg::Propose { slot: 5, command: 500 }) },
+    );
+    assert!(
+        h.synod_sent_by(B).iter().all(|m| !matches!(m, SynodMsg::Propose { .. })),
+        "an arrived proposal must not be forwarded on: {:?}",
+        h.synod_sent_by(B),
+    );
+    // The decision to drop produces no effect at all, so the narration is the only record.
+    assert!(
+        h.notes_at(B).any(|n| matches!(n, Note::ProposalIgnored { slot: 5 })),
+        "dropping it must be narrated, since nothing else can say it happened",
+    );
+}
+
+#[test]
+fn an_active_leader_commands_rather_than_forwarding_even_where_omega_has_moved_on() {
+    // The ordering of the two conditions. An adopted ballot stands until something preempts it, so
+    // commanding is a round trip where forwarding is a round trip plus a phase one. "Stops
+    // competing" means starting no new ballots, not abandoning one a majority already adopted.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    // Let the heartbeats back so Ω moves to C while A stays active at its adopted ballot.
+    for _ in 0..8 {
+        h.advance(timing().detect_after);
+        h.tick_all();
+        h.settle_all();
+        if !h.at(A).is_trusted() {
+            break;
+        }
+    }
+    assert!(!h.at(A).is_trusted() && h.at(A).is_active(), "A is active but no longer trusted");
+    h.wire.clear();
+
+    h.propose(A, 6, 600);
+    assert!(
+        h.synod_sent_by(A).iter().any(|m| matches!(
+            m,
+            SynodMsg::P2a { pvalue } if pvalue.slot == 6
+        )),
+        "an active leader commands: {:?}",
+        h.synod_sent_by(A),
+    );
+    assert!(
+        h.synod_sent_by(A).iter().all(|m| !matches!(m, SynodMsg::Propose { .. })),
+        "and forwards nothing",
+    );
+}
+
+#[test]
+fn every_process_learns_a_decision_not_only_the_one_that_counted_it() {
+    // Figure 6(a)'s last line, restored: `∀ρ ∈ replicas : send(ρ, ⟨decision, s, c⟩)`.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+    h.propose(A, 2, 222);
+    h.settle_without_heartbeats_to(A);
+
+    for node in THREE {
+        assert!(
+            h.decisions_at(node).contains(&(2, 222)),
+            "{node} did not learn the decision; only the counting process did",
+        );
+    }
+}
+
+#[test]
+fn a_leader_answers_a_re_proposal_for_a_decided_slot_with_the_decision() {
+    // The leader-side half of Liu et al.'s fix. A decision is announced once and its commander then
+    // exits, so a process the announcement never reached has no other way back; asking is the way.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    // A decides slot 3, but the announcement never reaches B.
+    h.propose(A, 3, 333);
+    h.settle(|_, to, msg| {
+        !(to == B && matches!(msg, Wire::Synod(SynodMsg::Decision { .. })))
+            && !(to == A && matches!(msg, Wire::Detector(_)))
+    });
+    assert!(h.decisions_at(A).contains(&(3, 333)), "A decided it");
+    assert!(h.decisions_at(B).is_empty(), "and B was never told — the precondition");
+    h.wire.clear();
+
+    // B asks, by proposing for the same slot. The answer goes to B alone.
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Propose { slot: 3, command: 999 }) },
+    );
+    let answered = h.synod_from(A, B);
+    assert!(
+        answered.iter().any(|m| matches!(m, SynodMsg::Decision { slot: 3, command: 333 })),
+        "the answer must carry the decided command, not the one asked about: {answered:?}",
+    );
+    assert!(
+        h.synod_from(A, C).is_empty(),
+        "and go to the asker alone, not a fan-out — the announcement was the fan-out",
+    );
+    assert!(
+        h.synod_sent_by(A).iter().all(|m| !matches!(m, SynodMsg::P2a { .. })),
+        "and start no commander for a slot already decided",
+    );
+
+    // Which is what unwedges B.
+    h.settle_without_heartbeats_to(A);
+    assert!(
+        h.decisions_at(B).contains(&(3, 333)),
+        "asking must be what gets the decision to B, got {:?}",
+        h.decisions_at(B),
+    );
+}
+
+#[test]
+fn a_proposal_for_a_slot_proposed_but_not_yet_decided_draws_no_answer() {
+    // The other half of the guard: the attempt already in flight is what fills the slot, and a
+    // second commander for one ⟨ballot, slot⟩ would break Invariant C1.
+    let mut h = Hand::new(&THREE);
+    h.make_active_leader(A);
+
+    // A commands slot 4 but no answer arrives, so it stays undecided.
+    h.propose(A, 4, 444);
+    h.settle(|_, to, msg| {
+        !(to == A && matches!(msg, Wire::Synod(SynodMsg::P2b { .. })))
+            && !(to == A && matches!(msg, Wire::Detector(_)))
+    });
+    assert!(h.decisions_at(A).is_empty(), "nothing is decided yet");
+    assert!(h.at(A).commanded_slots().any(|s| s == 4), "and the commander is still outstanding");
+    h.wire.clear();
+
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Propose { slot: 4, command: 999 }) },
+    );
+    assert!(
+        h.synod_from(A, B).iter().all(|m| !matches!(m, SynodMsg::Decision { .. })),
+        "an undecided slot must draw no decision: {:?}",
+        h.synod_from(A, B),
+    );
+    assert_eq!(
+        h.at(A).commanded_slots().collect::<Vec<_>>(),
+        vec![4],
+        "and no second commander for the slot",
+    );
+}
+
+#[test]
+fn a_proposal_forwarded_to_a_crashed_process_is_lost() {
+    // The cost of colocation, tested rather than assumed: a proposal now goes to one process, so a
+    // detector naming one that has died loses it. Nothing at this layer recovers it — the replica's
+    // re-proposal timeout is what does, and that is a later change.
+    let mut s = sim_of(&FIVE, synchronous(53));
+    s.run_for(Duration::from_millis(200));
+    // E is the highest, so Ω trusts it everywhere.
+    assert_eq!(s.at(A).trusted_leader(), Some(E), "the detector names E");
+    s.crash(E);
+    assert!(s.is_stopped(E), "and E really crashed, before the proposal is made");
+
+    // A is passive, still trusts E, and forwards there.
+    assert!(!s.at(A).is_trusted(), "A will not lead, so it forwards");
+    s.command(A, Cmd::Propose { slot: 1, command: 111 });
+    s.run_for(Duration::from_millis(50));
+    let forwarded = s
+        .trace()
+        .sends()
+        .filter(|(from, to, m)| {
+            *from == A && *to == E && matches!(m, Wire::Synod(SynodMsg::Propose { .. }))
+        })
+        .count();
+    assert!(forwarded > 0, "the forward really happened — the non-vacuity half");
+
+    run_checking(&mut s, Duration::from_secs(3));
+    assert!(
+        !decisions(&s).contains_key(&1),
+        "nothing at this layer recovers a proposal forwarded into a crash: {:?}",
+        decisions(&s),
     );
 }
 
@@ -1097,8 +1343,9 @@ fn the_send_rate_is_flat_once_the_work_is_done() {
 #[test]
 fn at_most_one_proposal_is_chosen_per_slot_under_competing_ballots() {
     let mut s = sim_of(&FIVE, unreliable(23));
-    // Every process proposes a different command for the same slots, so the run genuinely contains
-    // proposals that would split it.
+    // Every process is asked for a different command for the same slots. §4.4's forwarding funnels
+    // them, so what this puts in the run is not five surviving proposals but the material for
+    // them: while the run is split, each side's leader keeps its own.
     for (i, node) in FIVE.iter().enumerate() {
         for slot in 1..=3u64 {
             s.command(*node, Cmd::Propose { slot, command: (i as u32 + 1) * 1000 + slot as u32 });
@@ -1111,11 +1358,29 @@ fn at_most_one_proposal_is_chosen_per_slot_under_competing_ballots() {
     churn(&mut s, 23, 4, Duration::from_millis(200));
     s.heal();
     s.deliver_session_events();
-    let checked = churn(&mut s, 5, 6, Duration::from_millis(400));
-    let checked = {
-        let _ = checked;
-        run_checking(&mut s, Duration::from_secs(3))
-    };
+    churn(&mut s, 5, 6, Duration::from_millis(400));
+
+    // Competing ballots on their own do not put a *contradicting* value in front of a leader.
+    // Forwarding leaves one proposal per slot at whoever Ω trusts, and Ω trusts E throughout the
+    // partition and after it, so every ballot here commands the same commands. A handover is what
+    // supplies the contradiction: E crashes having got slots chosen, D takes over holding no
+    // proposal for them, and is then asked for different commands. That is the case `pmax` settles,
+    // and the whole of what makes ignoring it a split rather than a no-op.
+    let chosen_under_e = decisions(&s);
+    assert!(!chosen_under_e.is_empty(), "E must get something chosen before it hands over");
+    s.crash(E);
+    assert!(s.is_stopped(E), "the leader really went, and before the proposals that follow");
+    for _ in 0..40 {
+        s.run_for(Duration::from_millis(100));
+        if s.at(D).is_trusted() {
+            break;
+        }
+    }
+    assert!(s.at(D).is_trusted(), "the detector must move to D before D can lead");
+    for slot in chosen_under_e.keys() {
+        s.command(D, Cmd::Propose { slot: *slot, command: 9000 + *slot as u32 });
+    }
+    let checked = run_checking(&mut s, Duration::from_secs(3));
 
     // The checker asserted agreement after every event; these are the non-vacuity halves, and each
     // sits at the point in the sequence that depends on it.
@@ -1123,6 +1388,13 @@ fn at_most_one_proposal_is_chosen_per_slot_under_competing_ballots() {
     assert!(ballots_seen(&s).len() > 1, "one ballot ran, so no ballots competed");
     assert!(preemptions(&s) > 0, "no ballot was ever refused, so none of them collided");
     assert!(s.trace().session_ends() > 0, "no session ended, so nothing was ever lost");
+    for (slot, command) in &chosen_under_e {
+        assert_eq!(
+            decisions(&s).get(slot),
+            Some(command),
+            "slot {slot} was chosen as {command} under E, and the successor must not move it",
+        );
+    }
 }
 
 #[test]
@@ -1198,9 +1470,21 @@ fn a_value_chosen_under_a_crashed_leader_is_what_its_successor_proposes() {
     s.crash(E);
     assert!(s.is_stopped(E), "the leader really crashed, and before its successor proposes");
 
-    // D is now the highest correct process, so Ω moves to it. Command D a *different* command for
-    // slot 7. A correct successor must discover 700 in phase one and propose that, dropping 999 —
-    // Figure 7's `proposals := proposals ◁ pmax(pvals)` composed with the `∄c'` guard.
+    // D is now the highest correct process, so Ω moves to it. Wait for that before asking it to
+    // propose: a process that is not yet trusted forwards its proposal to the one that is, which
+    // here is the crashed E — the loss that `a_proposal_forwarded_to_a_crashed_process_is_lost`
+    // covers, and not what this test is about.
+    for _ in 0..40 {
+        s.run_for(Duration::from_millis(100));
+        if s.at(D).is_trusted() {
+            break;
+        }
+    }
+    assert!(s.at(D).is_trusted(), "the detector must move to D before it can lead");
+
+    // Command D a *different* command for slot 7. A correct successor must discover 700 in phase
+    // one and propose that, dropping 999 — Figure 7's `proposals := proposals ◁ pmax(pvals)`
+    // composed with the `∄c'` guard.
     s.command(D, Cmd::Propose { slot: 7, command: 999 });
     // And a slot nobody touched before, to prove D actually leads rather than merely not-splitting.
     s.command(D, Cmd::Propose { slot: 8, command: 800 });
@@ -1231,6 +1515,55 @@ fn a_value_chosen_under_a_crashed_leader_is_what_its_successor_proposes() {
         "the contradicting proposal must really have been made for the constraint to mean anything",
     );
     assert!(ballots_seen(&s).len() > 1, "leadership must really have changed hands");
+}
+
+#[test]
+fn a_slot_decided_twice_is_announced_twice_and_names_one_command() {
+    // Invariant A5 in the only form the layer above can see it. A later ballot re-commands a slot
+    // its predecessor already got chosen — `proposals := proposals ◁ pmax(pvals)` puts the decided
+    // command back into the successor's proposals, and `adopted` commands everything there — so
+    // the decision is announced a second time and every process raises `Ind::Decision` for the slot
+    // again. Nothing here suppresses that, deliberately: see the module's note on why a `decided`
+    // set kept per *receiving* process is the wrong place to pay for it. What the repetition must
+    // never do is carry a different command, and that is what this pins.
+    //
+    // Registered against `synod-ignore-pmax`, and it goes red there through its non-vacuity half
+    // rather than through a split: `pmax` is the whole reason a successor re-commands a slot it
+    // never proposed for, so without it the second decision does not happen at all.
+    let mut s = sim_of(&FIVE, synchronous(43));
+    s.command(E, Cmd::Propose { slot: 7, command: 700 });
+    s.run_for(Duration::from_millis(300));
+    assert_eq!(decisions(&s).get(&7), Some(&700), "slot 7 must be chosen under E first");
+
+    let announced_under_e = announcements(&s, 7);
+    assert!(announced_under_e > 0, "E's own announcement must have happened before the handover");
+    s.crash(E);
+    assert!(s.is_stopped(E), "the leader really went, and before the re-command below");
+    for _ in 0..40 {
+        s.run_for(Duration::from_millis(100));
+        if s.at(D).is_trusted() {
+            break;
+        }
+    }
+    assert!(s.at(D).is_trusted(), "the detector must move to D, whose adoption re-commands slot 7");
+    run_checking(&mut s, Duration::from_secs(3));
+
+    // The re-command really happened, or the assertion below holds for want of a second decision.
+    assert!(
+        announcements(&s, 7) > announced_under_e,
+        "slot 7 must be decided a second time under D's ballot for this to say anything",
+    );
+    // And every announcement names 700. `run_checking` asserted S1 after every event; this is the
+    // same statement in the form the layer above meets it — one command, however many arrivals.
+    let commands: BTreeSet<u32> = s
+        .trace()
+        .indications()
+        .filter_map(|(_, ind)| match ind {
+            Ind::Decision { slot: 7, command } => Some(*command),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(commands, BTreeSet::from([700]), "slot 7 was announced as {commands:?}");
 }
 
 #[test]
@@ -1274,7 +1607,14 @@ fn a_majority_that_has_taken_up_a_ballot_cannot_afterwards_accept_a_lower_one() 
     h.release();
     h.settle_without_heartbeats_to(A);
 
-    assert!(h.at(A).leader_ballot() > fresh, "A must learn it was preempted");
+    // A learns the outcome directly now that a commander announces its decision to everyone, which
+    // is a better answer than the preemption it used to get: its commander for the slot retires
+    // against a decision nothing can change. What matters is unchanged — it must not decide 111.
+    assert!(
+        h.decisions_at(A).contains(&(1, 999)),
+        "A must learn what was actually chosen for slot 1, got {:?}",
+        h.decisions_at(A),
+    );
     let per_slot: BTreeSet<u32> =
         h.all_decisions().iter().filter(|(_, s, _)| *s == 1).map(|(_, _, c)| *c).collect();
     assert_eq!(
@@ -1338,12 +1678,42 @@ fn safety_holds_across_a_sweep_of_seeds() {
         s.heal();
         s.deliver_session_events();
         churn(&mut s, seed + 3, 4, Duration::from_millis(300));
+
+        // The handover, for the reason spelled out in
+        // `at_most_one_proposal_is_chosen_per_slot_under_competing_ballots`: forwarding funnels
+        // every proposal to the process Ω trusts, so until leadership moves there is only one
+        // command per slot in the run and nothing for `pmax` to have to settle. E leads, so E is
+        // what has to go.
+        let chosen_under_e = decisions(&s);
+        assert!(
+            !chosen_under_e.is_empty(),
+            "seed {seed} chose nothing under E, so the handover contradicts nothing",
+        );
+        s.crash(E);
+        assert!(s.is_stopped(E), "seed {seed}: the leader really went, before the proposals below");
+        for _ in 0..40 {
+            s.run_for(Duration::from_millis(100));
+            if s.at(D).is_trusted() {
+                break;
+            }
+        }
+        assert!(s.at(D).is_trusted(), "seed {seed}: the detector must move to D before D can lead");
+        for slot in chosen_under_e.keys() {
+            s.command(D, Cmd::Propose { slot: *slot, command: 900 + *slot as u32 });
+        }
         let checked = run_checking(&mut s, Duration::from_secs(3));
         assert!(
             !checked.chosen.is_empty(),
             "seed {seed} chose nothing, so it proved nothing about agreement",
         );
         assert!(s.trace().session_ends() > 0, "seed {seed} never lost a message");
+        for (slot, command) in &chosen_under_e {
+            assert_eq!(
+                decisions(&s).get(slot),
+                Some(command),
+                "seed {seed}: slot {slot} was chosen as {command} under E and then moved",
+            );
+        }
     }
 }
 

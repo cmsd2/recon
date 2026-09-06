@@ -126,6 +126,57 @@
 //! here. What it costs is that a correct process Ω does not trust will not lead however long it
 //! waits.
 //!
+//! # Colocation: the replica is on this machine, so two messages are this layer's
+//!
+//! §4.4 describes the deployment this module is built for: "each machine that runs a replica also
+//! runs a leader… the replica can send a proposal for a particular slot to its local leader, say λ,
+//! rather than broadcasting the request to all leaders. If λ is passive, monitoring another leader
+//! λ′, it forwards the proposal to λ′. If λ is active, it will start a commander."
+//!
+//! Taking that shape puts two messages here that a separated deployment would put above, and one of
+//! them is on this layer's own figure:
+//!
+//! - **A commander announces its decision to every process.** Figure 6(a)'s last line,
+//!   `∀ρ ∈ replicas : send(ρ, ⟨decision, s, c⟩)`. Every process raises `Ind::Decision`, not only
+//!   the one whose commander counted the majority, because a log above cannot be built from a
+//!   decision one process holds. The addressees are the processes of the run: colocation makes the
+//!   replica set and the acceptor set one here.
+//! - **A leader that cannot act on a proposal forwards it** to the process Ω trusts. Not on any
+//!   figure — §4.4's sentence above. Without it a proposal made at a process Ω never trusts is
+//!   never acted on at all.
+//!
+//! **What this costs, and it is not free: the delivery of a proposal now rests on the detector.** A
+//! proposal goes to one process where it used to reach every leader, so a request handed to a
+//! process whose detector names a leader that has crashed is *lost*. Nothing here recovers it — the
+//! layer above must ask again, and `multi_paxos_replica`'s re-proposal timeout is what does. Before
+//! colocation an inaccurate detector cost nothing for delivery; it now costs a request, and the
+//! suite drives that case rather than assuming it away.
+//!
+//! **A `Propose` that arrived is never forwarded again.** Two processes whose detectors disagree
+//! would otherwise pass one back and forth for as long as they disagree. The message carries no hop
+//! count and needs none: an arrived proposal is handled locally or dropped, so the path is at most
+//! two hops by construction, and the asker's own timeout is what recovers a drop.
+//!
+//! # Departure: a leader answers a re-proposal for a decided slot
+//!
+//! The leader-side half of the fourth liveness fix Liu et al. describe, and the half without which
+//! the replica's re-proposal is a loop rather than a recovery. A decision is announced **once**, by
+//! the commander that counted the majority, which then exits. A process the announcement never
+//! reached has no other way back: nothing here retransmits a decision once its commander is gone,
+//! the retry sweep walks the `waitfor` sets of *live* commanders, and the session link does not
+//! resend across an ending.
+//!
+//! So a leader keeps the slots it has seen decided, and answers a `Propose` for one with
+//! `⟨decision, s, c⟩` sent to the **asker alone** — one message, where the announcement was a
+//! fan-out. Liu et al. put it directly: a leader "can then work on deciding for that slot if a
+//! decision for it has not been made; otherwise, it can send back the decision for that slot".
+//! Without the answer, a re-proposal for a decided slot meets the `∄c'` guard, is dropped, and the
+//! asker re-proposes for ever.
+//!
+//! The command in the answer comes from this leader's own proposal for the slot, which for a
+//! decided slot is the decided command: it was the commanded value in the ballot that decided, and
+//! any later adoption's `pmax` writes the same command back by Invariant A5.
+//!
 //! # Departure: three liveness fixes from the cross-check
 //!
 //! Each is reachable here because this link loses messages, and each is Liu et al.'s.
@@ -147,10 +198,11 @@
 //! then does `ballot_num` move. Minting a higher ballot on every timeout would discard phase-two
 //! work already accepted under the current ballot and learn nothing a rerun does not.
 //!
-//! The fourth violation is in the replica, which this module does not have: if no decision arrives
-//! for a slot, every replica stops applying from that slot, `slot_out` stops moving, `WINDOW` fills
-//! and the system wedges. Its fix is for a replica to re-propose after a timeout. Recorded here so
-//! that whoever writes the replica does not have to rediscover it.
+//! The fourth violation is in the replica: if no decision arrives for a slot, every replica stops
+//! applying from that slot, `slot_out` stops moving, `WINDOW` fills and the system wedges. Its fix
+//! has two halves. The replica re-proposes after a timeout, which is `multi_paxos_replica`'s; and
+//! the leader answers a re-proposal for a decided slot, which is this module's and is the departure
+//! above.
 //!
 //! # Space
 //!
@@ -165,6 +217,11 @@
 //! watermark once at least `f + 1` replicas have learned a decision, carrying the collected slot
 //! number in `p1b` so a later leader does not read absence as "nothing was ever accepted". Both
 //! belong to a later change, because bounding weakens a guarantee to a scope.
+//!
+//! The set of decided slots grows the same way, and the announcement is work per decision rather
+//! than per tick: one fan-out when a commander completes, plus one directed answer per re-proposal
+//! for a slot already decided. Both are bounded by membership for a given slot and unbounded in
+//! slots, which is the same statement as everything else here.
 //!
 //! What *is* bounded is the retry sweep, and it is worth stating precisely because the obvious
 //! claim is wrong. The sweep visits the outstanding `waitfor` sets: each is bounded by membership,
@@ -380,10 +437,13 @@ pub type Pvalues<C> = BTreeMap<(Ballot, Slot), C>;
 
 /// What this layer puts on the wire, beneath the link.
 ///
-/// The whole of Figures 4 and 6: the acceptor's two requests and its two replies. `adopted`,
-/// `preempted` and `decision` are not here — the first two are a thread reporting to the leader
-/// that owns it, which is a function call once the thread is a field, and the third is addressed to
-/// a replica this change does not have and is raised as an indication instead.
+/// Figures 4 and 6: the acceptor's two requests, its two replies, and the commander's `decision`.
+/// `adopted` and `preempted` are not here — each is a thread reporting to the leader that owns it,
+/// which is a function call once the thread is a field.
+///
+/// [`SynodMsg::Propose`] is not on any figure. It is §4.4's colocation: a replica hands its
+/// proposal to the leader on its own machine, and a leader that cannot act on it passes it to the
+/// one that can. See the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SynodMsg<C> {
     /// `⟨p1a, λ, b⟩` — phase one, from a scout.
@@ -396,6 +456,20 @@ pub enum SynodMsg<C> {
     /// reply goes to a thread whose identity supplies it; a leader holding its commanders as fields
     /// needs it in the message. See the module documentation.
     P2b { ballot: Ballot, slot: Slot },
+    /// `⟨decision, s, c⟩` — Figure 6(a)'s last line, sent by a commander that has counted a
+    /// majority, so that every process learns what was chosen rather than only the one that
+    /// counted.
+    ///
+    /// Also the answer to a [`SynodMsg::Propose`] for a slot already decided, sent to the asker
+    /// alone. A decision is announced once and its commander then exits, so a process the
+    /// announcement never reached has no other way back; asking is the way, and this is the answer.
+    Decision { slot: Slot, command: C },
+    /// A proposal for a slot, from a replica on this machine or from a leader that could not act on
+    /// it. Not on any figure — §4.4's colocation; see the module documentation.
+    ///
+    /// **A `Propose` that arrived is never forwarded again.** Two processes whose detectors
+    /// disagree would otherwise pass one back and forth for as long as they disagree.
+    Propose { slot: Slot, command: C },
 }
 
 /// The wire, multiplexing the leader detector and the Synod protocol itself.
@@ -525,9 +599,19 @@ pub struct MultiPaxosSynod<C: Clone, L: VolatileLink<SynodMsg<C>> = SessionLink<
     /// The commanders, keyed by slot **within the current ballot** — Invariant C1. Cleared when the
     /// ballot changes, which is what makes the key a slot rather than a `⟨ballot, slot⟩` pair.
     commanders: BTreeMap<Slot, Commander<C>>,
+    /// The slots this leader has seen decided, so that a `Propose` for one can be answered with the
+    /// decision instead of ignored. Not on any figure; see the module documentation on why the
+    /// answer is what makes a re-proposal a recovery rather than a loop.
+    ///
+    /// Grows with slots decided. That is the same growth `proposals` already has, so it changes
+    /// nothing about this module's stated bound, and §4.2's watermark collects both.
+    decided: BTreeSet<Slot>,
     /// Whether Ω currently trusts this process. The departure from §3: a leader is passive by
     /// default and competes only while trusted.
-    trusted: bool,
+    ///
+    /// The **identity** rather than a boolean, because §4.4's forward needs to know *who* to hand a
+    /// proposal to, not merely that it is not this process. `None` until Ω first speaks.
+    trusted: Option<NodeId>,
 
     // ---- retries ----
     /// The periodic sweep's handle. Compared before acting, since an expiry is offered to every
@@ -573,7 +657,8 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
             proposals: BTreeMap::new(),
             scout: None,
             commanders: BTreeMap::new(),
-            trusted: false,
+            decided: BTreeSet::new(),
+            trusted: None,
             tick: None,
             retry: retransmit,
             escalate_after: detect_after,
@@ -599,7 +684,18 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
 
     /// Whether Ω currently trusts this process.
     pub fn is_trusted(&self) -> bool {
+        self.trusted == Some(self.me)
+    }
+
+    /// Who Ω currently trusts, if it has spoken.
+    pub fn trusted_leader(&self) -> Option<NodeId> {
         self.trusted
+    }
+
+    /// The slots this leader has seen decided. Grows with slots decided, exactly as `proposals`
+    /// does; §4.2 collects both.
+    pub fn decided_count(&self) -> usize {
+        self.decided.len()
     }
 
     /// How many pvalues this acceptor holds. Grows with the slots handled — the measurement
@@ -780,8 +876,54 @@ where
         if is_majority(commander.waitfor.len(), self.acceptors.len()) {
             // `∀ρ ∈ replicas : send(ρ, ⟨decision, s, c⟩); exit();`
             let commander = self.commanders.remove(&slot).expect("borrowed above");
-            cx.indicate(Ind::Decision { slot, command: commander.command });
+            self.decide(slot, commander.command, cx);
         }
+    }
+
+    /// `∀ρ ∈ replicas : send(ρ, ⟨decision, s, c⟩)`, and the same thing raised here.
+    ///
+    /// Every process learns what was chosen, not only the one whose commander counted the
+    /// majority — which is what a log above this layer needs and what Figure 6(a) says. The
+    /// addressees are the processes of the run: §4.4 colocates a replica with every acceptor, so
+    /// the two sets are one here.
+    fn decide(&mut self, slot: Slot, command: C, cx: &mut ProtoCx<'_, Self>) {
+        self.decided.insert(slot);
+        for peer in self.acceptors.clone() {
+            if peer != self.me {
+                let command = command.clone();
+                self.transmit(peer, SynodMsg::Decision { slot, command }, cx);
+            }
+        }
+        cx.indicate(Ind::Decision { slot, command });
+    }
+
+    /// `case ⟨decision, s, c⟩` at a process that did not decide it — the receiving half of the line
+    /// above, and the answer to a re-proposal for a slot already decided.
+    ///
+    /// Raised again if it arrives again: a later ballot can re-command a decided slot, and an
+    /// answer repeats one deliberately. Invariant A5 makes the command the same — the test is
+    /// `a_slot_decided_twice_is_announced_twice_and_names_one_command` — so **the layer above must
+    /// be idempotent per slot**, and it is `multi_paxos_replica`'s `decisions` that makes it so.
+    ///
+    /// Suppressing the repeat here instead is not free, and the cost is worse than the duplicate.
+    /// It needs a set of already-announced slots at every *receiving* process, where `decided` is
+    /// kept only by leaders, and it grows the same unbounded way. Worse, it would make the recovery
+    /// above depend on this layer's memory: a replica re-proposes for a slot it has not applied,
+    /// and the leader's answer is a repeat by construction, so a receiver that dropped repeats
+    /// would drop the very message that unwedges it. This layer's set is volatile and the replica's
+    /// is what the log is built from; only one of them can decide what "already delivered" means,
+    /// and it is not this one.
+    /// **A commander still running for the slot is left running**, deliberately. Cancelling it is
+    /// safe — Invariant A5 makes its command the decided one — and saves the `p2a` it resends until
+    /// its ballot ends. It was written that way first, and `scripts/check-safety-tests.sh` caught
+    /// what it costs: two of the six tests registered against `synod-ignore-pmax` stopped going
+    /// red, because a second decision under a later ballot is precisely what the cancellation
+    /// suppresses. Under the correct clause there is no second decision to suppress; under the
+    /// mutation there is, and it is the evidence. Silencing a contradiction is not the same as not
+    /// having one.
+    fn on_decision(&mut self, slot: Slot, command: C, cx: &mut ProtoCx<'_, Self>) {
+        self.decided.insert(slot);
+        cx.indicate(Ind::Decision { slot, command });
     }
 
     // ---------------------------------------------------------------- the leader, Figure 7
@@ -828,7 +970,7 @@ where
         // ballot; the map keys on the slot, and this is what keeps the two in step.
         self.commanders.clear();
         self.scout = None;
-        if self.trusted {
+        if self.is_trusted() {
             let ballot = self.leader_ballot;
             self.start_scout(ballot, cx);
         } else {
@@ -845,27 +987,66 @@ where
     /// scouts when trusted and stays passive otherwise, so a process Ω does not trust starts no
     /// ballot and the duel does not begin.
     fn on_trust(&mut self, leader: NodeId, cx: &mut ProtoCx<'_, Self>) {
-        self.trusted = leader == self.me;
-        if self.trusted && self.scout.is_none() && !self.active {
+        self.trusted = Some(leader);
+        if self.is_trusted() && self.scout.is_none() && !self.active {
             let ballot = self.leader_ballot;
             self.start_scout(ballot, cx);
         }
     }
 
     /// `case ⟨propose, s, c⟩ : if ∄c' : ⟨s, c'⟩ ∈ proposals then …`
-    fn on_propose(&mut self, slot: Slot, command: C, cx: &mut ProtoCx<'_, Self>) {
+    fn on_propose(
+        &mut self,
+        from: Option<NodeId>,
+        slot: Slot,
+        command: C,
+        cx: &mut ProtoCx<'_, Self>,
+    ) {
+        // The answer, and the reason the asker's re-proposal is a recovery rather than a loop: a
+        // decision is announced once and its commander then exits, so a process the announcement
+        // never reached has no other way back. To the asker alone, where the announcement was a
+        // fan-out. Liu et al.: a leader "can then work on deciding for that slot if a decision for
+        // it has not been made; otherwise, it can send back the decision for that slot".
+        if self.decided.contains(&slot)
+            && let Some(asker) = from
+            && let Some(decided) = self.proposals.get(&slot).cloned()
+        {
+            self.transmit(asker, SynodMsg::Decision { slot, command: decided }, cx);
+            return;
+        }
         if self.proposals.contains_key(&slot) {
             // No effect at all: the proposal is dropped on the floor because this leader already
-            // has one for the slot, which is what enforces C1 against a second commander.
+            // has one for the slot, which is what enforces C1 against a second commander. The
+            // attempt already in flight is what fills it.
             cx.note(Note::ProposalIgnored { slot });
             return;
         }
-        self.proposals.insert(slot, command.clone());
+        // §4.4: "If λ is active, it will start a commander." An adopted ballot stands until
+        // something preempts it, so an active leader commands even where Ω has moved on — standing
+        // down means starting no new ballots, not abandoning one a majority already adopted.
         if self.active {
+            self.proposals.insert(slot, command.clone());
             self.start_commander(slot, command, cx);
+            return;
         }
-        // While passive the proposal is remembered and nothing is sent; `adopted` spawns the
-        // commander for it, which is Figure 7's `if active then` arm doing nothing.
+        if self.is_trusted() {
+            // Trusted but not yet adopted: remembered, and `adopted` commands it. Figure 7's
+            // `if active then` arm doing nothing.
+            self.proposals.insert(slot, command);
+            return;
+        }
+        // §4.4: "If λ is passive, monitoring another leader λ′, it forwards the proposal to λ′."
+        // Remembering here would be the same as dropping — this process will not lead.
+        //
+        // **A `Propose` that arrived is never forwarded again.** Two processes whose detectors
+        // disagree would pass one back and forth for as long as they disagree, so the path is at
+        // most two hops by construction and the asker's own timeout is what recovers a drop.
+        match (from, self.trusted) {
+            (None, Some(leader)) if leader != self.me => {
+                self.transmit(leader, SynodMsg::Propose { slot, command }, cx);
+            }
+            _ => cx.note(Note::ProposalIgnored { slot }),
+        }
     }
 
     // ---------------------------------------------------------------- retries and escalation
@@ -971,6 +1152,8 @@ where
             SynodMsg::P1b { ballot, accepted } => self.on_p1b(from, ballot, accepted, cx),
             SynodMsg::P2a { pvalue } => self.on_p2a(from, pvalue, cx),
             SynodMsg::P2b { ballot, slot } => self.on_p2b(from, ballot, slot, cx),
+            SynodMsg::Decision { slot, command } => self.on_decision(slot, command, cx),
+            SynodMsg::Propose { slot, command } => self.on_propose(Some(from), slot, command, cx),
         }
     }
 }
@@ -992,8 +1175,10 @@ where
     type Meta = core::convert::Infallible;
     type Entry = core::convert::Infallible;
 
+    /// A request from the layer above carries no sender, which is what distinguishes it from a
+    /// forwarded one: only a proposal that has *not* travelled may be forwarded.
     fn on_cmd(&mut self, Cmd::Propose { slot, command }: Cmd<C>, cx: &mut ProtoCx<'_, Self>) {
-        self.on_propose(slot, command, cx);
+        self.on_propose(None, slot, command, cx);
     }
 
     fn on_msg(&mut self, from: NodeId, msg: Self::Msg, cx: &mut ProtoCx<'_, Self>) {
