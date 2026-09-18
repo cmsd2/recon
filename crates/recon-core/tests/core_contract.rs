@@ -1015,3 +1015,61 @@ fn a_protocol_cannot_tell_whether_anything_is_listening() {
     assert_eq!(run(true), run(false));
     assert_eq!(run(true).len(), 2, "and the run being compared is not an empty one");
 }
+
+// ---------------------------------------------------------------- the store's write count
+
+#[test]
+fn every_write_that_returns_is_counted_once() {
+    // Replacements and appends alike: `Counter` does one of each per bump.
+    let mut st = MemStore::default();
+    let mut p = Counter::default();
+    assert_eq!(st.writes(), 0, "nothing written, nothing counted");
+    for n in 1..=3 {
+        step_in(&mut p, Event::Cmd(n), Time::ZERO, &mut rng(0), &mut st);
+    }
+    assert_eq!(st.writes(), 6, "one append and one replacement per bump, each counted once");
+    assert_eq!(st.len(), 3, "and the count is not the length of the sequence");
+}
+
+#[test]
+fn a_child_sees_the_parents_count() {
+    // One store beneath both, so the child's writes are the parent's and the count it reads is the
+    // parent's — a child that kept its own count would say "one" after a run in which the record it
+    // lives in had been written a dozen times.
+    let mut st: MemStore<HolderMeta, Infallible> = MemStore::default();
+    st.set(HolderMeta { mine: 5, child: None });
+
+    let mut child = Kept::default();
+    let mut inbox = Vec::new();
+    let mut sink: Vec<Effect<u32, u32>> = Vec::new();
+    let mut r = rng(0);
+    let mut timers = 0;
+    let mut quiet = NoNotes;
+    let mut cx: Cx<'_, u32, u32, Infallible, HolderMeta, Infallible> =
+        Cx::new(&mut sink, Time::ZERO, &mut r, &mut st, &mut timers, &mut quiet);
+    cx.with_durable_child_consuming(core::convert::identity, &mut inbox, CHILD_SLOT, |ccx| {
+        assert_eq!(ccx.storage().writes(), 1, "the parent's write, seen through the slot");
+        child.on_cmd(2, ccx);
+        assert_eq!(ccx.storage().writes(), 2, "and the child's own, counted on the same store");
+    });
+    assert_eq!(st.writes(), 2, "what the parent reads is what the child read");
+}
+
+#[test]
+fn a_protocol_that_keeps_nothing_reads_zero() {
+    // A child handed `NoStore` reads zero whatever its parent has written: the count belongs to a
+    // store, and a protocol with no store has no count to report.
+    assert_eq!(NoStore.writes(), 0);
+
+    let mut st = MemStore::default();
+    step_in(&mut Counter::default(), Event::Cmd(4), Time::ZERO, &mut rng(0), &mut st);
+    assert!(st.writes() > 0, "the parent has written, so the zero below is not vacuous");
+
+    let mut sink: Vec<Effect<(), Total>> = Vec::new();
+    let mut r = rng(0);
+    let mut timers = 0;
+    let mut quiet = NoNotes;
+    let mut cx: Cx<'_, (), Total, Infallible, Total, u32> =
+        Cx::new(&mut sink, Time::ZERO, &mut r, &mut st, &mut timers, &mut quiet);
+    cx.with_child(|(): ()| (), |t: Total| t, |ccx| assert_eq!(ccx.storage().writes(), 0));
+}

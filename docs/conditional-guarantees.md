@@ -34,6 +34,7 @@ engineering question is which condition, and what happens at its edge.
 |---|---|---|
 | **Session** | the transport reconnects | an unknown suffix of what was in flight |
 | **Incarnation** | the process restarts | all state not written to stable storage |
+| **Storage** | the disk loses an acknowledged write | a promise, a vote or a log suffix a peer may have relied on |
 | **Cancellation** | something above says stop | whatever had not yet been delivered |
 | **Deadline** | patience runs out | whatever had not yet been acknowledged |
 
@@ -228,6 +229,31 @@ proposing this fault predicted; it recorded the question and let the run answer 
 
 That is the shape this document argues for, seen working: a guarantee tagged `[always]` that holds
 through a fault severe enough to lapse every conditional one beneath it.
+
+## The storage scope, beside the session scope
+
+Multi-Paxos over stable storage adds a scope the earlier logged protocols did not name, because
+they trust the disk. Its guarantees are bounded by *the storage scope of a server id*: everything a
+process promised, voted or logged holds for as long as its disk keeps what it acknowledged. The
+scope ends when a disk loses an acknowledged write — the survey's "permanent disk failure", which
+"is considered crashed" where a power failure it recovers from is "simply slow for a while".
+
+**No layer local to the process can bridge a storage scope ending.** Its redundancy is the other
+processes, and they are exactly what a lost vote in the intersection of two majorities defeats. So
+the rule of this document applies in its starkest form: a layer that cannot bridge must *propagate*,
+and the ending is a first-class event — `Ind::StorageScopeEnded` on the Synod port, `LogInd::StorageScopeEnded`
+above the log. What the layer can do is **detect** the ending wherever a witness is reachable: a
+process announces its acknowledged-write count on recovery and on every session establishment, and a
+peer holding a higher count for it has witnessed a write it no longer has. Detection is complete only
+where such a witness is live and reachable; a write only the crashed leader ever saw is a write
+nobody can vouch for, and the survey's boundary stands — that process is crashed, and rejoins under a
+new id through reconfiguration, which is a later change.
+
+The simulator is held to the same invariant as the layers: `Sim::restart_empty` and
+`Sim::restart_truncated` lose storage, and each records the loss in the trace — a store cannot know
+what it has forgotten, so the *run* is what says so, and a protocol is required to raise the event
+where a witness could reach it. Silently absorbing a storage scope ending is the same cardinal sin
+as silently absorbing a session ending, checked the same way.
 
 ## What not to build yet
 

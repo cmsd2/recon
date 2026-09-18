@@ -17,13 +17,12 @@
 //! silent substitution durability did — a run with one settled leader satisfies it whatever the
 //! code does — which is the case that guard exists for.
 
-use core::convert::Infallible;
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use recon_core::{Effect, Event, MemStore, NodeId, Time, TimerId, step_noting};
+use recon_core::{Effect, Event, MemStore, NodeId, Store, Time, TimerId, step_noting};
 use recon_protocols::multi_paxos_synod::{
-    Ballot, Cmd, Ind, MultiPaxosSynod, Pvalue, Slot, SynodMsg, Wire,
+    Accepted, Ballot, Cmd, Durable, Ind, MultiPaxosSynod, Pvalue, Slot, SynodMsg, Wire,
 };
 use recon_protocols::session_link::SessionLink;
 use recon_protocols::{Note, Timing};
@@ -245,7 +244,7 @@ fn preemptions(sim: &Sim<Synod>) -> usize {
     // the hand-off was first written inside the protocol where the trace could not see it.
     for (from, to, msg) in sim.trace().exchanges() {
         match msg {
-            Wire::Synod(SynodMsg::P1a { ballot }) => {
+            Wire::Synod(SynodMsg::P1a { ballot, .. }) => {
                 asked.insert((from, to), *ballot);
             }
             Wire::Synod(SynodMsg::P2a { pvalue }) => {
@@ -269,7 +268,7 @@ fn ballots_seen(sim: &Sim<Synod>) -> BTreeSet<Ballot> {
     sim.trace()
         .exchanges()
         .filter_map(|(_, _, msg)| match msg {
-            Wire::Synod(SynodMsg::P1a { ballot }) => Some(*ballot),
+            Wire::Synod(SynodMsg::P1a { ballot, .. }) => Some(*ballot),
             Wire::Synod(SynodMsg::P2a { pvalue }) => Some(pvalue.ballot),
             _ => None,
         })
@@ -298,6 +297,8 @@ struct Cost {
     /// Messages a process addressed to itself. A deployment has none: the roles are co-located, so
     /// a leader reaching its own acceptor is a function call.
     self_addressed: usize,
+    /// §4.3's handshake, both halves. Per session establishment and per recovery, never per entry.
+    hello: usize,
 }
 
 impl Cost {
@@ -329,6 +330,9 @@ impl Cost {
                 // §4.2's replica-to-replica transfer, counted with the reports: neither is per
                 // entry, and both exist only because collection happens.
                 Wire::Synod(SynodMsg::CatchUp { .. }) => c.applied += 1,
+                Wire::Synod(SynodMsg::Hello { .. }) | Wire::Synod(SynodMsg::HelloAck { .. }) => {
+                    c.hello += 1
+                }
             }
         }
         c
@@ -346,6 +350,7 @@ impl Cost {
             heartbeat: self.heartbeat - earlier.heartbeat,
             applied: self.applied - earlier.applied,
             self_addressed: self.self_addressed - earlier.self_addressed,
+            hello: self.hello - earlier.hello,
         }
     }
 }
@@ -358,7 +363,7 @@ fn adoptions(sim: &Sim<Synod>) -> usize {
         .sends()
         .filter(|(_, _, m)| matches!(m, Wire::Synod(SynodMsg::P1a { .. })))
         .map(|(_, _, m)| match m {
-            Wire::Synod(SynodMsg::P1a { ballot }) => *ballot,
+            Wire::Synod(SynodMsg::P1a { ballot, .. }) => *ballot,
             _ => unreachable!(),
         })
         .collect::<BTreeSet<Ballot>>()
@@ -541,7 +546,10 @@ fn nothing_is_collected_until_f_plus_one_members_have_applied() {
     assert!(h.at(A).accepted_count() > 0, "and the state is still there");
 
     // B's report makes two of three, which is `f + 1`.
-    h.event(A, Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 3 }) });
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 3, writes: 0 }) },
+    );
     assert_eq!(h.at(A).collected_below(), 3, "two of three is a majority, so the watermark moves");
     assert_eq!(h.at(A).accepted_count(), 0, "and everything below it is gone");
     assert_eq!(h.at(A).decided_count(), 0, "including the record of what was decided");
@@ -554,10 +562,16 @@ fn the_watermark_only_ever_rises() {
     // fell would leave the process claiming state it no longer has.
     let mut h = Hand::new(&THREE);
     h.event(A, Event::Cmd(Cmd::Applied { slot_out: 9 }));
-    h.event(A, Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 9 }) });
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 9, writes: 0 }) },
+    );
     assert_eq!(h.at(A).collected_below(), 9);
 
-    h.event(A, Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 2 }) });
+    h.event(
+        A,
+        Event::Msg { from: B, msg: Wire::Synod(SynodMsg::Applied { slot_out: 2, writes: 0 }) },
+    );
     assert_eq!(h.at(A).collected_below(), 9, "a stale report must not lower the watermark");
 }
 
@@ -567,7 +581,10 @@ fn a_phase_one_answer_says_how_far_the_acceptor_has_collected() {
     // numbered slots."
     let mut h = Hand::new(&THREE);
     h.event(B, Event::Cmd(Cmd::Applied { slot_out: 5 }));
-    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::Applied { slot_out: 5 }) });
+    h.event(
+        B,
+        Event::Msg { from: C, msg: Wire::Synod(SynodMsg::Applied { slot_out: 5, writes: 0 }) },
+    );
     assert_eq!(h.at(B).collected_below(), 5, "B has collected below slot 5");
     h.wire.clear();
 
@@ -575,7 +592,7 @@ fn a_phase_one_answer_says_how_far_the_acceptor_has_collected() {
         B,
         Event::Msg {
             from: A,
-            msg: Wire::Synod(SynodMsg::P1a { ballot: Ballot { round: 3, leader: A } }),
+            msg: Wire::Synod(SynodMsg::P1a { ballot: Ballot { round: 3, leader: A }, writes: 0 }),
         },
     );
     match h.synod_from(B, A).as_slice() {
@@ -619,7 +636,12 @@ fn a_leader_does_not_propose_for_a_slot_an_acceptor_has_collected() {
             A,
             Event::Msg {
                 from,
-                msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new(), collected: 5 }),
+                msg: Wire::Synod(SynodMsg::P1b {
+                    ballot,
+                    accepted: Vec::new(),
+                    collected: 5,
+                    writes: 0,
+                }),
             },
         );
     }
@@ -813,23 +835,46 @@ fn an_establishment_with_a_peer_that_owes_nothing_resends_nothing() {
     s.deliver_session_events();
     s.run_for(Duration::from_secs(2));
 
-    // Heartbeats are the detector's and go out regardless; the algorithm's own traffic must not.
+    // Heartbeats are the detector's and go out regardless, and §4.3's handshake is owed to every
+    // establishment — each side announces its storage and the other answers, which is what lets a
+    // peer that came back with an empty disk under a known identity be caught. The algorithm's own
+    // traffic must not go out.
+    let is_handshake = |m: &Msg| {
+        matches!(m, Wire::Synod(SynodMsg::Hello { .. }) | Wire::Synod(SynodMsg::HelloAck { .. }))
+    };
     let synod_after = s
         .trace()
         .events()
         .iter()
-        .filter(|e| matches!(e, recon_sim::TraceEvent::Sent { msg: Wire::Synod(_), .. }))
+        .filter(|e| {
+            matches!(e, recon_sim::TraceEvent::Sent { msg: m @ Wire::Synod(_), .. } if !is_handshake(m))
+        })
         .count();
     let synod_before = s
         .trace()
         .events()
         .iter()
         .take_while(|e| !matches!(e, recon_sim::TraceEvent::SessionEnded { .. }))
-        .filter(|e| matches!(e, recon_sim::TraceEvent::Sent { msg: Wire::Synod(_), .. }))
+        .filter(|e| {
+            matches!(e, recon_sim::TraceEvent::Sent { msg: m @ Wire::Synod(_), .. } if !is_handshake(m))
+        })
         .count();
     assert_eq!(
         synod_after, synod_before,
         "a session came back for a peer owed nothing, and the protocol sent on account of it",
+    );
+    let handshake_after = s
+        .trace()
+        .events()
+        .iter()
+        .skip_while(|e| !matches!(e, recon_sim::TraceEvent::SessionEnded { .. }))
+        .filter(|e| {
+            matches!(e, recon_sim::TraceEvent::Sent { msg: m @ Wire::Synod(_), .. } if is_handshake(m))
+        })
+        .count();
+    assert_eq!(
+        handshake_after, 4,
+        "one re-establishment costs exactly the handshake: two announcements and two answers",
     );
     let _ = before;
 }
@@ -965,7 +1010,7 @@ fn a_refusal_a_leader_hears_from_its_own_acceptor_is_visible_in_the_trace() {
     let mut h = Hand::new(&THREE);
     // B takes up a high ballot, so A's own acceptor will refuse A's lower one.
     let high = Ballot { round: 40, leader: C };
-    h.event(A, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
+    h.event(A, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high, writes: 0 }) });
     assert_eq!(h.at(A).adopted_ballot(), Some(high), "A's acceptor holds the high ballot");
     h.wire.clear();
 
@@ -1012,7 +1057,7 @@ fn a_refusal_a_leader_hears_from_its_own_acceptor_is_visible_in_the_trace() {
 /// test says which of them arrive.
 struct Hand {
     nodes: BTreeMap<NodeId, Synod>,
-    stores: BTreeMap<NodeId, MemStore<Infallible, Infallible>>,
+    stores: BTreeMap<NodeId, MemStore<Durable, Accepted<u32>>>,
     timers: BTreeMap<NodeId, Vec<TimerId>>,
     /// In flight: who sent it, who it is for, what it says.
     wire: Vec<(NodeId, NodeId, Msg)>,
@@ -1222,6 +1267,7 @@ impl Hand {
                         ballot: high,
                         accepted: Vec::new(),
                         collected: 0,
+                        writes: 0,
                     }),
                 },
             );
@@ -1239,7 +1285,7 @@ impl Hand {
         let from = *self.nodes.keys().find(|n| **n != node).expect("another member");
         self.event(
             node,
-            Event::Msg { from, msg: Wire::Synod(SynodMsg::P2b { ballot: high, slot }) },
+            Event::Msg { from, msg: Wire::Synod(SynodMsg::P2b { ballot: high, slot, writes: 0 }) },
         );
     }
 
@@ -1312,12 +1358,12 @@ fn a_stale_p1a_is_refused_and_the_refusal_names_the_ballot_that_beat_it() {
     let low = Ballot { round: 2, leader: A };
 
     // B adopts the high ballot first.
-    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high, writes: 0 }) });
     assert_eq!(h.at(B).adopted_ballot(), Some(high));
     h.wire.clear();
 
     // Then a lower one arrives. `if b > ballot_num` fails, so nothing is taken up.
-    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: low }) });
+    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: low, writes: 0 }) });
     assert_eq!(h.at(B).adopted_ballot(), Some(high), "a stale p1a takes nothing up");
 
     let replies = h.synod_from(B, A);
@@ -1348,7 +1394,7 @@ fn an_acceptors_promise_is_monotonic_over_a_run_that_offers_it_lower_ballots() {
         if Some(ballot) < held {
             lower_really_offered += 1;
         }
-        h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot }) });
+        h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot, writes: 0 }) });
         let now = h.at(B).adopted_ballot();
         assert!(now >= held, "the promise went backwards: {held:?} then {now:?}");
         held = now;
@@ -1375,7 +1421,7 @@ fn an_acceptor_that_missed_phase_one_still_counts_in_phase_two() {
     assert_eq!(h.at(B).adopted_ballot(), Some(ballot), "it adopts what it accepts");
     let replies = h.synod_from(B, A);
     match replies.as_slice() {
-        [SynodMsg::P2b { ballot: answered, slot }] => {
+        [SynodMsg::P2b { ballot: answered, slot, .. }] => {
             assert_eq!(*answered, ballot, "the answer counts toward the commander's majority");
             assert_eq!(*slot, 1, "and names the slot it answers for");
         }
@@ -1774,7 +1820,7 @@ fn an_acceptors_record_for_a_slot_only_ever_moves_up() {
     let low = Ballot { round: 2, leader: A };
     let high = Ballot { round: 7, leader: C };
 
-    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: low }) });
+    h.event(B, Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: low, writes: 0 }) });
     let pvalue = Pvalue { ballot: high, slot: 3, command: 777 };
     h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P2a { pvalue }) });
     assert_eq!(h.at(B).accepted_for(3).map(|(b, c)| (b, *c)), Some((high, 777)));
@@ -1791,7 +1837,7 @@ fn an_acceptors_record_for_a_slot_only_ever_moves_up() {
         "a ballot the acceptor has superseded must not reach the slot's record",
     );
     match h.synod_from(B, A).as_slice() {
-        [SynodMsg::P2b { ballot, slot: 3 }] => {
+        [SynodMsg::P2b { ballot, slot: 3, .. }] => {
             assert_eq!(*ballot, high, "and the reply names the ballot the acceptor holds");
         }
         other => panic!("expected one p2b for slot 3, got {other:?}"),
@@ -1835,6 +1881,7 @@ fn a_scout_keeps_the_highest_ballot_reported_for_a_slot_not_the_last_one_to_arri
         ballot: scouting,
         accepted: vec![Pvalue { ballot, slot: 1, command }],
         collected: 0,
+        writes: 0,
     };
     h.event(A, Event::Msg { from: B, msg: Wire::Synod(answer(higher, 999)) });
     h.event(A, Event::Msg { from: C, msg: Wire::Synod(answer(lower, 111)) });
@@ -1884,7 +1931,7 @@ fn a_phase_one_answer_carries_one_pvalue_per_slot() {
     h.wire.clear();
 
     let high = Ballot { round: 8, leader: C };
-    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high }) });
+    h.event(B, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: high, writes: 0 }) });
     match h.synod_from(B, C).as_slice() {
         [SynodMsg::P1b { ballot, accepted, .. }] => {
             assert_eq!(*ballot, high, "the acceptor answers with the ballot it now holds");
@@ -1928,7 +1975,10 @@ fn agreement_survives_the_record_of_it_being_overwritten() {
     // λ′ runs phase one against α₂ and α₃ — a different majority, which must intersect the first.
     let mut reported: Vec<Pvalue<u32>> = Vec::new();
     for acceptor in [B, C] {
-        h.event(acceptor, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: hi }) });
+        h.event(
+            acceptor,
+            Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: hi, writes: 0 }) },
+        );
         for msg in h.synod_from(acceptor, C) {
             if let SynodMsg::P1b { accepted, .. } = msg {
                 reported.extend(accepted);
@@ -1971,7 +2021,7 @@ fn agreement_survives_the_record_of_it_being_overwritten() {
     for acceptor in [A, C] {
         h.event(
             acceptor,
-            Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: third }) },
+            Event::Msg { from: A, msg: Wire::Synod(SynodMsg::P1a { ballot: third, writes: 0 }) },
         );
         for msg in h.synod_from(acceptor, A) {
             if let SynodMsg::P1b { accepted, .. } = msg {
@@ -2041,7 +2091,12 @@ fn adoption_needs_a_majority_and_not_one_fewer() {
         A,
         Event::Msg {
             from: B,
-            msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new(), collected: 0 }),
+            msg: Wire::Synod(SynodMsg::P1b {
+                ballot,
+                accepted: Vec::new(),
+                collected: 0,
+                writes: 0,
+            }),
         },
     );
     assert!(!h.at(A).is_active(), "one answer of three is not a majority");
@@ -2050,7 +2105,12 @@ fn adoption_needs_a_majority_and_not_one_fewer() {
         A,
         Event::Msg {
             from: C,
-            msg: Wire::Synod(SynodMsg::P1b { ballot, accepted: Vec::new(), collected: 0 }),
+            msg: Wire::Synod(SynodMsg::P1b {
+                ballot,
+                accepted: Vec::new(),
+                collected: 0,
+                writes: 0,
+            }),
         },
     );
     assert!(h.at(A).is_active(), "two of three is a majority and must adopt");
@@ -2086,6 +2146,7 @@ fn a_later_ballot_proposes_what_an_earlier_majority_accepted() {
                     ballot,
                     accepted: reported.clone(),
                     collected: 0,
+                    writes: 0,
                 }),
             },
         );
@@ -2338,7 +2399,7 @@ fn a_lost_p1a_does_not_leave_the_leader_waiting_for_ever() {
         .in_flight()
         .iter()
         .filter(|(from, _, m)| {
-            *from == A && matches!(m, Wire::Synod(SynodMsg::P1a { ballot: b }) if *b == ballot)
+            *from == A && matches!(m, Wire::Synod(SynodMsg::P1a { ballot: b, .. }) if *b == ballot)
         })
         .count();
     assert!(resent >= 2, "phase one must be reissued to a majority, got {resent} p1a");
@@ -2412,7 +2473,10 @@ fn a_lost_preempt_sends_the_leader_back_to_phase_one_rather_than_resending_for_e
     // A majority moves to a higher ballot behind A's back.
     let higher = Ballot { round: stale.round + 5, leader: C };
     for peer in [B, C] {
-        h.event(peer, Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: higher }) });
+        h.event(
+            peer,
+            Event::Msg { from: C, msg: Wire::Synod(SynodMsg::P1a { ballot: higher, writes: 0 }) },
+        );
     }
     h.wire.clear();
 
@@ -2873,6 +2937,262 @@ fn safety_holds_across_a_sweep_of_seeds() {
                 "seed {seed}: slot {slot} was chosen as {command} under E and then moved",
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------- §4.3: durability
+
+/// Long enough to drain a delivery bound's worth of backlog against a dead process, so a recovery
+/// after it comes from storage rather than from the retransmission still in flight.
+const DRAIN: Duration = Duration::from_millis(200);
+
+/// Isolate a crashed process, drain what was scheduled for it, then restart it — so what it holds
+/// after came from its own disk and not from a peer still retransmitting. The order is the one
+/// `CLAUDE.md` fixes: partition, then drain, then restart.
+fn isolate_and_restart(s: &mut Sim<Synod>, node: NodeId) {
+    let rest: Vec<NodeId> = FIVE.iter().copied().filter(|n| *n != node).collect();
+    s.partition(&[&[node], &rest]);
+    s.run_for(DRAIN);
+    s.restart(node);
+    s.deliver_session_events();
+    s.heal();
+    s.deliver_session_events();
+}
+
+#[test]
+fn a_promise_survives_a_crash_between_the_write_and_the_send() {
+    // Armed to die in the next write, an acceptor is handed a p1a; across seeds, either it holds the
+    // promise and a p1b may have gone, or it holds neither. Never a p1b without a promise behind it.
+    for seed in 0..30u64 {
+        let mut s = sim_of(&FIVE, synchronous(seed));
+        s.run_for(Duration::from_millis(400));
+        s.crash_on_next_write(A);
+        // A fresh ballot from E forces A to write a promise before answering.
+        s.command(E, Cmd::Propose { slot: 1, command: 1 });
+        s.run_for(Duration::from_millis(200));
+        if s.trace().deaths_in_writes() == 0 {
+            continue;
+        }
+        isolate_and_restart(&mut s, A);
+        s.run_for(Duration::from_millis(400));
+        // Whatever it recovered, no p2a it ever answered lacks a promise: agreement, run after every
+        // event, is what would catch a p1b without one, and it did not fire.
+        run_checking(&mut s, Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn an_accept_survives_a_crash_and_is_answered_in_phase_one() {
+    // The scenario the intersection argument exists for: the recovered acceptor is the only member
+    // the old majority and a new leader's majority share, so its recovered pvalue is what the new
+    // leader must propose. Storage is the only thing that could carry it — the network is drained.
+    let mut s = sim_of(&FIVE, synchronous(7));
+    s.run_for(Duration::from_millis(400));
+    assert!(s.at(E).is_active(), "E leads");
+    s.command(E, Cmd::Propose { slot: 1, command: 700 });
+    s.run_for(Duration::from_millis(300));
+    assert_eq!(decisions(&s).get(&1), Some(&700), "700 is chosen before the crash");
+
+    s.crash(E); // the old leader is gone
+    s.crash(A); // A holds the accept; a crash then a restart from disk is what carries it
+    isolate_and_restart(&mut s, A);
+    let checked = run_checking(&mut s, Duration::from_secs(4));
+    // D takes over; whatever it proposes for slot 1, the chosen value stands.
+    s.command(D, Cmd::Propose { slot: 1, command: 999 });
+    run_checking(&mut s, Duration::from_secs(4));
+    assert_eq!(decisions(&s).get(&1), Some(&700), "the recovered accept held the slot");
+    assert_eq!(s.trace().recoveries_with_state(), 1, "A recovered from its disk");
+    let _ = checked;
+}
+
+#[test]
+fn a_recovered_leader_mints_above_every_ballot_it_used() {
+    // The durable round counter: after a restart E must not re-mint a ballot an acceptor may still
+    // hold, or two proposals could be accepted at one ballot and slot. Agreement, checked after
+    // every event, is the assertion; the non-vacuity half is that E led again.
+    let mut s = sim_of(&FIVE, synchronous(9));
+    s.run_for(Duration::from_millis(400));
+    let before = s.at(E).leader_ballot();
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    s.run_for(Duration::from_millis(300));
+
+    s.crash(E);
+    isolate_and_restart(&mut s, E);
+    // E is highest, so Ω returns to it; wait for it to lead again.
+    let mut led_again = false;
+    for _ in 0..60 {
+        s.run_for(Duration::from_millis(100));
+        if s.at(E).is_active() {
+            led_again = true;
+            break;
+        }
+    }
+    assert!(led_again, "E must lead again for the constraint to mean anything");
+    assert!(
+        s.at(E).leader_ballot().round > before.round,
+        "the recovered leader minted a round above the one it used before"
+    );
+    s.command(E, Cmd::Propose { slot: 2, command: 2 });
+    run_checking(&mut s, Duration::from_secs(3));
+    assert_eq!(s.trace().recoveries_with_state(), 1);
+}
+
+#[test]
+fn a_recovered_process_with_an_honest_store_resumes() {
+    // Nothing lied, so every member answers with a count no higher than its own: the recovered
+    // process finishes recovering and votes again.
+    let mut s = sim_of(&FIVE, synchronous(11));
+    s.run_for(Duration::from_millis(400));
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    s.run_for(Duration::from_millis(300));
+
+    s.crash(B);
+    isolate_and_restart(&mut s, B);
+    s.run_for(Duration::from_secs(2));
+    assert!(!s.at(B).is_recovering(), "every member answered, so B is no longer a learner");
+    assert!(!s.at(B).is_stopped(), "and nothing said its storage lied");
+    // It votes again: a new entry it must help decide.
+    s.command(E, Cmd::Propose { slot: 2, command: 2 });
+    let checked = run_checking(&mut s, Duration::from_secs(2));
+    assert_eq!(decisions(&s).get(&2), Some(&2), "the recovered process took part again");
+    let _ = checked;
+}
+
+#[test]
+fn a_member_gone_for_good_keeps_a_recovered_process_a_learner() {
+    // The stated cost of waiting for every member: E is gone for good, so D — which restarts — never
+    // gets E's answer and never votes. The other three are a majority and decide anyway.
+    let mut s = sim_of(&FIVE, synchronous(13));
+    s.run_for(Duration::from_millis(400));
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    s.run_for(Duration::from_millis(300));
+
+    s.crash(E); // never restarted
+    s.crash(D);
+    isolate_and_restart(&mut s, D);
+    s.run_for(Duration::from_secs(3));
+    assert!(s.at(D).is_recovering(), "D still waits for E, which will never answer");
+    assert!(!s.at(D).is_stopped(), "but nothing said D's own storage lied");
+    // A, B, C are three of five: a majority without D or E.
+    s.command(A, Cmd::Propose { slot: 2, command: 2 });
+    run_checking(&mut s, Duration::from_secs(3));
+    assert_eq!(
+        decisions(&s).get(&2),
+        Some(&2),
+        "the surviving majority decides without the learner"
+    );
+}
+
+#[test]
+fn a_truncated_store_is_detected_and_the_process_stops() {
+    // A disk that acknowledged writes it did not keep. A witness holds a higher count for the
+    // process than the process now has, and answers the announcement with it: the process stops and
+    // says its storage scope has ended.
+    let mut s = sim_of(&FIVE, synchronous(15));
+    s.run_for(Duration::from_millis(400));
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    s.command(E, Cmd::Propose { slot: 2, command: 2 });
+    s.run_for(Duration::from_millis(400));
+    let wrote = s.storage(A).unwrap().writes();
+    assert!(wrote >= 3, "A wrote enough for a partial truncation to still leave a valid state");
+    // A tells every process its write count — §4.2's report, which every process broadcasts — so a
+    // live peer witnesses it. An acceptor's p1b and p2b reach only the leader, so without this the
+    // sole witness could be a leader that later crashes, which is the limitation the module states.
+    s.command(A, Cmd::Applied { slot_out: 1 });
+    s.run_for(Duration::from_millis(100));
+
+    s.crash(A);
+    // Come back with the last few acknowledged writes gone: the store is non-empty, so A recovers
+    // rather than starting afresh, but its count is now below what a witness saw.
+    s.restart_truncated(A, 2);
+    s.deliver_session_events();
+    s.run_for(Duration::from_secs(2));
+
+    assert!(s.at(A).is_stopped(), "A learned a witness saw a write it no longer has");
+    assert!(
+        s.trace()
+            .indications()
+            .any(|(node, ind)| node == A
+                && matches!(ind, Ind::StorageScopeEnded { peer } if *peer == A)),
+        "A raised the ending of its own storage scope",
+    );
+}
+
+#[test]
+fn an_empty_store_under_a_known_identity_is_detected() {
+    // The disk came back new, under an id its peers remember promising and accepting things.
+    let mut s = sim_of(&FIVE, synchronous(17));
+    s.run_for(Duration::from_millis(400));
+    s.command(E, Cmd::Propose { slot: 1, command: 1 });
+    s.run_for(Duration::from_millis(400));
+
+    s.command(B, Cmd::Applied { slot_out: 1 });
+    s.run_for(Duration::from_millis(100));
+    s.crash(B);
+    s.restart_empty(B);
+    s.deliver_session_events();
+    s.run_for(Duration::from_secs(2));
+    assert_eq!(s.trace().empty_restarts(), 1, "B came back empty");
+    assert!(s.at(B).is_stopped(), "and a witness caught it");
+}
+
+#[test]
+fn a_detected_process_does_not_break_agreement() {
+    // The whole point: even with a truncated acceptor in the intersection of two majorities,
+    // agreement holds — because it never answers the new leader's phase one, having stopped.
+    let mut s = sim_of(&FIVE, synchronous(19));
+    s.run_for(Duration::from_millis(400));
+    s.command(E, Cmd::Propose { slot: 1, command: 700 });
+    s.run_for(Duration::from_millis(300));
+    assert_eq!(decisions(&s).get(&1), Some(&700));
+
+    // A broadcasts its count so B and C witness it before the leader E crashes.
+    s.command(A, Cmd::Applied { slot_out: 1 });
+    s.run_for(Duration::from_millis(100));
+    s.crash(E);
+    s.crash(A);
+    s.restart_truncated(A, 2);
+    s.deliver_session_events();
+    s.run_for(Duration::from_millis(400));
+    s.command(D, Cmd::Propose { slot: 1, command: 999 });
+    run_checking(&mut s, Duration::from_secs(4));
+    assert_eq!(decisions(&s).get(&1), Some(&700), "the slot was not split by the lying disk");
+}
+
+// ---------------------------------------------------------------- §4.3: the cost of durability
+
+/// What a settled run wrote, taken from the trace, over the entries alone.
+fn write_cost(members: &'static [NodeId], entries: u64, seed: u64) -> (usize, usize, usize) {
+    let mut s = sim_of(members, synchronous(seed));
+    let leader = members[members.len() - 1];
+    s.run_for(Duration::from_millis(600));
+    assert!(s.at(leader).is_active(), "leadership must settle first");
+    let (a0, m0) = (s.trace().appends(), s.trace().metadata_writes());
+    for slot in 1..=entries {
+        s.command(leader, Cmd::Propose { slot, command: slot as u32 });
+    }
+    s.run_for(Duration::from_millis(1500));
+    assert_eq!(decisions(&s).len(), entries as usize, "every slot decided");
+    (s.trace().appends() - a0, s.trace().metadata_writes() - m0, members.len())
+}
+
+#[test]
+fn an_accept_costs_one_appended_record_and_no_rewrite() {
+    // The identity, exact rather than bounded. Every acceptor appends once per entry it accepts;
+    // no metadata is rewritten while a settled leader decides, because the promise, the round and
+    // the watermark do not move.
+    for (members, entries) in [(&THREE[..], 4u64), (&FIVE[..], 4)] {
+        let members: &'static [NodeId] = if members.len() == 3 { &THREE } else { &FIVE };
+        let (appends, rewrites, n) = write_cost(members, entries, 51);
+        assert_eq!(
+            appends,
+            n * entries as usize,
+            "n={n}: one append per acceptor per entry — got {appends}",
+        );
+        assert_eq!(
+            rewrites, 0,
+            "n={n}: a settled leader rewrites nothing per entry — got {rewrites}"
+        );
     }
 }
 

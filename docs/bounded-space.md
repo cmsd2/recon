@@ -93,8 +93,8 @@ residual warning in the table.
 | `consensus_based_total_order_broadcast` | `unordered`, `delivered`, and one consensus instance per round | entries handled ❌ — **the page**, and the module says so |
 | `logged_uniform_total_order_broadcast` | the same three, and `delivered` and `proposals` **in stable storage** | entries handled ❌❌ — the page again |
 | `logged_leader_driven_consensus` | `(ets, ℓ, decision)` and both children's records — **in stable storage**, one value rewritten | **membership** for state and for work; inherits `logged_epoch_change`'s ⚠️ |
-| `multi_paxos_synod` | `accepted`, `proposals`, `decided` — all between the collection watermark and the frontier; `reported`, one entry per member | **membership and the window** ✅ — §4.1 and §4.2 both applied, conditional on `f + 1` members reporting |
-| `multi_paxos_replica` | `decisions` and `performed` by a **retention window**; `requests` and `proposals` by `WINDOW` | **a window** ✅ — the ordered sequence is exempt and says so: it is the data, not the bookkeeping |
+| `multi_paxos_synod` | `accepted`, `proposals`, `decided` — all between the collection watermark and the frontier; `reported`, one entry per member | **membership and the window** ✅ — §4.1 and §4.2 both applied, conditional on `f + 1` members reporting; **on disk** since §4.3, one appended record per accept |
+| `multi_paxos_replica` | `decisions` and `performed` by a **retention window**; `requests` and `proposals` by `WINDOW` | **a window** ✅ — the ordered sequence is exempt and says so: it is the data, not the bookkeeping; **on disk** since §4.3, one appended record per applied entry |
 
 **Both Multi-Paxos rows are now ✅, and they are the only ones in this audit that got there by
 applying reductions their own source spells out.** §4 of the survey opens by saying "the described

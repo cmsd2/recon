@@ -2,7 +2,9 @@
 //!
 //! **Status: implementation. Space: bounded by membership and by the distance between the
 //! collection watermark and the frontier — see the section on it below, and the condition it
-//! carries.**
+//! carries. On disk: one appended record per accept between the watermark and the frontier, and
+//! one rewritten record for the promise, the round, the watermark and what has been seen of each
+//! peer's storage.**
 //!
 //! van Renesse, R. and Altinbuken, D. (2015) 'Paxos Made Moderately Complex', *ACM Computing
 //! Surveys*, 47(3), pp. 1–36, §2. Figures 4, 6 and 7 are quoted above the code that implements
@@ -410,30 +412,81 @@
 //! window cannot be caught up at all, because nobody holds those decisions any more; that is where
 //! a deployment takes a snapshot, which is outside the paper.
 //!
-//! # The boundary this module does not cross
+//! # §4.3: keeping state on disk, and the boundary that remains
 //!
-//! This is **crash-stop**, which is the source's own model rather than a scope dodge. A crashed
-//! state machine there "will make no more transitions and thus its current state is fixed
-//! indefinitely", and a process that comes back off disk "is not theoretically considered
-//! crashed—it is simply slow for a while". There is no third case, and a process that returns
-//! having forgotten what it knew is the first one acting when it is not permitted to.
+//! > The Paxos protocol can tolerate a minority of its acceptors failing, and all but one of its
+//! > replicas failing. If more than that fail, consistency is still guaranteed but liveness will be
+//! > violated. For this reason, one may want to keep the state of acceptors and replicas on disk. A
+//! > process that suffers from a power failure but can recover from disk is not theoretically
+//! > considered crashed — it is simply slow for a while. Only a process that suffers a permanent
+//! > disk failure would be considered crashed.
 //!
-//! The simulator can produce that case, and Ω will trust such a process again, so the consequence
-//! has to be stated rather than assumed away. The round counter is volatile: **its scope is this
-//! incarnation.** A process that restarts re-mints a ballot it has already used; an acceptor still
-//! holding that ballot accepts a second, different proposal under it; and two proposals accepted at
-//! one ballot and slot is exactly what Invariant A4 forbids and what the argument that two
-//! majorities agree depends on. A **durable ballot counter**, read back in `on_recovery`, is what
-//! makes leading again after a restart legal, and it belongs with the rest of §4.3 (*Keeping State
-//! on Disk*) in the fail-recovery change.
+//! So a process that returns **with every write its storage acknowledged** is the same acceptor and
+//! the same leader it was, and the model treats it as slow. What is written, and when:
 //!
-//! A returning process could instead lead under a **new identity**, which is sound for the leader
-//! role — ballot uniqueness is a proposer-side obligation and the proposer set need not be fixed —
-//! and unsound for the acceptor role, because majorities of two different acceptor sets need not
-//! intersect. The source's own answer to that is reconfiguration (§5's Cheap Paxos "reconfigures
-//! the system replacing the suspected acceptor with a fresh one"), decided in a slot like any other
-//! command. There are no slots to decide it in until the replica exists, so the membership here is
-//! **fixed for the run**.
+//! | State | Kept as | Written before |
+//! |---|---|---|
+//! | the promise, `α.ballot_num` | [`Durable::promise`] | the `p1b` that reveals it |
+//! | an accepted pvalue | one appended [`Accepted`] record | the `p2b` that reveals it |
+//! | the collection watermark | [`Durable::collected`] | anything below it is discarded |
+//! | the leader's round | [`Durable::round`] | the first `p1a` under it |
+//! | what each peer's storage has kept | [`Durable::seen`] | whenever the record is written anyway |
+//!
+//! Accepts are **appended, not rewritten**. The accepted set is one pvalue per slot across the
+//! window, so rewriting it on every `p2b` would cost `WINDOW` pvalues per accept; one record per
+//! accept costs one. Recovery folds the records into the per-slot map, latest accept per slot,
+//! ignores what is below the recovered watermark, and takes the promise as the higher of the
+//! recorded one and the highest ballot any surviving record was accepted under — an accept implies
+//! the promise, which is why a `p2a` that also raises `ballot_num` costs one append and not an
+//! append and a rewrite.
+//!
+//! Everything else is scoped to the incarnation and says so. Proposals, the scout, the commanders
+//! and the decided map are gone after a restart: a restarted leader is passive until Ω trusts it,
+//! what it was proposing is proposed again by the layer above, and what it had learned decided is
+//! re-learned through the catch-up. `reported` is re-learned from the periodic reports.
+//!
+//! ## A process that returns without an acknowledged write is outside the model
+//!
+//! The survey's last sentence stands, and it is worth saying why it has to. An accept whose `p2b`
+//! was counted toward a majority and whose record is then gone lets a later phase one read the
+//! slot as empty — at the one acceptor where the old majority and the new one meet, if the schedule
+//! is unkind — and the new leader proposes freely for a slot already chosen. No rule local to the
+//! returning process recovers what was lost, because the only witness may be a leader holding a
+//! promise or a vote it has not yet completed a majority with. The rule from *Paxos Made Live* —
+//! stay a learner until a complete instance started after recovery — does not close it: an
+//! instance can complete with a majority that excludes the returning process while that leader
+//! still holds its stale vote, and the schedule that shows it is in the specification.
+//!
+//! What this module does instead is **detect** the case wherever a witness is reachable, and stop.
+//! A store reports how many writes it has acknowledged; a recovered process announces that count
+//! to every member ([`SynodMsg::Hello`]), and again whenever a session is established; and the
+//! same count rides on every message a process sends about its own state — `p1a` after the round
+//! write, `p1b` after the promise, `p2b` after the accept, the periodic report after whatever the
+//! replica wrote — so the leader that counted a vote holds the count it was cast under. Every
+//! member keeps the highest count it has seen from each peer and answers an announcement with it
+//! ([`SynodMsg::HelloAck`]). **A recovered process answers no `p1a` or `p2a` and takes up no ballot
+//! until every member has answered.** A member holding a higher count than the one announced has
+//! witnessed a write the announcer no longer has: the announcer stops, raises
+//! [`Ind::StorageScopeEnded`] naming itself, and acts no further under that identity; the witness
+//! raises the same indication naming the peer. This is the storage analogue of a session ending —
+//! propagated, never absorbed — and `docs/conditional-guarantees.md` has the scope.
+//!
+//! The wait is for every member and not a majority because the sole witness may be the one leader
+//! outside any majority the recovered process could assemble. **Its cost is stated**: a member gone
+//! for good while another recovers keeps the recovering one a learner, until reconfiguration —
+//! which is also the way a replaced server rejoins, under a new identity. Swapping an identity
+//! underneath a fixed configuration is unsound for the acceptor role, because majorities of two
+//! different acceptor sets need not intersect; the source's own answer is §5's Cheap Paxos, which
+//! "reconfigures the system replacing the suspected acceptor with a fresh one", decided in a slot
+//! like any other command. There are no such slots until reconfiguration exists, so the membership
+//! here is **fixed for the run**.
+//!
+//! What the handshake cannot catch, and says so: a witness that has itself lost its memory of the
+//! count. `seen` is written only when the record is written for another reason, so a witness that
+//! restarted answers with the count it held at its last promise, ballot or watermark write. And a
+//! write nobody was told about — a round write followed by a crash before any message left — has no
+//! witness at all. Both lags are in the safe direction: a stale count is lower, so it under-detects
+//! and never accuses falsely.
 //!
 //! # The figures
 //!
@@ -546,7 +599,7 @@
 
 use core::marker::PhantomData;
 use core::time::Duration;
-use recon_core::{Child, NodeId, ProtoCx, Protocol, Time, TimerId};
+use recon_core::{Child, NodeId, Position, ProtoCx, Protocol, Time, TimerId};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -650,19 +703,24 @@ fn keep_max<C>(into: &mut Pvalues<C>, ballot: Ballot, slot: Slot, command: C) {
 /// one that can. See the module documentation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SynodMsg<C> {
-    /// `⟨p1a, λ, b⟩` — phase one, from a scout.
-    P1a { ballot: Ballot },
+    /// `⟨p1a, λ, b⟩` — phase one, from a scout. `writes` is §4.3's: the sender's storage count after
+    /// the round write that precedes this message, so a peer holds the count the ballot was minted
+    /// under.
+    P1a { ballot: Ballot, writes: u64 },
     /// `⟨p1b, α, ballot_num, accepted⟩` — an acceptor's answer, carrying **one pvalue per slot** it
     /// has accepted for rather than everything it has ever accepted. §4.1; see the module
     /// documentation. This message is what grew fastest in the book's version, because it grew with
-    /// the ballots the run had seen as well as with the slots.
-    P1b { ballot: Ballot, accepted: Vec<Pvalue<C>>, collected: Slot },
+    /// the ballots the run had seen as well as with the slots. `writes` is the count after the
+    /// promise write this answer follows.
+    P1b { ballot: Ballot, accepted: Vec<Pvalue<C>>, collected: Slot, writes: u64 },
     /// `⟨p2a, λ, ⟨b, s, c⟩⟩` — phase two, from a commander.
     P2a { pvalue: Pvalue<C> },
     /// `⟨p2b, α, ballot_num⟩`, **plus the slot it answers for**. Figure 4 has no slot, because the
     /// reply goes to a thread whose identity supplies it; a leader holding its commanders as fields
-    /// needs it in the message. See the module documentation.
-    P2b { ballot: Ballot, slot: Slot },
+    /// needs it in the message. See the module documentation. `writes` is the count after the
+    /// accept this answer follows, so the leader that counts the vote holds the count it was cast
+    /// under.
+    P2b { ballot: Ballot, slot: Slot, writes: u64 },
     /// `⟨decision, s, c⟩` — Figure 6(a)'s last line, sent by a commander that has counted a
     /// majority, so that every process learns what was chosen rather than only the one that
     /// counted.
@@ -676,14 +734,49 @@ pub enum SynodMsg<C> {
     /// [`Cmd::CatchUp`].
     CatchUp { from_slot: Slot },
     /// `⟨applied, ρ, s⟩` — how far the replica on the sending machine has applied. Not on any
-    /// figure; §4.2's periodic update, which is what makes collection possible at all.
-    Applied { slot_out: Slot },
+    /// figure; §4.2's periodic update, which is what makes collection possible at all. `writes` is
+    /// §4.3's: periodic, so a witness's knowledge of a peer that has sent nothing else lags by at
+    /// most one report.
+    Applied { slot_out: Slot, writes: u64 },
     /// A proposal for a slot, from a replica on this machine or from a leader that could not act on
     /// it. Not on any figure — §4.4's colocation; see the module documentation.
     ///
     /// **A `Propose` that arrived is never forwarded again.** Two processes whose detectors
     /// disagree would otherwise pass one back and forth for as long as they disagree.
     Propose { slot: Slot, command: C },
+    /// "My storage has acknowledged this many writes." Sent to every member on recovery, and to a
+    /// peer whenever a session with it is established; the same count rides on every message a
+    /// process sends about its own state, so a witness is rarely more than one message behind. Not
+    /// on any figure; §4.3's boundary, see the module documentation.
+    Hello { writes: u64 },
+    /// "This is the highest count I had seen from you before you said that." The answer to a
+    /// [`SynodMsg::Hello`]. A recovered process votes only once every member has answered, and one
+    /// answer above its own count is a write it has lost.
+    HelloAck { seen: u64 },
+}
+
+/// This process's rewritten record — §4.3. See the module documentation for what is written when.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Durable {
+    /// `α.ballot_num`, as last written. Recovery takes the higher of this and the highest ballot
+    /// among the surviving [`Accepted`] records, since an accept implies the promise.
+    pub promise: Option<Ballot>,
+    /// The highest round this process has taken up a ballot with, or `None` if it never has. A
+    /// recovered leader takes up nothing at or below it.
+    pub round: Option<u64>,
+    /// §4.2's watermark. Records below it are dead and are ignored on recovery.
+    pub collected: Slot,
+    /// The highest acknowledged-write count seen from each peer, as of the last time this record
+    /// was written. Lags the in-memory copy, in the safe direction.
+    pub seen: BTreeMap<NodeId, u64>,
+}
+
+/// One accept, appended — §4.3. Recovery folds these into the per-slot map, latest per slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accepted<C> {
+    pub slot: Slot,
+    pub ballot: Ballot,
+    pub command: C,
 }
 
 /// The wire, multiplexing the leader detector and the Synod protocol itself.
@@ -743,6 +836,16 @@ pub enum Ind<C> {
     SessionEnded { peer: NodeId, epoch: u64 },
     /// A scope with `peer` is in force at `epoch`.
     SessionEstablished { peer: NodeId, epoch: u64 },
+    /// A [`Cmd::CatchUp`] found no member reporting itself ahead of `from_slot`. With no reports
+    /// held at all this says nothing; with any, the asker has caught up.
+    NobodyAhead { from_slot: Slot },
+    /// Every member has answered this process's announcement, and none contradicted it: it votes
+    /// again. The layer above may now ask a peer for what it missed.
+    Recovered,
+    /// `peer`'s storage scope has ended: a member witnessed a write `peer` no longer has. If `peer`
+    /// is this process, it has stopped and will act no further under this identity. Propagated,
+    /// never absorbed: nothing here can bridge it.
+    StorageScopeEnded { peer: NodeId },
 }
 
 /// Figure 6(b)'s scout, as a field rather than a thread.
@@ -876,6 +979,19 @@ pub struct MultiPaxosSynod<C: Clone, L: VolatileLink<SynodMsg<C>> = SessionLink<
     /// proposal to, not merely that it is not this process. `None` until Ω first speaks.
     trusted: Option<NodeId>,
 
+    // ---- §4.3 ----
+    /// The highest round written as taken up — [`Durable::round`], mirrored so that a scout restart
+    /// under the same ballot writes nothing.
+    round_written: Option<u64>,
+    /// The highest acknowledged-write count seen from each peer. Written into the record whenever
+    /// the record is written for another reason.
+    seen: BTreeMap<NodeId, u64>,
+    /// The members that have not yet answered this process's announcement, while it is recovering.
+    /// `None` when it is not: a process that votes.
+    recovering: Option<BTreeSet<NodeId>>,
+    /// A member witnessed a write this process no longer has. It acts no further.
+    stopped: bool,
+
     // ---- retries ----
     /// The periodic sweep's handle. Compared before acting, since an expiry is offered to every
     /// layer and this one composes two children that register their own.
@@ -924,6 +1040,10 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
             commanders: BTreeMap::new(),
             decided: BTreeMap::new(),
             trusted: None,
+            round_written: None,
+            seen: BTreeMap::new(),
+            recovering: None,
+            stopped: false,
             tick: None,
             retry: retransmit,
             escalate_after: detect_after,
@@ -997,6 +1117,53 @@ impl<C: Clone, L: VolatileLink<SynodMsg<C>>> MultiPaxosSynod<C, L> {
     pub fn is_scouting(&self) -> bool {
         self.scout.is_some()
     }
+
+    /// Whether this process is waiting for every member to answer its announcement, during which
+    /// it answers no `p1a` or `p2a` and takes up no ballot.
+    pub fn is_recovering(&self) -> bool {
+        self.recovering.is_some()
+    }
+
+    /// Whether a member witnessed a write this process no longer has, after which it acts no
+    /// further under this identity.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// The highest acknowledged-write count this process has seen from `peer`.
+    pub fn seen_of(&self, peer: NodeId) -> u64 {
+        self.seen.get(&peer).copied().unwrap_or(0)
+    }
+
+    /// Whether this process may **answer as an acceptor** — the vote whose safety a possibly-lost
+    /// record threatens. Not while recovering (the record has not been vouched for), and not once
+    /// stopped (it has been contradicted).
+    ///
+    /// Leading is deliberately *not* gated on recovery. A leader adopts phase one from a majority of
+    /// *other* acceptors and counts none of its own votes it withholds here, so a leader with an
+    /// unvouched — even a silently truncated — record proposes only what an honest majority already
+    /// held. Gating leadership too would deadlock a run in which Ω trusts a process that can never
+    /// finish recovering, because a member it waits on is gone for good: the stated cost is that
+    /// such a process stays a learner, not that the whole cluster stops.
+    fn may_answer(&self) -> bool {
+        self.recovering.is_none() && !self.stopped
+    }
+
+    /// This process's rewritten record, from what it holds now.
+    fn record(&self) -> Durable {
+        Durable {
+            promise: self.ballot_num,
+            round: self.round_written,
+            collected: self.collected,
+            seen: self.seen.clone(),
+        }
+    }
+
+    /// Write the record. Called only where something in it changed: a promise, a round, a watermark.
+    fn store(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let record = self.record();
+        cx.storage().set(record);
+    }
 }
 
 impl<C: Clone> MultiPaxosSynod<C, SessionLink<SynodMsg<C>>> {
@@ -1019,12 +1186,22 @@ where
     /// The reply carries `ballot_num` **after** any adoption, so a scout whose ballot was refused is
     /// told which ballot beat it rather than merely that one did.
     fn on_p1a(&mut self, from: NodeId, ballot: Ballot, cx: &mut ProtoCx<'_, Self>) {
+        if !self.may_answer() {
+            // §4.3: a recovered process answers no phase one until every member has answered it, and
+            // a stopped one answers nothing again. No effect at all, so it is narrated.
+            cx.note(Note::AnswerWithheld { from });
+            return;
+        }
         if Some(ballot) > self.ballot_num {
             self.ballot_num = Some(ballot);
+            // §4.3: the promise is durable before the `p1b` that reveals it. In the handler's own
+            // text — the write returns, and only then is the answer sent.
+            self.store(cx);
         }
         // Always `Some` here: either it just adopted, or it already held something at least as
         // high, and a real ballot is above `⊥`.
         let held = self.ballot_num.expect("an acceptor answering p1a has adopted something");
+        let writes = cx.storage().writes();
         // §4.1: "return only these pvalues in a p1b message to the scout". One per slot, so this
         // message grows with the slots this acceptor has accepted for and not with the ballots the
         // run has seen.
@@ -1041,7 +1218,7 @@ where
         // lower numbered slots." Without it a leader reads absence as "nothing was accepted", which
         // after collection is one of two possible meanings and the wrong one.
         let collected = self.collected;
-        self.transmit(from, SynodMsg::P1b { ballot: held, accepted, collected }, cx);
+        self.transmit(from, SynodMsg::P1b { ballot: held, accepted, collected, writes }, cx);
     }
 
     /// `case ⟨p2a, λ, ⟨b, s, c⟩⟩ : if b ≥ ballot_num then ballot_num := b; accepted := accepted ∪
@@ -1051,6 +1228,10 @@ where
     /// gives the failure this repairs, the edition the condition comes from, and why A1 and A2
     /// survive it.
     fn on_p2a(&mut self, from: NodeId, pvalue: Pvalue<C>, cx: &mut ProtoCx<'_, Self>) {
+        if !self.may_answer() {
+            cx.note(Note::AnswerWithheld { from });
+            return;
+        }
         let Pvalue { ballot, slot, command } = pvalue;
         // `synod-accept-below-promise` is a mutation the safety-evidence guard compiles: an
         // acceptor that accepts under a ballot it has already superseded, and answers as though it
@@ -1070,14 +1251,19 @@ where
             // is not strictly below `b` is `stored = ballot_num = b`, and A4 makes that the same
             // command. A guard here would be a branch nothing can take; the comparison that does
             // the work is the leader's, in `keep_max`.
-            self.accepted.insert(slot, (ballot, command));
+            self.accepted.insert(slot, (ballot, command.clone()));
+            // §4.3: the accept is durable before the `p2b` that reveals it — one appended record,
+            // not a rewrite of the window. The ballot in it is what lets recovery derive the
+            // promise this arm may just have raised, so the adoption costs no second write.
+            cx.storage().append(Accepted { slot, ballot, command });
         }
         let held = if sabotaged {
             ballot
         } else {
             self.ballot_num.expect("an acceptor answering p2a has adopted something")
         };
-        self.transmit(from, SynodMsg::P2b { ballot: held, slot }, cx);
+        let writes = cx.storage().writes();
+        self.transmit(from, SynodMsg::P2b { ballot: held, slot, writes }, cx);
     }
 
     // ---------------------------------------------------------------- the scout, Figure 6(b)
@@ -1088,6 +1274,13 @@ where
     /// discards a partial `waitfor` and `pvalues` deliberately: an acceptor that already answered
     /// answers again, and re-collecting from scratch is what makes the restart idempotent.
     fn start_scout(&mut self, ballot: Ballot, cx: &mut ProtoCx<'_, Self>) {
+        if Some(ballot.round) > self.round_written {
+            // §4.3: the round is durable before the first `p1a` under it, so a recovered leader
+            // never mints a ballot any acceptor can have seen. A restart of phase one under the
+            // same ballot passes this by and writes nothing.
+            self.round_written = Some(ballot.round);
+            self.store(cx);
+        }
         self.scout = Some(Scout {
             ballot,
             waitfor: self.acceptors.clone(),
@@ -1096,8 +1289,9 @@ where
             started: cx.now(),
             last_sent: cx.now(),
         });
+        let writes = cx.storage().writes();
         for a in self.acceptors.clone() {
-            self.transmit(a, SynodMsg::P1a { ballot }, cx);
+            self.transmit(a, SynodMsg::P1a { ballot, writes }, cx);
         }
     }
 
@@ -1274,7 +1468,10 @@ where
         // `synod-skip-collected` is the mutation the safety guard compiles against this line.
         if !cfg!(feature = "synod-skip-collected") {
             self.proposals.retain(|slot, _| *slot >= collected);
-            self.collected = self.collected.max(collected);
+            if collected > self.collected {
+                self.collected = collected;
+                self.store(cx);
+            }
         }
         // `∀⟨s, c⟩ ∈ proposals : spawn(Commander(…))`
         for (slot, command) in self.proposals.clone() {
@@ -1297,7 +1494,7 @@ where
         // ballot; the map keys on the slot, and this is what keeps the two in step.
         self.commanders.clear();
         self.scout = None;
-        if self.is_trusted() {
+        if self.is_trusted() && !self.stopped {
             let ballot = self.leader_ballot;
             self.start_scout(ballot, cx);
         } else {
@@ -1315,7 +1512,13 @@ where
     /// ballot and the duel does not begin.
     fn on_trust(&mut self, leader: NodeId, cx: &mut ProtoCx<'_, Self>) {
         self.trusted = Some(leader);
-        if self.is_trusted() && self.scout.is_none() && !self.active {
+        self.maybe_scout(cx);
+    }
+
+    /// Scout for the current ballot if this process is trusted, allowed to act, and not already
+    /// leading — the standing condition `on_trust` and the end of recovery both re-evaluate.
+    fn maybe_scout(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        if self.is_trusted() && !self.stopped && self.scout.is_none() && !self.active {
             let ballot = self.leader_ballot;
             self.start_scout(ballot, cx);
         }
@@ -1428,6 +1631,9 @@ where
     /// The periodic sweep: resend what is outstanding, and escalate an attempt that has waited too
     /// long. See the module's table of the three liveness fixes.
     fn sweep(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        if self.stopped {
+            return;
+        }
         let now = cx.now();
         let resend_after = self.resend_after();
         if let Some(scout) = self.scout.as_ref() {
@@ -1442,8 +1648,9 @@ where
                 if let Some(scout) = self.scout.as_mut() {
                     scout.last_sent = now;
                 }
+                let writes = cx.storage().writes();
                 for a in waiting {
-                    self.transmit(a, SynodMsg::P1a { ballot }, cx);
+                    self.transmit(a, SynodMsg::P1a { ballot, writes }, cx);
                 }
             }
             return;
@@ -1505,7 +1712,8 @@ where
         if let Some(scout) = self.scout.as_ref() {
             if scout.waitfor.contains(&peer) {
                 let ballot = scout.ballot;
-                self.transmit(peer, SynodMsg::P1a { ballot }, cx);
+                let writes = cx.storage().writes();
+                self.transmit(peer, SynodMsg::P1a { ballot, writes }, cx);
             }
             // A leader in phase one has no commanders: `preempted` clears them and `adopted` is
             // what starts them. Nothing below applies.
@@ -1539,6 +1747,70 @@ where
     /// so it asks the layer above, which does.
     fn on_catch_up(&mut self, from: NodeId, from_slot: Slot, cx: &mut ProtoCx<'_, Self>) {
         cx.indicate(Ind::CatchUpWanted { peer: from, from_slot });
+    }
+
+    // ---------------------------------------------------------------- §4.3: the storage scope
+
+    /// Tell `peer` how many writes this process's storage has acknowledged.
+    fn announce_to(&mut self, peer: NodeId, cx: &mut ProtoCx<'_, Self>) {
+        let writes = cx.storage().writes();
+        self.transmit(peer, SynodMsg::Hello { writes }, cx);
+    }
+
+    /// A peer announced its count. Answer with what this process had seen from it **before** the
+    /// announcement — an answer that already absorbed it could never be higher, and then nothing
+    /// would ever be detected — and only then remember the higher of the two.
+    ///
+    /// A witness's job, and one a recovering or stopped process still does: its memory of its
+    /// peers is intact whatever happened to its own record.
+    fn on_hello(&mut self, from: NodeId, writes: u64, cx: &mut ProtoCx<'_, Self>) {
+        let held = self.seen_of(from);
+        self.transmit(from, SynodMsg::HelloAck { seen: held }, cx);
+        if held > writes {
+            // The peer's storage acknowledged a write it no longer has. It will stop on the answer
+            // above; this side says so too, because the layer above may hold state that peer's
+            // membership was a condition of.
+            cx.indicate(Ind::StorageScopeEnded { peer: from });
+        }
+        self.witness(from, writes);
+    }
+
+    /// Remember the highest count `peer` has been seen to report. In memory now; in the record the
+    /// next time the record is written for another reason.
+    fn witness(&mut self, peer: NodeId, writes: u64) {
+        if writes > self.seen_of(peer) {
+            self.seen.insert(peer, writes);
+        }
+    }
+
+    /// A member answered this process's announcement.
+    fn on_hello_ack(&mut self, from: NodeId, seen: u64, cx: &mut ProtoCx<'_, Self>) {
+        if seen > cx.storage().writes() {
+            // A write this process's storage acknowledged is gone. The survey's "permanent disk
+            // failure": this process is crashed, and stays so under this identity.
+            if !self.stopped {
+                self.stopped = true;
+                self.recovering = None;
+                self.scout = None;
+                self.commanders.clear();
+                self.active = false;
+                cx.note(Note::StorageScopeEnded { witness: from, seen });
+                cx.indicate(Ind::StorageScopeEnded { peer: self.me });
+            }
+            return;
+        }
+        let Some(waiting) = self.recovering.as_mut() else { return };
+        waiting.remove(&from);
+        if waiting.is_empty() {
+            self.finish_recovery(cx);
+        }
+    }
+
+    /// Every member has answered and none contradicted: vote and lead again.
+    fn finish_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        self.recovering = None;
+        cx.indicate(Ind::Recovered);
+        self.maybe_scout(cx);
     }
 
     /// The highest slot at least `f + 1` members have applied every decision up to.
@@ -1577,6 +1849,9 @@ where
             return;
         }
         self.collected = wm;
+        // §4.3: written before the discard, so a recovery that finds the watermark also finds
+        // nothing it would have to reconstruct below it.
+        self.store(cx);
         self.accepted.retain(|slot, _| *slot >= wm);
         self.proposals.retain(|slot, _| *slot >= wm);
         self.decided.retain(|slot, _| *slot >= wm);
@@ -1622,6 +1897,8 @@ where
                 }
                 LinkInd::Boundary(Boundary::Established { peer, epoch }) => {
                     cx.indicate(Ind::SessionEstablished { peer, epoch });
+                    // §4.3: the announcement first, so it is the first thing in the session.
+                    self.announce_to(peer, cx);
                     self.resend_to(peer, cx);
                 }
             }
@@ -1631,15 +1908,35 @@ where
 
     /// The four `switch receive()` arms of Figures 4 and 6, dispatched.
     fn on_synod_msg(&mut self, from: NodeId, msg: SynodMsg<C>, cx: &mut ProtoCx<'_, Self>) {
+        // A witness first: a stopped process still remembers what it saw of its peers' storage,
+        // and answering with it costs nothing and may save a peer.
+        if let SynodMsg::Hello { writes } = msg {
+            self.on_hello(from, writes, cx);
+            return;
+        }
+        // Then the count the message carries, whatever else it says: a witness's memory of a peer
+        // is built from everything that peer sends about itself.
+        match &msg {
+            SynodMsg::P1a { writes, .. }
+            | SynodMsg::P1b { writes, .. }
+            | SynodMsg::P2b { writes, .. }
+            | SynodMsg::Applied { writes, .. } => self.witness(from, *writes),
+            _ => {}
+        }
+        if self.stopped {
+            return;
+        }
         match msg {
-            SynodMsg::P1a { ballot } => self.on_p1a(from, ballot, cx),
-            SynodMsg::P1b { ballot, accepted, collected } => {
+            SynodMsg::Hello { .. } => unreachable!("handled above"),
+            SynodMsg::HelloAck { seen } => self.on_hello_ack(from, seen, cx),
+            SynodMsg::P1a { ballot, .. } => self.on_p1a(from, ballot, cx),
+            SynodMsg::P1b { ballot, accepted, collected, .. } => {
                 self.on_p1b(from, ballot, accepted, collected, cx)
             }
-            SynodMsg::Applied { slot_out } => self.on_applied(from, slot_out, cx),
+            SynodMsg::Applied { slot_out, .. } => self.on_applied(from, slot_out, cx),
             SynodMsg::CatchUp { from_slot } => self.on_catch_up(from, from_slot, cx),
             SynodMsg::P2a { pvalue } => self.on_p2a(from, pvalue, cx),
-            SynodMsg::P2b { ballot, slot } => self.on_p2b(from, ballot, slot, cx),
+            SynodMsg::P2b { ballot, slot, .. } => self.on_p2b(from, ballot, slot, cx),
             SynodMsg::Decision { slot, command } => self.on_decision(slot, command, cx),
             SynodMsg::Propose { slot, command } => self.on_propose(Some(from), slot, command, cx),
         }
@@ -1658,14 +1955,18 @@ where
     /// and bridges none of the link's.
     type Scope = L::Scope;
     type Note = crate::Note;
-    /// Keeps nothing durably, which is what makes this crash-stop. §4.3 is the change that alters
-    /// it, and the module documentation says what a durable ballot counter would buy.
-    type Meta = core::convert::Infallible;
-    type Entry = core::convert::Infallible;
+    /// The promise, the round, the watermark and what has been seen of each peer — §4.3, and the
+    /// module documentation's table of what is written when.
+    type Meta = Durable;
+    /// One record per accept. Appended, because the accepted set is a window wide.
+    type Entry = Accepted<C>;
 
     /// A request from the layer above carries no sender, which is what distinguishes it from a
     /// forwarded one: only a proposal that has *not* travelled may be forwarded.
     fn on_cmd(&mut self, cmd: Cmd<C>, cx: &mut ProtoCx<'_, Self>) {
+        if self.stopped {
+            return;
+        }
         match cmd {
             Cmd::Propose { slot, command } => self.on_propose(None, slot, command, cx),
             // §4.2's periodic update. Recorded here as this machine's own — the replica is on it —
@@ -1683,9 +1984,10 @@ where
                     .map(|(peer, _)| *peer);
                 match ahead {
                     Some(peer) => self.transmit(peer, SynodMsg::CatchUp { from_slot }, cx),
-                    // Nobody has said they are ahead. Nothing to do, and nothing lost: the layer
-                    // above asks again, and a report will arrive.
-                    None => cx.note(Note::ProposalIgnored { slot: from_slot }),
+                    // Nobody has said they are ahead. Nothing to send, and the layer above is told
+                    // so: with no reports held that means nothing yet, and it asks again; with
+                    // reports held it means the catch-up is done.
+                    None => cx.indicate(Ind::NobodyAhead { from_slot }),
                 }
             }
             Cmd::Teach { to, slot, command } => {
@@ -1693,9 +1995,10 @@ where
             }
             Cmd::Applied { slot_out } => {
                 self.on_applied(self.me, slot_out, cx);
+                let writes = cx.storage().writes();
                 for peer in self.acceptors.clone() {
                     if peer != self.me {
-                        self.transmit(peer, SynodMsg::Applied { slot_out }, cx);
+                        self.transmit(peer, SynodMsg::Applied { slot_out, writes }, cx);
                     }
                 }
             }
@@ -1723,9 +2026,60 @@ where
 
     /// `⟨ Init ⟩` — start the detector, whose first `Trust` may immediately make this process scout,
     /// and arm the sweep.
+    ///
+    /// No announcement of its own: a fresh process announces on each session establishment, which
+    /// is what catches a process that came back with an empty disk under a known identity.
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
         self.arm(cx);
         self.through_omega(cx, |o, ccx| o.on_init(ccx));
+    }
+
+    /// `⟨ Recovery ⟩` — §4.3. Read the record back, fold the accept records into the per-slot map,
+    /// take up nothing at or below the round written, and announce to every member. Until every
+    /// member has answered this process answers no `p1a` or `p2a`; see [`Ind::Recovered`].
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        if let Some(held) = cx.storage().get().cloned() {
+            self.ballot_num = held.promise;
+            self.round_written = held.round;
+            self.collected = held.collected;
+            self.seen = held.seen;
+        }
+        // Latest per slot, which is the order the records were appended in; below the watermark is
+        // dead. An accept implies the promise, so the promise is at least the highest ballot here.
+        let records: Vec<Accepted<C>> =
+            cx.storage().read_from(Position::START).into_iter().cloned().collect();
+        for Accepted { slot, ballot, command } in records {
+            if slot < self.collected {
+                continue;
+            }
+            self.accepted.insert(slot, (ballot, command));
+            if Some(ballot) > self.ballot_num {
+                self.ballot_num = Some(ballot);
+            }
+        }
+        // Above every ballot this process ever took up, so nothing an acceptor may hold is minted
+        // again — the durable ballot counter the module documentation names.
+        self.leader_ballot =
+            Ballot { round: self.round_written.map_or(0, |r| r + 1), leader: self.me };
+
+        self.arm(cx);
+        // The detector kept nothing, so it starts: exactly one of `on_init` and `on_recovery` is
+        // owed to each protocol, and for a child that keeps nothing they are the same branch.
+        self.through_omega(cx, |o, ccx| o.on_init(ccx));
+
+        // `synod-vote-before-answered` is the mutation the safety guard compiles against the wait:
+        // a recovered process that votes at once. Under an honest store it changes nothing, which is
+        // why the wait is evidence only where the store lied.
+        let others: BTreeSet<NodeId> =
+            self.acceptors.iter().copied().filter(|a| *a != self.me).collect();
+        if cfg!(feature = "synod-vote-before-answered") || others.is_empty() {
+            self.finish_recovery(cx);
+            return;
+        }
+        self.recovering = Some(others.clone());
+        for peer in others {
+            self.announce_to(peer, cx);
+        }
     }
 
     /// Hand the boundary down to the link, which is the layer that knows what it means. Leaving

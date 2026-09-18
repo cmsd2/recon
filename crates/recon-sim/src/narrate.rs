@@ -104,8 +104,8 @@ where
         TraceEvent::DiedWriting { node, .. } => {
             tracing::debug!(target: "recon_sim", ?at, node = %node, "died writing");
         }
-        TraceEvent::Recovered { node, had_state, .. } => {
-            tracing::debug!(target: "recon_sim", ?at, node = %node, had_state, "recovered");
+        TraceEvent::Recovered { node, had_state, lost, .. } => {
+            tracing::debug!(target: "recon_sim", ?at, node = %node, had_state, ?lost, "recovered");
         }
     }
 }

@@ -106,4 +106,9 @@ pub enum LogInd<V> {
     /// inherits that broadcast's inability to bridge an ending — it holds no redundancy outliving
     /// the scope beyond what consensus gives it — so it propagates rather than absorbing.
     Boundary(crate::link::Boundary),
+    /// `peer`'s storage scope ended: a member witnessed a write `peer`'s storage had acknowledged
+    /// and no longer has. If `peer` is this process, the log beneath has stopped and will order
+    /// nothing further under this identity. Reachable only from an implementation that keeps
+    /// durable state; the two transcriptions never raise it. Propagated, never absorbed.
+    StorageScopeEnded { peer: NodeId },
 }

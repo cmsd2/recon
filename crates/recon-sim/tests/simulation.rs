@@ -3,7 +3,7 @@
 
 use core::time::Duration;
 use recon_core::{NodeId, Position, ProtoCx, Protocol, Store, Time, TimerId};
-use recon_sim::{Config, DropReason, ProtoTraceEvent, Sim, TraceEvent};
+use recon_sim::{Config, DropReason, Lost, ProtoTraceEvent, Sim, TraceEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -1831,4 +1831,132 @@ fn severing_a_pair_ends_its_session_and_leaves_the_others_up() {
     s.run_for(Duration::from_millis(200));
     assert!(s.has_session(A, C), "the session re-established without being prompted");
     assert_eq!(s.session_epoch(A, B), Some(before), "and the untouched one was not disturbed");
+}
+
+// ---------------------------------------------------------------- the write count, and losing it
+
+#[test]
+fn the_write_count_survives_a_restart() {
+    let mut s = keepers(70);
+    s.command(A, LedgerCmd::Record(5));
+    s.command(A, LedgerCmd::Record(3));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.storage(A).unwrap().writes(), 4, "an append and a replacement per record");
+
+    s.crash(A);
+    s.restart(A);
+    assert_eq!(s.storage(A).unwrap().writes(), 4, "the count came back with what was written");
+    assert_eq!(s.protocol(A).unwrap().total, 8);
+}
+
+#[test]
+fn an_interrupted_write_counts_only_if_it_took_effect() {
+    // `Record` appends and then replaces; a process armed to die in its next write dies in the
+    // append, which the seed lets land or not, and the replacement never runs. Either way the count
+    // agrees with what the recovering process finds.
+    let mut kept = 0;
+    let mut lost = 0;
+    for seed in 0..40u64 {
+        let mut s = keepers(seed);
+        s.crash_on_next_write(A);
+        s.command(A, LedgerCmd::Record(7));
+        s.run_for(Duration::from_millis(50));
+        s.restart(A);
+        let st = s.storage(A);
+        let entries = st.map(|st| st.len() as u64).unwrap_or(0);
+        let writes = st.map(|st| st.writes()).unwrap_or(0);
+        assert_eq!(writes, entries, "seed {seed}: the count says exactly what is there");
+        if entries == 1 { kept += 1 } else { lost += 1 }
+    }
+    assert!(kept > 0 && lost > 0, "both outcomes must occur for the equality to mean anything");
+}
+
+#[test]
+fn an_empty_restart_takes_the_first_start_branch() {
+    let mut s = keepers(71);
+    s.command(A, LedgerCmd::Record(5));
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.storage(A).unwrap().writes(), 2, "there was something to lose");
+
+    s.crash(A);
+    s.restart_empty(A);
+
+    assert_eq!(s.trace().recoveries_with_state(), 0, "initialised, not recovered");
+    assert_eq!(s.trace().empty_restarts(), 1, "and the trace says the restart lost everything");
+    assert_eq!(s.storage(A).map(|st| st.writes()).unwrap_or(0), 0, "the count is zero");
+    assert_eq!(s.protocol(A).unwrap().total, 0, "as if for the first time");
+    assert!(
+        s.trace().events().iter().any(|e| matches!(
+            e,
+            TraceEvent::Recovered { node, had_state: false, lost: Lost::Everything, .. } if *node == A
+        )),
+        "the restart is recorded as a fault, distinguishably from an ordinary one"
+    );
+}
+
+#[test]
+fn a_truncated_restart_drops_exactly_the_last_writes() {
+    // Six writes in order: append 1, set 1, append 2, set 3, append 3, set 6. Taking back the last
+    // three leaves append 1, set 1, append 2 — and a store that says three writes happened.
+    let mut s = keepers(72);
+    for n in [1u32, 2, 3] {
+        s.command(A, LedgerCmd::Record(n));
+    }
+    s.run_for(Duration::from_millis(50));
+    assert_eq!(s.storage(A).unwrap().writes(), 6);
+
+    s.crash(A);
+    s.restart_truncated(A, 3);
+
+    let st = s.storage(A).unwrap();
+    assert_eq!(st.writes(), 3, "the first three writes remain");
+    assert_eq!(st.len(), 2, "two of the three appends");
+    let p = s.protocol(A).unwrap();
+    assert_eq!(p.replayed, vec![1, 2], "read back as a prefix");
+    assert_eq!(p.total, 1, "the replacement that survived was the first");
+    assert_eq!(s.trace().writes_lost(), 3);
+    assert_eq!(s.trace().recoveries_with_state(), 1, "it took the recovery branch, unaware");
+}
+
+#[test]
+fn a_truncated_restart_is_indistinguishable_from_the_process_own_vantage() {
+    // Whatever is taken back, what remains is some state the process wrote: whole values, a prefix
+    // of the sequence, and a count that agrees. Nothing readable says anything is missing.
+    let totals_written = [0u32, 1, 3, 6];
+    for n in 0..=7u64 {
+        let mut s = keepers(73);
+        for k in [1u32, 2, 3] {
+            s.command(A, LedgerCmd::Record(k));
+        }
+        s.run_for(Duration::from_millis(50));
+        s.crash(A);
+        s.restart_truncated(A, n);
+
+        let lost = s.trace().writes_lost();
+        assert_eq!(lost, n.min(6), "n={n}: at most what was written can be taken back");
+        let (writes, entries) =
+            s.storage(A).map(|st| (st.writes(), st.len() as u64)).unwrap_or((0, 0));
+        assert_eq!(writes, 6 - lost, "n={n}: the count says nothing was lost");
+        let p = s.protocol(A).unwrap();
+        assert_eq!(p.replayed.len() as u64, entries);
+        assert!(p.replayed.iter().zip([1u32, 2, 3]).all(|(a, b)| *a == b), "n={n}: a prefix");
+        assert!(totals_written.contains(&p.total), "n={n}: a whole value it once wrote");
+    }
+}
+
+#[test]
+fn an_ordinary_restart_loses_nothing() {
+    let mut s = keepers(74);
+    s.command(A, LedgerCmd::Record(5));
+    s.run_for(Duration::from_millis(50));
+    s.crash(A);
+    s.restart(A);
+
+    assert_eq!(s.storage(A).unwrap().writes(), 2);
+    assert_eq!(s.trace().writes_lost(), 0);
+    assert_eq!(s.trace().empty_restarts(), 0);
+    assert!(s.trace().events().iter().any(|e| matches!(
+        e,
+        TraceEvent::Recovered { node, had_state: true, lost: Lost::Nothing, .. } if *node == A
+    )));
 }

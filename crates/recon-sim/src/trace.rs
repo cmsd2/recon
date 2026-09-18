@@ -132,8 +132,27 @@ pub enum TraceEvent<M, I, N, C> {
     /// decision, and the write and the sends are what the decision led to.
     Said { at: Time, node: NodeId, note: N },
     /// A restarted process was given back what it had written. `had_state` is false when it had
-    /// written nothing and started as if for the first time.
-    Recovered { at: Time, node: NodeId, had_state: bool },
+    /// written nothing and started as if for the first time. `lost` says whether the restart was
+    /// itself a fault — [`Sim::restart_empty`](crate::Sim::restart_empty) or
+    /// [`Sim::restart_truncated`](crate::Sim::restart_truncated) — and how much it took.
+    Recovered { at: Time, node: NodeId, had_state: bool, lost: Lost },
+}
+
+/// What a restart took from a process's storage, besides its volatile state.
+///
+/// A store cannot know what it has forgotten, so this is recorded here rather than reported by
+/// the process: the run knows, and a test that injected the fault can read it back and require
+/// that some process raised the event saying so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lost {
+    /// An ordinary restart: everything acknowledged is present.
+    Nothing,
+    /// The disk came back new. The process starts as if for the first time under an identity its
+    /// peers may remember.
+    Everything,
+    /// The last `n` acknowledged writes are gone and the store claims to be complete — a disk that
+    /// acknowledged what it had not kept.
+    Last(u64),
 }
 
 impl<M, I, N, C> TraceEvent<M, I, N, C> {
@@ -365,6 +384,27 @@ impl<M, I, N, C> Trace<M, I, N, C> {
     /// is the whole content of the fault.
     pub fn deaths_in_writes(&self) -> usize {
         self.events.iter().filter(|e| matches!(e, TraceEvent::DiedWriting { .. })).count()
+    }
+
+    /// How many writes restarts took, over the run. Zero unless a test injected
+    /// [`Sim::restart_truncated`](crate::Sim::restart_truncated); an empty restart is counted by
+    /// [`Trace::empty_restarts`] instead, since a store that came back new lost a count nobody kept.
+    pub fn writes_lost(&self) -> u64 {
+        self.events
+            .iter()
+            .filter_map(|e| match e {
+                TraceEvent::Recovered { lost: Lost::Last(n), .. } => Some(*n),
+                _ => None,
+            })
+            .sum()
+    }
+
+    /// How many restarts brought a process back with nothing in storage, as a fault.
+    pub fn empty_restarts(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|e| matches!(e, TraceEvent::Recovered { lost: Lost::Everything, .. }))
+            .count()
     }
 
     /// How many restarts recovered durable state, as opposed to starting afresh.

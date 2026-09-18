@@ -21,7 +21,7 @@ Moderately Complex* (2015).
 
 ```bash
 git clone https://github.com/cmsd2/recon && cd recon
-cargo test --workspace          # 702 tests, all in-process
+cargo test --workspace          # 727 tests, all in-process
 ./scripts/check.sh              # the full gate: fmt, clippy, build, test, docs, guards
 ```
 
@@ -275,8 +275,8 @@ log arrives again after every restart.
 | Total-order log port | [`total_order_log.rs`](crates/recon-protocols/src/total_order_log.rs) | — | port | none |
 | Consensus-based total-order broadcast | [`consensus_based_total_order_broadcast.rs`](crates/recon-protocols/src/consensus_based_total_order_broadcast.rs) | Module 6.1, Alg. 6.1 | transcription | unbounded |
 | Logged uniform total-order broadcast | [`logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/src/logged_uniform_total_order_broadcast.rs) | Module 6.12, Alg. 6.12 | transcription | unbounded, in stable storage too |
-| Multi-Paxos, the Synod protocol | [`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) | **not in Cachin**: vRA (2015) §2 and §4.1–4.2, Figs. 4, 6, 7 | **implementation** | bounded by membership and the collection window |
-| Multi-Paxos, the replica | [`multi_paxos_replica.rs`](crates/recon-protocols/src/multi_paxos_replica.rs) | **not in Cachin**: vRA (2015) §2.1 and §4.2, Fig. 1 | **implementation** | bounded by a retention window; the ordered sequence is exempt |
+| Multi-Paxos, the Synod protocol | [`multi_paxos_synod.rs`](crates/recon-protocols/src/multi_paxos_synod.rs) | **not in Cachin**: vRA (2015) §2 and §4.1–4.3, Figs. 4, 6, 7 | **implementation** | bounded by membership and the collection window, **on disk** |
+| Multi-Paxos, the replica | [`multi_paxos_replica.rs`](crates/recon-protocols/src/multi_paxos_replica.rs) | **not in Cachin**: vRA (2015) §2.1 and §4.2–4.3, Fig. 1 | **implementation** | bounded by a retention window, **on disk**; the ordered sequence is exempt |
 
 Two more things change in this model. Startup becomes a branch: a process with nothing in storage
 is initialised, one with something is recovered, and exactly one of the two runs. And
@@ -317,9 +317,15 @@ per entry. Getting there meant finding that the protocol was spending 3.6× that
 interval doubled as the retransmission interval and every suite configured it below the delivery
 bound. The state bound is the source's own §4.2: leaders and acceptors discard everything below the
 slot that `f + 1` replicas have applied past, and a replica keeps its duplicate filter for a
-retention window. Both bounds are conditional and both conditions are stated. What Multi-Paxos still
-lacks is durability, which is §4.3 and a separate obligation. Single-instance Paxos stays out: it is
-the book's stepping stone and is kept as one.
+retention window. Both bounds are conditional and both conditions are stated. §4.3 makes both halves
+fail-recovery: the promise, the accepted pvalues, the leader's ballot round and the replica's
+sequence are durable before anything reveals them, so a process that returns with its acknowledged
+writes is slow rather than crashed. A disk that lost an acknowledged write is the survey's permanent
+failure, and the stack detects it where a witness is reachable — a process announces its
+acknowledged-write count on recovery and a peer holding a higher one has seen a write it no longer
+has — then stops and propagates the ending, rather than voting on state it cannot vouch for. What
+remains is a snapshot to bound the durable log and reconfiguration to replace a dead member, each a
+later change. Single-instance Paxos stays out: it is the book's stepping stone and is kept as one.
 
 ### Detectors versus quorums
 
@@ -479,7 +485,7 @@ a test claims to protect, and require the red.
 
 [`check-durability-tests.sh`](scripts/check-durability-tests.sh) builds with
 `--features lose-storage-on-restart`, which makes `Sim::restart` discard what was written, and
-requires the twenty-five tests registered in the script to fail. One that still passes is
+requires the thirty tests registered in the script to fail. One that still passes is
 reading the network rather than the disk, and in this project the network is always an available
 answer: the stubborn children retransmit everything they have ever sent on every tick, so the
 backlog in flight holds a full copy of the run. The audit that produced the list found two tests
@@ -488,9 +494,10 @@ durability and which could not have detected its absence. Run it when touching r
 any test that restarts a process.
 
 [`check-safety-tests.sh`](scripts/check-safety-tests.sh) is the same instrument pointed at
-agreement. It compiles three mutations of `multi_paxos_synod`, each removing one clause the safety
+agreement. It compiles four mutations of `multi_paxos_synod`, each removing one clause the safety
 argument rests on: a leader that ignores what the majority reported, an acceptor that accepts below
-its own promise, and a leader that proposes into a collected slot. Every test registered against a
+its own promise, a leader that proposes into a collected slot, and a recovered process that votes
+before every member has answered its storage announcement. Every test registered against a
 mutation must fail under it. Agreement admits silent substitution easily, since "at most one
 proposal chosen per slot" is satisfied by a run that chooses nothing. The guard has already caught
 one regression: a later change to the leader left most of the registered tests green under the first
@@ -531,8 +538,8 @@ cargo test --workspace -- --nocapture                 # with output
 
 | Suite | Covers | Tests |
 |---|---|---|
-| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, a durable child inside a durable parent, and a child's narration passing through untouched | 31 |
-| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the trace, timer handles, stepping by event, severing pairs | 91 |
+| [`recon-core/tests/core_contract.rs`](crates/recon-core/tests/core_contract.rs) | the trait, effects, composition, determinism, a durable child inside a durable parent, the store's write count, and a child's narration passing through untouched | 34 |
+| [`recon-sim/tests/simulation.rs`](crates/recon-sim/tests/simulation.rs) | determinism, faults, sessions, storage, the write count and losing it to an empty or truncated restart, the trace, timer handles, stepping by event, severing pairs | 97 |
 | [`recon-sim/tests/invocations.rs`](crates/recon-sim/tests/invocations.rs) | an operation's beginning recorded when it was handled rather than scheduled, and one that never began recorded with why | 10 |
 | [`recon-sim/tests/narration.rs`](crates/recon-sim/tests/narration.rs) | a note reaching the trace with its process and instant, a decision to do nothing leaving only its note, and narrating changing nothing | 8 |
 | [`recon-sim/tests/scenario.rs`](crates/recon-sim/tests/scenario.rs) | a run described as a value, and the reduction of a failing one: what comes back still fails, reduces twice to the same answer, and renders as Rust that the test compiles and runs | 15 |
@@ -555,12 +562,12 @@ cargo test --workspace -- --nocapture                 # with output
 | [`tests/logged_leader_driven_consensus.rs`](crates/recon-protocols/tests/logged_leader_driven_consensus.rs) | Paxos under crashes, recoveries and a lying detector at once, with a non-vacuity half for all three, and dying inside the decision write | 12 |
 | [`tests/total_order_log.rs`](crates/recon-protocols/tests/total_order_log.rs) | the shared suite, written against the port and run against all three implementations: total order, validity, no duplication, the read and its prefix consistency, a flat send rate, survivors still ordering after a permanent crash, and a non-vacuity half requiring overlapping operations | 29 |
 | [`tests/logged_uniform_total_order_broadcast.rs`](crates/recon-protocols/tests/logged_uniform_total_order_broadcast.rs) | what only the fail-recovery member claims: the sequence survives a restart from its own storage, with the restarted process cut off from the network first so the retransmission backlog cannot rebuild it | 7 |
-| [`tests/multi_paxos_synod.rs`](crates/recon-protocols/tests/multi_paxos_synod.rs) | the Synod protocol: a checker fed from the trace after every event; a seeded sweep beside hand-driven schedules for the edges randomness misses; the lost-message liveness violations with one message dropped; §4.4's colocated deployment; §4.1's state reduction; the cost identity at two membership sizes; and §4.2's collection, including agreement across a collection that left the acceptors remembering nothing | 59 |
-| [`tests/multi_paxos_replica.rs`](crates/recon-protocols/tests/multi_paxos_replica.rs) | the replica of Figure 1: a passive process's append ordered by the leader, the window and its release, a command that loses its slot and comes back, decisions delivered in reverse and again, Liu et al.'s fourth liveness violation driven with one decision dropped, and §4.2's retention window with a stranded replica catching up from a peer | 21 |
+| [`tests/multi_paxos_synod.rs`](crates/recon-protocols/tests/multi_paxos_synod.rs) | the Synod protocol: a checker fed from the trace after every event; a seeded sweep beside hand-driven schedules for the edges randomness misses; the lost-message liveness violations with one message dropped; §4.4's colocated deployment; §4.1's state reduction; the cost identity at two membership sizes; §4.2's collection, including agreement across a collection that left the acceptors remembering nothing; and §4.3 — the promise, the accepts and the ballot round durable before they are revealed, an accept answered in phase one after a restart, a recovered leader minting above every ballot it used, a truncated or empty disk detected by a witness, a member gone for good keeping a recovery a learner, and the write cost as an identity | 68 |
+| [`tests/multi_paxos_replica.rs`](crates/recon-protocols/tests/multi_paxos_replica.rs) | the replica of Figure 1: a passive process's append ordered by the leader, the window and its release, a command that loses its slot and comes back, decisions delivered in reverse and again, Liu et al.'s fourth liveness violation driven with one decision dropped, and §4.2's retention window with a stranded replica catching up from a peer; and §4.3 — the sequence surviving a restart from its own disk, a recovered replica appending anew and catching up on what it missed, a durable incarnation keeping a post-restart append from being read as a duplicate, and a storage scope ending propagated | 28 |
 | [`tests/shrinking_a_real_defect.rs`](crates/recon-protocols/tests/shrinking_a_real_defect.rs) | the shrinker against a defect this project had, put back behind a test-only switch | 3 |
 
-687 across the suites above, plus nine unit tests inside `recon-core` and six doctests (four of them
-`compile_fail`): 702 in total, all in one process. One further test is `#[ignore]`d because it
+712 across the suites above, plus nine unit tests inside `recon-core` and six doctests (four of them
+`compile_fail`): 727 in total, all in one process. One further test is `#[ignore]`d because it
 generates `rendered_scenario.rs.inc` rather than checking anything; the test that compares the
 committed output against the renderer does the checking.
 

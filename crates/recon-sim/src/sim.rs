@@ -6,7 +6,9 @@
 
 use crate::config::Config;
 use crate::narrate::{Render, render};
-use crate::trace::{DropReason, NotBegun, OpId, ProtoTrace, ProtoTraceEvent, Trace, TraceEvent};
+use crate::trace::{
+    DropReason, Lost, NotBegun, OpId, ProtoTrace, ProtoTraceEvent, Trace, TraceEvent,
+};
 use core::time::Duration;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -336,12 +338,42 @@ where
         self.release_deferred(node);
     }
 
-    /// Restart a *crashed* `node`, which takes its startup branch.
+    /// Bring a crashed `node` back, with everything its storage acknowledged.
     ///
     /// A crash discarded its volatile state, its timers, and anything that was on its way, so
     /// there is nothing held to release. What survived is in storage, and is handed back through
     /// `on_recovery`. For a suspension use [`Sim::resume`].
     pub fn restart(&mut self, node: NodeId) {
+        self.restart_losing(node, Lost::Nothing);
+    }
+
+    /// Bring a crashed `node` back with **nothing** in storage, as if its disk were new.
+    ///
+    /// A fault in its own right: the process starts as if for the first time, under an identity
+    /// its peers may remember having promised and accepted things. The simulator cannot say so —
+    /// nothing in a store can know what it has forgotten — so what it does is record the loss in
+    /// the trace, and the protocol is what must notice. `docs/conditional-guarantees.md` on the
+    /// storage scope.
+    ///
+    /// Not the same instrument as the `lose-storage-on-restart` feature, which wipes storage on
+    /// *every* restart so that the durability guard can ask every existing test at once whether it
+    /// depends on the disk. This is a knob for one test to spend on one process.
+    pub fn restart_empty(&mut self, node: NodeId) {
+        self.restart_losing(node, Lost::Everything);
+    }
+
+    /// Bring a crashed `node` back with its last `n` acknowledged writes gone, and its storage
+    /// otherwise complete — a disk that acknowledged what it had not kept.
+    ///
+    /// What the process reads is a valid earlier state: whole values, a prefix of the sequence,
+    /// and a write count that agrees with what it finds. Nothing it can read says anything was
+    /// lost, which is the whole of the fault. The trace records how many writes actually went,
+    /// which is fewer than `n` only if the process had made fewer.
+    pub fn restart_truncated(&mut self, node: NodeId, n: u64) {
+        self.restart_losing(node, Lost::Last(n));
+    }
+
+    fn restart_losing(&mut self, node: NodeId, lost: Lost) {
         match self.nodes.get_mut(&node) {
             Some(n) if n.liveness == Liveness::Crashed => n.liveness = Liveness::Running,
             Some(_) => panic!("restart({node}): not crashed — resume() is for a suspension"),
@@ -368,8 +400,20 @@ where
         #[cfg(feature = "lose-storage-on-restart")]
         self.storage.remove(&node);
 
+        let lost = match lost {
+            Lost::Nothing => Lost::Nothing,
+            Lost::Everything => {
+                self.storage.remove(&node);
+                Lost::Everything
+            }
+            Lost::Last(n) => {
+                let taken = self.storage.get_mut(&node).map(|s| s.truncate(n)).unwrap_or(0);
+                Lost::Last(taken)
+            }
+        };
+
         let survived = self.storage.get(&node).map(|s| !s.is_empty()).unwrap_or(false);
-        self.record(TraceEvent::Recovered { at, node, had_state: survived });
+        self.record(TraceEvent::Recovered { at, node, had_state: survived, lost });
         if survived {
             self.run_handler(node, |p, cx| p.on_recovery(cx));
         } else {
@@ -1153,5 +1197,11 @@ impl<Me, En> Store<Me, En> for FaultyStore<'_, Me, En> {
 
     fn end(&self) -> Position {
         self.inner.end()
+    }
+
+    /// Counts what landed: a write this store refused never reached `inner`, so a process killed
+    /// inside a write reads back a count that agrees with what it finds.
+    fn writes(&self) -> u64 {
+        self.inner.writes()
     }
 }
