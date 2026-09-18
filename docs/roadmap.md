@@ -175,7 +175,7 @@ deployment needs, but the protocol they specify keeps a Global History that is n
 transcribing it faithfully would reproduce the defect this work exists to remove. The survey puts the
 bounding **on the page** — §4.1 has an acceptor keep only the most recently accepted pvalue per slot,
 and §4.2 collects state below a watermark — so the module can become an implementation while staying
-a faithful transcription of its source. §4.1 is applied; §4.2 is the change that remains.
+a faithful transcription of its source. Both are applied.
 
 [`multi_paxos_synod.rs`](../crates/recon-protocols/src/multi_paxos_synod.rs) is §2, the Synod protocol:
 ballots, acceptors, scouts, commanders and leaders, with safety holding unconditionally and progress

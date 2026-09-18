@@ -309,58 +309,197 @@ effect a window of slots later — and that needs slots, which this capability d
 - **WHEN** a run proceeds, with or without crashes
 - **THEN** the set of acceptors majorities are counted over is the one the run began with
 
-### Requirement: The state is unbounded, and this is a transcription
+### Requirement: The state is bounded, and this is an implementation
 
-The state SHALL be permitted to grow with the number of slots handled: an acceptor keeps one
-proposal per slot it has accepted for, and a leader keeps a proposal for every slot it has been
-asked about.
+The state SHALL NOT grow with the number of slots handled. An acceptor keeps one proposal per slot
+between the collection watermark and the frontier; a leader keeps one proposal and one decision
+record per slot in the same range; and the report of how far each member has applied is one entry
+per member.
 
-An acceptor SHALL keep, for each slot, only the accepted proposal carrying the **highest ballot**,
-and SHALL return only those in answer to a phase-one request. This is the source's §4.1: a leader
-"only needs to know if this set is empty or not, and if not, what the maximum pvalue is", so
-everything below the maximum is read by nothing and SHALL NOT be kept or sent. Growth with the
-number of *ballots* a run has seen is thereby removed; growth with slots is not, so this capability
-remains a transcription.
+Every one of those is bounded by the membership and by how far the frontier is allowed to run ahead
+of what has been applied, which the layer above caps. None is bounded by how many slots the run has
+handled, which is what `docs/bounded-space.md` requires of an implementation and what the source's §2
+does not do — §4 opens by saying "the described protocol is not practical", and §4.1 and §4.2 are its
+two reductions. Both are applied.
 
-The source's §4.2 is what bounds what remains, and it belongs to a later change because bounding
-weakens a guarantee to a scope. What this capability requires is that the module **states** its
-bound rather than leaving a reader to assume one.
-
-**Discarding a proposal below the maximum discards evidence, not agreement, and the module SHALL
-say so.** After the reduction there may be no majority of acceptors holding the same proposal for a
-slot that has nevertheless been chosen, because a later ballot accepted at one of them overwrote its
-record — the source raises this itself and calls it a worrisome effect. What carries the choice
-forward is that the leader of every later ballot had to read the maximum from a majority, and any
-two majorities intersect. The module SHALL state that the record of a choice may be overwritten
-while the choice stands, because a reader who assumes otherwise would take a correct run for a
-broken one.
+The module SHALL state the bound, and SHALL carry a test that its state does not grow with the slots
+handled: run a growing number of slots and require the bound to hold. It SHALL also state what the
+bound is conditional on — collection needs `f + 1` members reporting, so a run with too few stalls
+and grows, which is the source's own caveat rather than a defect.
 
 #### Scenario: The module states its own space bound
 
 - **WHEN** a reader consults the module's documentation
-- **THEN** it says the state is unbounded, that the module is a transcription, and which section of
-  the source bounds it
+- **THEN** it says the state is bounded, by what, and what the bound is conditional on
 
-#### Scenario: An acceptor keeps one proposal per slot however many ballots command it
+#### Scenario: State does not grow with the slots handled
 
-- **WHEN** several ballots each get an acceptor to accept a proposal for the same slot
-- **THEN** the acceptor holds one proposal for that slot, carrying the highest of those ballots
+- **WHEN** a run decides many more slots than another, and enough members report their progress
+- **THEN** the state held by each process is bounded by the same figure in both, rather than growing
+  with the slots decided
 
-#### Scenario: A phase-one answer carries one proposal per slot
+#### Scenario: The bound is asserted over a run that actually collected
 
-- **WHEN** an acceptor answers a phase-one request after accepting proposals for some slots under
-  several ballots
-- **THEN** its answer carries at most one proposal per slot, and its size grows with the slots it
-  has accepted for rather than with the ballots the run has seen
+- **WHEN** a test asserts the bound
+- **THEN** it also asserts that collection happened and the watermark advanced, so that the bound is
+  not satisfied by a run in which nothing was ever collected
 
-#### Scenario: A proposal below the maximum is not kept
+### Requirement: The cost of a run is an identity, not an upper bound
 
-- **WHEN** an acceptor holding a proposal for a slot accepts a proposal for that slot under a
-  higher ballot
-- **THEN** the earlier proposal is not kept, and a later phase one learns only the higher one
+The messages a run puts on the wire SHALL be a stated function of the membership, the number of
+entries decided and the number of leadership changes, and that function SHALL be asserted rather
+than described.
 
-#### Scenario: Agreement survives the record of it being overwritten
+Phase one costs one request and one reply per acceptor **per leadership change**; phase two costs
+one request and one reply per acceptor **per entry**, and one decision to every other process. Phase
+one being amortised across every entry a leader decides is the whole difference between this
+capability and one consensus instance per entry, so it SHALL be visible in the assertion rather than
+folded into an average over a run.
 
-- **WHEN** a majority accepts a proposal for a slot, and a later ballot then overwrites that
-  proposal at one of them, so that no majority still holds it
-- **THEN** no other proposal is ever chosen for that slot
+An upper bound does not discharge this. A capability sending several times what it needs at a
+constant rate satisfies both "the send rate does not grow" and any bound loose enough to hold under
+retransmission, which is how sending three times too much went unnoticed.
+
+#### Scenario: A settled run costs exactly what the algorithm needs
+
+- **WHEN** leadership settles and a known number of entries is decided over a run that loses nothing
+- **THEN** the count of each message kind equals the stated function of the membership, the entries
+  and the leadership changes
+
+#### Scenario: Phase one is paid per leadership change and not per entry
+
+- **WHEN** one leader decides many entries
+- **THEN** the number of phase-one exchanges is a function of the leadership changes alone, and does
+  not grow with the entries decided
+
+### Requirement: Retransmission is timed against the delivery bound and prompted by the scope
+
+A request SHALL NOT be resent before the time in which an answer could have arrived has passed. The
+interval at which outstanding work is swept SHALL NOT by itself determine how often a request is
+resent.
+
+Retransmitting sooner than an answer can arrive spends messages on a fault that has not happened.
+Over a link that does not lose messages within a session, that is most of what a fixed tick does:
+the tick was a stubborn link's idiom, where the network may drop anything at any time, and this
+capability does not run over one.
+
+Where the link reports that a scope with a peer has been **established**, outstanding requests to
+that peer SHALL be resent at once, and only to that peer. A session ending is the only way this
+stack loses a message and the establishment that follows is the only moment a resend can succeed, so
+it is the event that recovery is owed to. Waiting out a timeout instead makes recovery slower than
+the information available, and it is why the timeout may otherwise be generous.
+
+The threshold SHALL exceed one round trip and SHALL remain below the point at which an attempt is
+escalated, and the module SHALL state both bounds. An escalation that fires before a retransmission
+has been tried restarts a phase for a message that was merely in flight.
+
+#### Scenario: Nothing is resent before an answer could have arrived
+
+- **WHEN** a request is outstanding for less than the time a round trip takes
+- **THEN** it is not resent, however often outstanding work is swept
+
+#### Scenario: A session establishment resends what that peer owes
+
+- **WHEN** a scope with a peer ends while a request to it is outstanding, and a scope with that peer
+  is then established
+- **THEN** the request is resent to that peer at once, and to no other peer
+
+#### Scenario: Recovery from a lost request does not wait out the timeout
+
+- **WHEN** a request is lost at a scope ending and a scope is established again well before the
+  retransmission threshold would elapse
+- **THEN** the exchange completes without waiting for the threshold
+
+### Requirement: A message a process addresses to itself is not a message
+
+Where this capability would send to the process it is running on, it SHALL invoke the handler
+directly rather than putting the message on the wire.
+
+The roles are co-located — one process holds both the acceptor and the leader — so a request from a
+leader to its own acceptor is a function call that the wire has no part in. Counting it as a message
+overstates what a deployment costs.
+
+It also removes a fault that cannot happen: a message on the wire can be lost when a scope ends, and
+a process cannot fail to deliver a message to itself. A run in which one is dropped is exercising
+something no deployment can do.
+
+#### Scenario: Nothing a process sends to itself reaches the wire
+
+- **WHEN** a run decides entries and changes leadership
+- **THEN** no message in the run is addressed by a process to itself
+
+#### Scenario: A process still acts on what it addresses to itself
+
+- **WHEN** a leader commands a slot and is itself one of the acceptors
+- **THEN** its own acceptor takes up the ballot and answers, and its answer counts toward the
+  majority exactly as a remote acceptor's would
+
+### Requirement: Leaders and acceptors collect what enough replicas have already applied
+
+Where a process learns that at least `f + 1` of the `2 f + 1` members have applied every decision up
+to some slot, it SHALL discard the state it holds for slots below that one: the proposals it holds
+as a leader, the pvalues it holds as an acceptor, and its record of which slots are decided.
+
+This is the source's §4.2. The state is unnecessary rather than unavoidable, and the reason is that
+discarding it moves the information rather than destroying it: "replicas can learn decisions, and
+the application state that results from those decisions, from one another". A slot whose decision
+`f + 1` replicas hold is one the consensus layer no longer has to be able to reconstruct.
+
+Members SHALL report how far they have applied on their own schedule, rather than only when they
+answer something. A process that is currently answering nothing is exactly the one whose progress
+the others most need to hear about, and a report carried on an existing reply would stop when the
+work did.
+
+#### Scenario: State below the watermark is discarded
+
+- **WHEN** at least `f + 1` members have applied every decision up to a slot, and have said so
+- **THEN** every process discards the proposals, accepted proposals and decision records it holds
+  for lower slots
+
+#### Scenario: State is not discarded before enough members have applied it
+
+- **WHEN** fewer than `f + 1` members have reported applying up to a slot
+- **THEN** nothing below that slot is discarded
+
+#### Scenario: Collection stalls, correctly, when too few members remain
+
+- **WHEN** `f` of `2 f + 1` members have crashed, leaving fewer than `f + 1` to report
+- **THEN** no collection happens, and this is the specified behaviour rather than a failure
+
+### Requirement: An acceptor says how far it has collected, and a leader skips below it
+
+An acceptor SHALL keep the slot below which it has discarded its accepted proposals, and SHALL
+report it in its answer to a phase-one request. A leader taking up a ballot SHALL NOT propose for
+any slot below the highest such value reported by the acceptors that answered it; it SHALL skip
+those slots.
+
+**This is the clause the safety of the collection rests on.** Before collection, an acceptor
+reporting nothing for a slot meant nothing had been accepted for it. Afterwards it means one of two
+things, and the reported slot is the only thing that tells them apart. The source is explicit that
+this is the hazard: "we must prevent other leaders from mistakenly concluding that the acceptors
+have not accepted any pvalues for the garbage-collected slots".
+
+A leader that read a collected slot as free would propose a command for a slot already decided, and
+could get it chosen — two commands chosen for one slot, which is what this capability's first
+requirement forbids.
+
+The **highest** value reported, not the lowest. A slot collected at any acceptor of the answering
+majority is a slot whose decision `f + 1` members hold, so it is settled whoever else still holds a
+pvalue for it; taking the lowest would be safe and would waste most of the collection.
+
+#### Scenario: A phase-one answer says how far the acceptor has collected
+
+- **WHEN** an acceptor that has discarded state below a slot answers a phase-one request
+- **THEN** its answer carries that slot
+
+#### Scenario: A leader does not propose for a collected slot
+
+- **WHEN** a leader takes up a ballot and an acceptor in its majority reports having collected below
+  some slot
+- **THEN** the leader proposes for no slot below that one, and starts no commander for one
+
+#### Scenario: Agreement holds across a collection
+
+- **WHEN** a proposal is chosen for a slot, every process's state for that slot is later collected,
+  and a new leader then takes up a higher ballot
+- **THEN** no different proposal is ever chosen for that slot
