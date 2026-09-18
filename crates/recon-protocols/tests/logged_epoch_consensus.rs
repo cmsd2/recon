@@ -56,10 +56,16 @@ fn first_index(s: &Sim<Lep>, f: impl Fn(&ProtoTraceEvent<Lep>) -> bool) -> Optio
 }
 
 fn is_accept_from(e: &ProtoTraceEvent<Lep>, node: NodeId) -> bool {
+    // Either kind: the claim is that this process *answered*, and a follower that is also the
+    // leader answers itself, which the simulator hands over rather than putting on the network.
     matches!(
         e,
         TraceEvent::Sent { from, msg: Wire::Reply(t), .. }
             if *from == node && matches!(t.msg, Reply::Accept)
+    ) || matches!(
+        e,
+        TraceEvent::HandedToSelf { node: n, msg: Wire::Reply(t), .. }
+            if *n == node && matches!(t.msg, Reply::Accept)
     )
 }
 
@@ -274,7 +280,25 @@ fn a_leader_crashing_partway_through_leaves_no_two_processes_holding_different_a
     for seed in 0..30u64 {
         let mut s = lossy(seed);
         s.command(E, Cmd::Propose(9));
-        s.run_for(Duration::from_millis(45));
+        // Crash the leader at the instant its fan-out is *partly* accepted, found by stepping one
+        // event at a time rather than by running for a duration guessed to land there. The
+        // duration this used to guess — 45 ms — was a function of the latency configuration, and
+        // it stopped landing the moment a leader's message to its own acceptor stopped taking a
+        // delivery bound. A state one event creates and the next destroys is searched for, not
+        // waited out.
+        let partly_accepted = |s: &Sim<Lep>| {
+            let n = [A, B, C, D]
+                .iter()
+                .filter_map(|n| s.protocol(*n))
+                .filter(|p| p.state().valts == EPOCH)
+                .count();
+            (1..4).contains(&n)
+        };
+        while !partly_accepted(&s) {
+            if !s.step() {
+                break;
+            }
+        }
         s.crash(E);
         settle(&mut s);
 

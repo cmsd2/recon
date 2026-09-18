@@ -436,8 +436,10 @@ fn recovery_reads_re_announces_and_re_broadcasts_with_nothing_in_between() {
         "the announcement is the very next thing"
     );
     assert!(
-        after[2..].iter().take(ALL.len()).all(|e| matches!(e, TraceEvent::Sent { from, .. }
-            if *from == A)),
+        after[2..].iter().take(ALL.len()).all(|e| {
+            matches!(e, TraceEvent::Sent { from, .. } if *from == A)
+                || matches!(e, TraceEvent::HandedToSelf { node, .. } if *node == A)
+        }),
         "and then it re-broadcast what was pending, still without handling anything"
     );
 

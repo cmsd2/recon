@@ -99,7 +99,7 @@ fn rb_a_repeat_neither_delivers_nor_relays() {
     // The first receipt delivers and relays; the other three must do neither.
     let mut s = rb_sim(9);
     s.run_for(Duration::from_millis(50));
-    let before = s.trace().send_count();
+    let before = s.trace().exchange_count();
     s.command(A, srb::Cmd::Broadcast(3));
     s.run_for(Duration::from_millis(500));
 
@@ -112,14 +112,17 @@ fn rb_a_repeat_neither_delivers_nor_relays() {
             .trace()
             .events()
             .iter()
-            .filter(|e| matches!(e, recon_sim::TraceEvent::Sent { from, .. } if *from == n))
+            .filter(|e| {
+                matches!(e, recon_sim::TraceEvent::Sent { from, .. } if *from == n)
+                    || matches!(e, recon_sim::TraceEvent::HandedToSelf { node, .. } if *node == n)
+            })
             .count();
         // A fans out once for the command and once more when its own copy comes back to it, as
         // eager reliable broadcast does; everyone else fans out once.
         let expected = if n == A { 2 * ALL.len() } else { ALL.len() };
         assert_eq!(sent, expected, "{n} relayed exactly once");
     }
-    assert_eq!(s.trace().send_count() - before, ALL.len() * (ALL.len() + 1));
+    assert_eq!(s.trace().exchange_count() - before, ALL.len() * (ALL.len() + 1));
 }
 
 #[test]

@@ -1,13 +1,43 @@
 //! The total-order log suite, written against the port.
 //!
 //! Every property here names [`TotalOrderLog`] and no implementation, which is what makes it one
-//! suite for the pair. What differs between the members is what survives a restart, and nothing
-//! else; that half is asserted where the fail-recovery member is.
+//! suite for all three. Two of them are the same algorithm in two failure models, and what differs
+//! between those is what survives a restart; that half is asserted where the fail-recovery member
+//! is. The third is Multi-Paxos, which is a different algorithm entirely.
+//!
+//! # What makes each property mean something against Multi-Paxos
+//!
+//! Written for two implementations that decide a whole batch per round in lock-step, and pointed
+//! afterwards at one that decides slots independently under a stable leader. A property that held
+//! structurally there can hold here by a different route, or vacuously, so each was checked rather
+//! than assumed:
+//!
+//! - `every_process_sees_one_sequence`, `the_same_sequence_at_every_process` — the floors are that
+//!   something was ordered and that *everything* was. Both bind: five appends must all appear.
+//! - `everything_appended_is_ordered_everywhere` — stronger here than for the pair. An append at a
+//!   process that does not lead is forwarded to the one that does, so this is also the assertion
+//!   that colocation delivers.
+//! - `nothing_invented_and_nothing_twice` — deduplicates on the *value*, which is only sound
+//!   because the two appends it makes carry different values. Multi-Paxos would order two appends
+//!   of one value twice, deliberately: see `two_appends_of_the_same_value_take_two_positions`.
+//! - `a_read_returns_the_sequence_from_a_position`, `reads_are_prefixes_of_one_another` — the
+//!   read is served from the process's own copy, and here that copy can lag by a whole slot rather
+//!   than by a round. `tests/multi_paxos_replica.rs` drives the lag deliberately.
+//! - `the_run_contained_overlapping_operations` — still the half that keeps a total order from
+//!   being satisfied by a run with nothing in it. Three appends at three processes begin before any
+//!   of them is ordered, which is what it asserts.
+//! - `the_send_rate_does_not_grow` — the one whose route differs most. For the pair it is the
+//!   stubborn children retransmitting a fixed set; here it is that the replica's re-proposal sweep
+//!   finds nothing once every slot has decided. That is the mechanism most likely to make a rate
+//!   grow, so the property is doing more work here than there.
+//! - `the_survivors_keep_ordering_after_a_crash` — also stronger. The process it crashes is the
+//!   highest rank, which is the one Ω trusts, so this is a leadership handover as well as a crash.
 
 use core::time::Duration;
 use recon_core::{NodeId, Position};
 use recon_protocols::consensus_based_total_order_broadcast::ConsensusBasedTotalOrderBroadcast;
 use recon_protocols::logged_uniform_total_order_broadcast::LoggedUniformTotalOrderBroadcast;
+use recon_protocols::multi_paxos_replica::MultiPaxosReplica;
 use recon_protocols::total_order_log::{LogInd, TotalOrderLog};
 use recon_sim::{Config, Sim};
 
@@ -16,6 +46,7 @@ use common::{A, ALL, B, BOUND, C, D, E, assert_send_rate_flat, timing};
 
 type Tob = ConsensusBasedTotalOrderBroadcast<u32>;
 type Lutob = LoggedUniformTotalOrderBroadcast<u32>;
+type Mpr = MultiPaxosReplica<u32>;
 
 // The step budget is raised for the same reason the fail-recovery member's own suite raises it:
 // a transcription's stubborn children retransmit for ever, the crash property runs two settle
@@ -28,6 +59,17 @@ fn crash_stop(seed: u64) -> Sim<Tob> {
 fn fail_recovery(seed: u64) -> Sim<Lutob> {
     let config = Config::default().seed(seed).synchronous(BOUND).max_steps(10_000_000);
     Sim::new(config, &ALL, |me| Lutob::new(me, ALL, timing()))
+}
+
+/// The third implementation, and the one whose difference from the pair is the point: it pays one
+/// consensus per *leader*, not per round, so slots are decided independently and out of order where
+/// the other two decide a whole batch in lock-step. It runs over a session link, which is what the
+/// Synod protocol beneath defaults to, so the sessions have to be delivered before the run starts.
+fn multi_paxos(seed: u64) -> Sim<Mpr> {
+    let config = Config::default().seed(seed).synchronous(BOUND).max_steps(10_000_000).sessions();
+    let mut s = Sim::new(config, &ALL, |me| Mpr::new(me, ALL, timing()));
+    s.deliver_session_events();
+    s
 }
 
 fn settle<P: Log>(s: &mut Sim<P>) {
@@ -311,6 +353,7 @@ macro_rules! suite {
 
 suite!(crash_stop_member, crash_stop);
 suite!(fail_recovery_member, fail_recovery);
+suite!(multi_paxos_member, multi_paxos);
 
 // ------------------------------------------------------------------ what only one member shows
 
@@ -352,4 +395,51 @@ fn under_synchrony_no_process_runs_ahead_of_another() {
     );
     assert!(s.at(A).round() > 3, "only {} rounds ran", s.at(A).round() - 1);
     assert_eq!(ordered_at(&s, A).len(), ALL.len());
+}
+
+/// **Several slots are in flight at once, and none of their decisions arrives out of order.**
+///
+/// The difference this member brings to the port is that it pays one consensus per *leader* rather
+/// than one per round: the pair above propose a batch, wait, and propose the next, so exactly one
+/// consensus runs at a time and every process runs the same one. Here six appends become six
+/// commanders under one ballot, all outstanding together — which is measured below, because it is
+/// the property the other two cannot have.
+///
+/// What does **not** follow, and the reason this test is written rather than assumed: the replica's
+/// `while ∃c' : ⟨slot_out, c'⟩ ∈ decisions` loop exists to hold a decision for a slot above
+/// `slot_out`, and nothing in this stack produces one. The link beneath is a session link, whose
+/// SL1 delivers in order within a session, so a leader that announces slots 1 to 6 in order has
+/// them arrive in order. Out-of-order arrival needs a session ending or a change of leader in the
+/// middle, and `tests/multi_paxos_replica.rs` drives that by hand rather than waiting for a
+/// schedule to produce it.
+///
+/// So this asserts the concurrency and the in-order arrival together. If the second half ever
+/// fails, decisions have begun arriving out of order in an ordinary run and the shared properties
+/// above are exercising a schedule they were not before. Read this before deleting it.
+#[test]
+fn multi_paxos_runs_several_slots_at_once_and_still_hears_them_in_order() {
+    let mut s = multi_paxos(21);
+    for i in 0..6u32 {
+        s.command(A, Mpr::append(i));
+    }
+
+    let mut most_at_once = 0;
+    for _ in 0..200_000 {
+        if !s.step() {
+            break;
+        }
+        for n in ALL {
+            let r = s.at(n);
+            most_at_once = most_at_once.max(r.outstanding());
+            assert_eq!(
+                r.decisions_held() as u64,
+                r.slot_out() - 1,
+                "{n} is holding a decision for a slot above `slot_out` — see this test's header",
+            );
+        }
+    }
+    settle(&mut s);
+
+    assert!(most_at_once > 1, "only {most_at_once} slot in flight, so this is the pair's shape");
+    assert_eq!(ordered_at(&s, A).len(), 6, "and all of it must still be ordered");
 }

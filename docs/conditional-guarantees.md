@@ -452,8 +452,28 @@ existed.** A scope *beginning* travels the same path: `SessionEvent::Established
 resend clause fires on, and it is the only event on which a resend can succeed. Definition 2 is
 written in terms of endings because an ending is what threatens a guarantee, but the port has to
 carry both — naming a loss with no event on which to repair it would be naming a problem and
-withholding the answer. See `session_uniform_reliable_broadcast`, whose added clause is triggered
-by an establishment and by nothing else.
+withholding the answer.
+
+**The clause this used to point at was deleted, and nobody noticed the behaviour go with it.** The
+example here was `session_uniform_reliable_broadcast`, "whose added clause is triggered by an
+establishment and by nothing else". That module is gone — it is one of the four `session_*`
+broadcasts collapsed into link-parameterised ones — and the resend went with it. What was left was
+a document naming an obligation and a repository in which **every** session-aware module
+propagated `Established` upward and did nothing else with it. The gap survived because propagating
+is visible and acting is not: a missing resend costs latency, not correctness, so no test failed.
+
+`multi_paxos_synod` is the module that has the clause now, and it is worth reading for what the
+obligation actually amounts to. Its leader resends an unanswered `p1a` or `p2a` to the peer an
+establishment names, and to that peer alone — a fan-out on every establishment would cost
+membership squared as a cluster reconnects, for peers owed nothing. The alternative it replaces is
+a timer: resend everything outstanding every tick and hope. That is a *stubborn link's* idiom, and
+a module over a session link that keeps it is paying for a fault the session has already ruled out
+while ignoring the one event that says the fault is over. Measured, it cost that module 3.6× the
+messages the algorithm needs.
+
+The general form, for the modules that still owe it: **an establishment is not merely news to pass
+on. It is the moment the layer's own repair becomes possible, and a layer that has something
+outstanding with that peer owes the repair then rather than on its next timer.**
 
 **The cost was the ceremony predicted.** A fifth associated type on every protocol and a
 `type Scope = Infallible;` line on every textbook abstraction — but no fourth mapper, and no dead

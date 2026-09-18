@@ -736,6 +736,27 @@ where
     /// Apply the network model to one outgoing message.
     fn transmit(&mut self, from: NodeId, to: NodeId, msg: P::Msg) {
         let at = self.now;
+
+        // A message a process addressed to itself crosses no wire. A driver is what turns a request
+        // to send into a packet, and a packet addressed to the process it came from is a hand-off
+        // between two roles of one state machine — `multi_paxos_synod` holds both a leader and an
+        // acceptor, and the leader reaching its own acceptor is a call. So it is delivered at this
+        // instant, with no latency and no fault applied, and recorded as its own kind of event
+        // rather than as a send.
+        //
+        // This narrows what can be lost and never widens it: a hand-off cannot be delayed, dropped,
+        // duplicated, reordered, or discarded by a scope ending, and there is no session between a
+        // process and itself to end. It is *delivered* rather than executed here, as every other
+        // effect is, so no handler ever runs inside another handler's effect loop.
+        if from == to {
+            if self.stopped(from) {
+                return;
+            }
+            self.record(TraceEvent::HandedToSelf { at, node: from, msg: msg.clone() });
+            self.schedule(at, Scheduled::Deliver { from, to, msg });
+            return;
+        }
+
         self.record(TraceEvent::Sent { at, from, to, msg: msg.clone() });
 
         if self.stopped(from) {
