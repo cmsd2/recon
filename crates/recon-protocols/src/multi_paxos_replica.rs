@@ -2,7 +2,9 @@
 //!
 //! **Status: implementation. Space: the bookkeeping is bounded — `decisions` and `performed` by a
 //! retention window, `requests` and `proposals` by `WINDOW` — and the ordered sequence is
-//! deliberately not, because it is the data rather than the bookkeeping.**
+//! deliberately not, because it is the data rather than the bookkeeping. On disk: one appended
+//! record per applied entry, and one rewritten record holding the incarnation and the consensus
+//! core's own; the sequence grows with the run, and a snapshot is what would bound it.**
 //!
 //! §4.2 is applied, and it is worth being clear which half. The section separates state that is
 //! *unnecessary* — the leader's and acceptor's, collected below a watermark once `f + 1` replicas
@@ -225,20 +227,45 @@
 //! own indications: its redundancy is the child's, and the child's is the other processes rather
 //! than anything that outlives a session. See `docs/conditional-guarantees.md`.
 //!
-//! Crash-stop, and one step stronger than the child's. `MultiPaxosSynod` keeps nothing durably, so
-//! a returning process has forgotten which ballots it took up; this layer adds that a returning
-//! process has forgotten its *sequence*, and would answer a read with a shorter one than it had
-//! already served. A total order that shortens is not a total order, so a crashed process here is
-//! crashed for good. §4.3 of the source is what changes it, and it is not this change.
+//! # §4.3: the sequence survives a restart
+//!
+//! A process that returns with every write its storage acknowledged resumes the sequence it had
+//! served: each applied entry is appended to the durable sequence **before** `Ordered` is
+//! indicated, so a read after a restart extends what was served before it and never shortens it.
+//! The consensus core's record is a named part of this one — a [`Slot`] for its rewritten half and a
+//! [`SeqSlot`] for its appended accepts — so there is one record and one sequence beneath both, a
+//! crash cannot land between the parent's write and the child's, and the order between an applied
+//! entry and an accept is the store's rather than one reconstructed at recovery.
+//!
+//! Recovery derives `slot_out` from the last applied entry, rebuilds the duplicate filter and
+//! `decisions` from the retained tail, writes a new **incarnation**, and — once the core beneath
+//! reports that every member has answered its announcement — asks a peer for what was decided
+//! meanwhile, through the catch-up §4.2 already needed. A slot the replica *skipped* as a duplicate
+//! after its last applied entry leaves no record, so `slot_out` may come back low by that many;
+//! the decisions for those slots are fetched again and skipped again, within the retention window,
+//! which is stated rather than fixed because a record per skip would be a write per duplicate.
+//!
+//! **The request identifier is scoped by the incarnation.** `cid` is `(incarnation, seq)`, where
+//! the incarnation is written once at each recovery and `seq` is a volatile counter. The append
+//! path carries no write for the identifier, and a recovered replica cannot mint one a peer's
+//! duplicate filter has seen — which would drop its genuinely new append as a repeat. This is the
+//! audit's recurring bug, a durable filter keyed by a volatile counter, closed here.
+//!
+//! What this layer cannot bridge, it propagates: a storage scope ending raised by the core beneath
+//! — a member witnessed a write this process no longer has — is raised again as
+//! [`Ind::StorageScopeEnded`], and this replica orders nothing further. A gap larger than any peer
+//! retains is the snapshot case, outside the paper and named as a later change.
 
 use core::time::Duration;
-use recon_core::{Child, NodeId, Position, ProtoCx, Protocol, Time, TimerId};
+use recon_core::{
+    Child, NodeId, Position, ProtoCx, Protocol, SeqSlot, Slot as MetaSlot, Time, TimerId, slot,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::Timing;
 use crate::link::{Boundary, VolatileLink};
-use crate::multi_paxos_synod::{self as synod, MultiPaxosSynod, Slot, SynodMsg};
+use crate::multi_paxos_synod::{self as synod, Accepted, MultiPaxosSynod, Slot, SynodMsg};
 use crate::session_link::SessionLink;
 use crate::total_order_log::{LogInd, TotalOrderLog};
 
@@ -263,20 +290,66 @@ pub const WINDOW: Slot = 8;
 /// skips a command it has already applied, and without `cid` a client appending `7` twice would see
 /// one entry.
 ///
-/// **`cid`'s scope is this incarnation.** It is a counter in volatile state, exactly as the Synod
-/// ballot's round is, and a restarted process re-mints values it has already used. A request
-/// carrying a reused `⟨from, cid⟩` can be taken for one already applied and dropped, which is the
-/// identity rule's worked example: an identifier that crosses the wire outlives the handler that
-/// minted it, so its generator is state with a scope, and this one survives nothing. Making it
-/// durable is part of the fail-recovery change, not this one.
+/// **`cid` is scoped by a durable incarnation.** An identifier that crosses the wire outlives the
+/// handler that minted it, so its generator is state with a scope; a volatile counter alone would
+/// be re-minted after a restart and a genuinely new request taken for one already applied. The
+/// incarnation is written once per recovery — see the module documentation — and the counter within
+/// it costs no write at all.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Command<V> {
     /// `κ` — the process that appended it.
     pub from: NodeId,
-    /// `cid` — which request of that process's this is. Scope: this incarnation.
-    pub cid: u64,
+    /// `cid` — which request of that process's this is, across its restarts.
+    pub cid: RequestId,
     /// `op` — what the command says. A value rather than an operation; see the departures.
     pub value: V,
+}
+
+/// `cid`, as `⟨incarnation, seq⟩`: the incarnation is durable and written once per recovery, the
+/// sequence number within it is volatile. Ordered lexicographically, so a later incarnation's
+/// requests sort after an earlier one's, which nothing here relies on but which reads correctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+pub struct RequestId {
+    pub incarnation: u64,
+    pub seq: u64,
+}
+
+/// This replica's rewritten record — §4.3: its incarnation, and the consensus core's record as a
+/// named part of it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Durable {
+    /// Written once per recovery, so that a request identifier is never minted twice.
+    pub incarnation: u64,
+    /// The core's slot. Written by the core, through [`synod_slot`], and carried across untouched
+    /// when this layer writes its own part.
+    pub synod: Option<synod::Durable>,
+}
+
+/// One record in the durable sequence: an entry this replica applied, or an accept the core
+/// beneath made. **One sequence**, so the order between them is the store's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Entry<V> {
+    /// `perform` applied `command` at `slot`. Appended before `Ordered` is indicated.
+    Applied { slot: Slot, command: Command<V> },
+    /// The core's accept record, in this layer's vocabulary.
+    Synod(Accepted<Command<V>>),
+}
+
+/// Where the core's rewritten record sits inside this one.
+pub fn synod_slot() -> MetaSlot<Durable, synod::Durable> {
+    slot!(Durable, synod)
+}
+
+fn project_synod<V>(entry: &Entry<V>) -> Option<&Accepted<Command<V>>> {
+    match entry {
+        Entry::Synod(accepted) => Some(accepted),
+        Entry::Applied { .. } => None,
+    }
+}
+
+/// Where the core's accept records sit inside this sequence.
+pub fn synod_entries<V>() -> SeqSlot<Entry<V>, Accepted<Command<V>>> {
+    SeqSlot { wrap: Entry::Synod, project: project_synod }
 }
 
 /// What the Synod protocol beneath carries for this layer.
@@ -310,6 +383,9 @@ pub enum Ind<V> {
     SessionEnded { peer: NodeId, epoch: u64 },
     /// A scope with `peer` is in force at `epoch`.
     SessionEstablished { peer: NodeId, epoch: u64 },
+    /// `peer`'s storage scope ended: a member witnessed a write it no longer has. If `peer` is this
+    /// process, it has stopped. Propagated from the core beneath, never absorbed.
+    StorageScopeEnded { peer: NodeId },
 }
 
 /// A totally ordered log, built on Multi-Paxos: one consensus per slot, under a stable leader that
@@ -336,10 +412,18 @@ pub struct MultiPaxosReplica<V: Clone + Ord, L: VolatileLink<Carried<V>> = Sessi
     sequence: Vec<Command<V>>,
     /// `{decisions[s] : s < slot_out}`, indexed. See the departures.
     performed: BTreeSet<Command<V>>,
-    /// `cid`. Volatile, scope this incarnation — see [`Command`].
-    cid: u64,
+    /// `cid`'s durable half, written once per recovery — see [`RequestId`].
+    incarnation: u64,
+    /// `cid`'s volatile half, within the incarnation.
+    seq: u64,
     /// `WINDOW`.
     window: Slot,
+    /// Recovered, and not yet told by the core beneath that every member has answered; or told,
+    /// and still asking a peer for what was decided meanwhile.
+    catching_up: bool,
+    /// The core beneath reported that a member witnessed a write this process no longer has. This
+    /// replica orders nothing further.
+    stopped: bool,
 
     // ---- the fourth liveness violation ----
     /// When each outstanding proposal was last handed to the child.
@@ -385,8 +469,11 @@ impl<V: Clone + Ord> MultiPaxosReplica<V> {
             decisions: BTreeMap::new(),
             sequence: Vec::new(),
             performed: BTreeSet::new(),
-            cid: 0,
+            incarnation: 0,
+            seq: 0,
             window: WINDOW,
+            catching_up: false,
+            stopped: false,
             proposed_at: BTreeMap::new(),
             repropose_after: timing.detect_after * 3,
             sweep_every: timing.retransmit,
@@ -480,6 +567,16 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
         &self.synod
     }
 
+    /// The incarnation this replica's request identifiers carry. Zero until a first recovery.
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    /// Whether this replica has stopped: the core beneath reported its storage scope ended.
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
+    }
+
     /// `function propose()`, minus the sending: move what it can from `requests` into `proposals`,
     /// and hand back what the caller must give the child.
     ///
@@ -501,7 +598,7 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
     /// stepped over without spending a request. And note the `while` guard is R5.
     fn transfer(&mut self, now: Time, cx: &mut ProtoCx<'_, Self>) -> Vec<(Slot, Command<V>)> {
         let mut out = Vec::new();
-        while !self.requests.is_empty() {
+        while !self.stopped && !self.requests.is_empty() {
             if self.slot_in >= self.slot_out + self.window {
                 // R5 refusing to go further. Nothing at all reaches the trace from this: a replica
                 // holding requests it may not propose for looks exactly like an idle one.
@@ -542,6 +639,10 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
         }
         let position = Position(self.sequence.len() as u64);
         let Command { from, value, .. } = command.clone();
+        // §4.3: the entry is durable before the indication that reveals it. In the handler's own
+        // text, and one appended record — the sequence is the data, and a rewrite of it per entry
+        // would be the `O(n²)` the store's own documentation warns of.
+        cx.storage().append(Entry::Applied { slot: self.slot_out, command: command.clone() });
         self.sequence.push(command.clone());
         self.performed.insert(command);
         // The page updates `state` and `slot_out` atomically and only then answers. Here the
@@ -568,6 +669,9 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
     /// The `while` is why a decision arriving out of order is held rather than dropped: slot 4
     /// deciding before slot 3 leaves `slot_out` at 3, and slot 3's decision then drains both.
     fn decided(&mut self, slot: Slot, command: Command<V>, cx: &mut ProtoCx<'_, Self>) {
+        if self.stopped {
+            return;
+        }
         // `decisions := decisions ∪ {⟨s, c⟩}` — a union, so a repeat writes nothing. The child
         // announces a decision again whenever a later ballot re-commands the slot, and answers a
         // re-proposal for a decided one deliberately; R1 makes both the same command.
@@ -721,6 +825,33 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
                     synod::Ind::SessionEstablished { peer, epoch } => {
                         cx.indicate(Ind::SessionEstablished { peer, epoch });
                     }
+                    // §4.3: every member answered, none contradicted. Now ask for what was decided
+                    // while this process was down — its own sequence says how far it got, and a
+                    // peer's `decisions` is the one place the rest still is.
+                    synod::Ind::Recovered => {
+                        self.catching_up = true;
+                        extra.push(synod::Cmd::CatchUp { from_slot: self.slot_out });
+                    }
+                    // Nobody has reported being ahead of where this replica asked from. With no
+                    // reports at all that says nothing and the next sweep asks again; with any, it
+                    // says the catch-up is done.
+                    synod::Ind::NobodyAhead { from_slot } => {
+                        if from_slot >= self.slot_out && self.synod.reports_held() > 1 {
+                            self.catching_up = false;
+                        }
+                    }
+                    // Propagated, never absorbed. If it is this process, it orders nothing further:
+                    // a sequence served under an identity whose storage lied is one nobody should
+                    // read from again.
+                    synod::Ind::StorageScopeEnded { peer } => {
+                        if peer == self.me {
+                            self.stopped = true;
+                            self.requests.clear();
+                            self.proposals.clear();
+                            self.proposed_at.clear();
+                        }
+                        cx.indicate(Ind::StorageScopeEnded { peer });
+                    }
                 }
             }
             // `propose();`
@@ -735,7 +866,13 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
                 break;
             }
             for cmd in outgoing {
-                let mut inds = self.synod.run(cx, |m| m, |s, ccx| s.on_cmd(cmd, ccx));
+                let mut inds = self.synod.run_appending(
+                    cx,
+                    |m| m,
+                    synod_slot(),
+                    synod_entries(),
+                    |s, ccx| s.on_cmd(cmd, ccx),
+                );
                 pending.append(&mut inds);
                 self.synod.reclaim(inds);
             }
@@ -753,8 +890,10 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> MultiPaxosReplica<V, L> {
         cx: &mut ProtoCx<'_, Self>,
         f: impl FnOnce(&mut Synod<V, L>, &mut ProtoCx<'_, Synod<V, L>>),
     ) {
-        // The wrap is the identity: this layer adds no header, so its wire is the child's.
-        let inds = self.synod.run(cx, |m| m, f);
+        // The wrap is the identity: this layer adds no header, so its wire is the child's. The
+        // core's record is a slot of this one and its accepts go into this sequence: one record,
+        // one sequence, one store beneath both.
+        let inds = self.synod.run_appending(cx, |m| m, synod_slot(), synod_entries(), f);
         self.pump(inds, cx, Vec::new());
     }
 }
@@ -767,17 +906,23 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> Protocol for MultiPaxosReplica
     /// Whatever the link beneath the child is conditional on. This layer bridges none of it.
     type Scope = <Synod<V, L> as Protocol>::Scope;
     type Note = crate::Note;
-    /// Keeps nothing durably, which is what makes the crash-stop boundary in the module
-    /// documentation the one that applies. §4.3 is the change that alters it.
-    type Meta = core::convert::Infallible;
-    type Entry = core::convert::Infallible;
+    /// The incarnation, and the core's record as a named part — §4.3.
+    type Meta = Durable;
+    /// The applied sequence, with the core's accepts in the same order.
+    type Entry = Entry<V>;
 
     fn on_cmd(&mut self, cmd: Cmd<V>, cx: &mut ProtoCx<'_, Self>) {
         match cmd {
             // `case ⟨request, c⟩ : requests := requests ∪ {c};` then `propose()`.
             Cmd::Append(value) => {
-                let command = Command { from: self.me, cid: self.cid, value };
-                self.cid += 1;
+                if self.stopped {
+                    // Nothing at all reaches the trace from a dropped append, so it is narrated.
+                    cx.note(crate::Note::AnswerWithheld { from: self.me });
+                    return;
+                }
+                let cid = RequestId { incarnation: self.incarnation, seq: self.seq };
+                let command = Command { from: self.me, cid, value };
+                self.seq += 1;
                 self.requests.push_back(command);
                 self.pump(Vec::new(), cx, Vec::new());
             }
@@ -804,11 +949,16 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> Protocol for MultiPaxosReplica
         }
         self.arm(cx);
         self.maybe_report(cx);
-        let due: Vec<synod::Cmd<Command<V>>> = self
+        let mut due: Vec<synod::Cmd<Command<V>>> = self
             .resweep(cx)
             .into_iter()
             .map(|(slot, command)| synod::Cmd::Propose { slot, command })
             .collect();
+        if self.catching_up {
+            // Ask again each sweep until a peer has been asked and nobody is ahead: the first ask
+            // after a recovery usually precedes any report, and the core can name no peer to ask.
+            due.push(synod::Cmd::CatchUp { from_slot: self.slot_out });
+        }
         self.pump(Vec::new(), cx, due);
     }
 
@@ -818,6 +968,45 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> Protocol for MultiPaxosReplica
     fn on_init(&mut self, cx: &mut ProtoCx<'_, Self>) {
         self.arm(cx);
         self.through_synod(cx, |s, ccx| s.on_init(ccx));
+    }
+
+    /// `⟨ Recovery ⟩` — §4.3. Read the record, write the new incarnation with the core's part carried
+    /// across untouched, fold the applied entries back into the sequence, and hand the core its own
+    /// recovery. The catch-up waits for the core's [`synod::Ind::Recovered`]: a process about to be
+    /// told its storage lied should not be teaching or learning under that identity.
+    fn on_recovery(&mut self, cx: &mut ProtoCx<'_, Self>) {
+        let held = cx.storage().get().cloned();
+        self.incarnation = held.as_ref().map_or(0, |h| h.incarnation) + 1;
+        // One write, this layer's own part changed and the child's slot preserved — the mirror of
+        // what the slot does for the child's write.
+        cx.storage()
+            .set(Durable { incarnation: self.incarnation, synod: held.and_then(|h| h.synod) });
+
+        // The sequence, from the records. `slot_out` is one past the last applied slot; a slot
+        // skipped as a duplicate after it leaves no record, and the module documentation says what
+        // that costs.
+        let applied: Vec<(Slot, Command<V>)> = cx
+            .storage()
+            .read_from(Position::START)
+            .into_iter()
+            .filter_map(|e| match e {
+                Entry::Applied { slot, command } => Some((*slot, command.clone())),
+                Entry::Synod(_) => None,
+            })
+            .collect();
+        for (slot, command) in applied {
+            self.sequence.push(command.clone());
+            self.performed.insert(command.clone());
+            self.decisions.insert(slot, command);
+            self.slot_out = slot + 1;
+        }
+        self.slot_in = self.slot_out;
+        // The duplicate filter and `decisions` are bounded by the retention window, on recovery as
+        // at any other time.
+        self.forget_below();
+
+        self.arm(cx);
+        self.through_synod(cx, |s, ccx| s.on_recovery(ccx));
     }
 
     /// Hand the boundary to the child, which knows what it means. Leaving it to the trait's default
@@ -844,6 +1033,7 @@ impl<V: Clone + Ord, L: VolatileLink<Carried<V>>> TotalOrderLog<V> for MultiPaxo
             Ind::SessionEstablished { peer, epoch } => {
                 LogInd::Boundary(Boundary::Established { peer, epoch })
             }
+            Ind::StorageScopeEnded { peer } => LogInd::StorageScopeEnded { peer },
         }
     }
 }

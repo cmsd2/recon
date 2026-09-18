@@ -291,8 +291,11 @@ obligation. Membership, as of 2026-09:
 
 - **In**: the gossip pair, `probabilistic_broadcast` and `lazy_probabilistic_broadcast`; and
   Multi-Paxos, both halves — `multi_paxos_synod` and `multi_paxos_replica`. Multi-Paxos joined by
-  applying the survey's own §4.1 and §4.2, so it is in the set *and* faithful to its page; what it
-  still lacks is durability, which is §4.3 and a different obligation.
+  applying the survey's own §4.1 and §4.2, so it is in the set *and* faithful to its page, and §4.3
+  makes both halves fail-recovery: a process that returns with its acknowledged writes is slow, not
+  crashed, and one that lost an acknowledged write is detected and stops. What Multi-Paxos still
+  lacks is a snapshot to bound the durable log and reconfiguration to replace a dead member, each a
+  later change.
 - **Out**: single-instance Paxos and everything beneath it that exists to build it — epoch-change,
   epoch consensus, the logged variants. They are the book's stepping stones and are kept faithful
   to the page, not tuned. Stubborn links are academic; nothing in the real-world set runs over one.

@@ -31,6 +31,15 @@ pub trait Store<Meta, Entry> {
     fn read_from(&self, from: Position) -> Vec<&Entry>;
     /// One past the last entry.
     fn end(&self) -> Position;
+    /// How many writes — replacements and appends together — have returned through this store.
+    ///
+    /// Monotone within an incarnation, and it survives a restart with what was written, so it is
+    /// what a process can say to a peer about its own storage: "this is how much I have kept". A
+    /// peer that has seen a higher figure has seen a write this process no longer has. A property of
+    /// the store rather than of any protocol, which is why it is here and not reconstructed by each
+    /// protocol that needs it — that would be a counter in every metadata record and a rewrite per
+    /// append.
+    fn writes(&self) -> u64;
 }
 
 /// What a child that keeps nothing durably is handed.
@@ -61,6 +70,10 @@ impl Store<Infallible, Infallible> for NoStore {
 
     fn end(&self) -> Position {
         Position::START
+    }
+
+    fn writes(&self) -> u64 {
+        0
     }
 }
 
@@ -193,6 +206,11 @@ impl<Parent, Child, En> Store<Child, Infallible> for SlotStore<'_, Parent, Child
     fn end(&self) -> Position {
         Position::START
     }
+
+    /// The parent's: there is one store beneath both, and the child's writes are its parent's.
+    fn writes(&self) -> u64 {
+        self.parent.writes()
+    }
 }
 
 /// Where a child's appended entries live inside its parent's sequence.
@@ -301,6 +319,10 @@ impl<Parent, Child, K, En> Store<Child, Infallible> for KeyedSlotStore<'_, Paren
     fn end(&self) -> Position {
         Position::START
     }
+
+    fn writes(&self) -> u64 {
+        self.parent.writes()
+    }
 }
 
 /// What a child that keeps metadata **and** appends is handed: both halves of its parent's record,
@@ -332,18 +354,39 @@ impl<Parent, Child, En, CEn> Store<Child, CEn> for FullSlotStore<'_, Parent, Chi
     fn end(&self) -> Position {
         self.parent.end()
     }
+
+    fn writes(&self) -> u64 {
+        self.parent.writes()
+    }
 }
 
 /// A store held in memory: the simulator's, and a test's.
+///
+/// Every write is journaled as what it displaced, so that the last `n` writes can be taken back
+/// in order — [`MemStore::truncate`], which is how the simulator models a disk that acknowledged
+/// what it had not kept. The journal is what a file's dead records are: the metadata values a
+/// later write replaced. It grows with the writes a run makes, exactly as an uncompacted file
+/// would, and a simulator run is short enough that nothing here compacts it.
 #[derive(Debug, Clone)]
 pub struct MemStore<Meta, Entry> {
     meta: Option<Meta>,
     entries: Vec<Entry>,
+    /// One record per write that returned, newest last: what undoing it restores.
+    undo: Vec<Undo<Meta>>,
+}
+
+/// What taking one write back restores.
+#[derive(Debug, Clone)]
+enum Undo<Meta> {
+    /// A replacement: the value it replaced, `None` if there was none.
+    Set(Option<Meta>),
+    /// An append: the last entry goes.
+    Append,
 }
 
 impl<Meta, Entry> Default for MemStore<Meta, Entry> {
     fn default() -> Self {
-        MemStore { meta: None, entries: Vec::new() }
+        MemStore { meta: None, entries: Vec::new(), undo: Vec::new() }
     }
 }
 
@@ -356,6 +399,25 @@ impl<Meta, Entry> MemStore<Meta, Entry> {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    /// Take back the last `n` writes, newest first, as a disk that acknowledged them and then lost
+    /// them would. What remains is a valid earlier state: whole values, a prefix of the sequence,
+    /// and a count that says nothing was lost. Returns how many were actually taken back, which is
+    /// fewer than `n` only if fewer had been made.
+    pub fn truncate(&mut self, n: u64) -> u64 {
+        let mut taken = 0;
+        while taken < n {
+            match self.undo.pop() {
+                Some(Undo::Set(previous)) => self.meta = previous,
+                Some(Undo::Append) => {
+                    self.entries.pop();
+                }
+                None => break,
+            }
+            taken += 1;
+        }
+        taken
+    }
 }
 
 impl<Meta, Entry> Store<Meta, Entry> for MemStore<Meta, Entry> {
@@ -364,12 +426,14 @@ impl<Meta, Entry> Store<Meta, Entry> for MemStore<Meta, Entry> {
     }
 
     fn set(&mut self, meta: Meta) {
-        self.meta = Some(meta);
+        let previous = self.meta.replace(meta);
+        self.undo.push(Undo::Set(previous));
     }
 
     fn append(&mut self, entry: Entry) -> Position {
         let at = Position(self.entries.len() as u64);
         self.entries.push(entry);
+        self.undo.push(Undo::Append);
         at
     }
 
@@ -379,5 +443,9 @@ impl<Meta, Entry> Store<Meta, Entry> for MemStore<Meta, Entry> {
 
     fn end(&self) -> Position {
         Position(self.entries.len() as u64)
+    }
+
+    fn writes(&self) -> u64 {
+        self.undo.len() as u64
     }
 }

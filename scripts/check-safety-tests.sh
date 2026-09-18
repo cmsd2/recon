@@ -29,6 +29,12 @@
 #                                 slot means one of two things and only the watermark tells them
 #                                 apart. Reading it as free puts a second command up for a slot
 #                                 already decided.
+#   synod-vote-before-answered    a recovered process answers phase one and phase two at once,
+#                                 rather than waiting for every member to answer its announcement.
+#                                 §4.3: a process whose disk silently lost an acknowledged write
+#                                 would then vote with a promise it no longer holds, and where its
+#                                 stale vote lands in the intersection of two majorities the slot
+#                                 splits. The wait is what turns a lost write into a detected one.
 #
 # Registered per mutation rather than in one list, because the two are evidence for different
 # clauses and a test that cannot detect one may be perfectly good evidence for the other. What the
@@ -134,9 +140,22 @@ a_leader_does_not_propose_for_a_slot_an_acceptor_has_collected
 NAMES
 )
 
+# Every test that must go red when a recovered process votes before every member has answered.
+#
+# The wait, not detection, is what these pin. `a_detected_process_does_not_break_agreement` is
+# deliberately absent: a witness still catches the truncated process and stops it whether or not it
+# waited, so that test survives the mutation — it is evidence for detection, registered elsewhere,
+# not for the wait. What the mutation actually removes is the learner state, and the test below
+# reads it directly: a process kept a learner by a member gone for good must not be voting.
+REGISTERED_vote_before_answered=$(cat <<'NAMES'
+a_member_gone_for_good_keeps_a_recovered_process_a_learner
+NAMES
+)
+
 audit synod-ignore-pmax "$REGISTERED_ignore_pmax"
 audit synod-accept-below-promise "$REGISTERED_accept_below_promise"
 audit synod-skip-collected "$REGISTERED_skip_collected"
+audit synod-vote-before-answered "$REGISTERED_vote_before_answered"
 
 echo
 if [ "$fail" -ne 0 ]; then

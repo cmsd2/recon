@@ -83,6 +83,14 @@ pub enum Note {
     /// decision itself**, and the request that follows is indistinguishable on the wire from any
     /// other; this says why it was made.
     CaughtUpFrom { slot: u64 },
+    /// A `p1a` or `p2a` from `from` went unanswered, because this process is recovering and not
+    /// every member has yet answered its announcement, or because it has stopped. §4.3 in
+    /// `multi_paxos_synod`; nothing else reaches the trace from a withheld vote.
+    AnswerWithheld { from: NodeId },
+    /// `witness` answered this process's announcement with a count above its own: a write its
+    /// storage acknowledged is gone, and it stops. The indication says the scope ended; this says
+    /// who saw it and what they saw.
+    StorageScopeEnded { witness: NodeId, seen: u64 },
 }
 
 /// Why something was refused or ignored.

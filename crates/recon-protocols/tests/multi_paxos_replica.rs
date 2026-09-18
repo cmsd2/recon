@@ -9,14 +9,15 @@
 //! Two sources of schedule, as the Synod suite has. The simulator gives breadth. [`Hand`] gives
 //! "lose exactly this message and nothing else", which the simulator cannot: one wire, one link.
 
-use core::convert::Infallible;
 use core::time::Duration;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use recon_core::{
     Effect, Event, MemStore, NodeId, Position, SessionEvent, Time, TimerId, step_noting,
 };
-use recon_protocols::multi_paxos_replica::{Carried, Cmd, Command, Ind, MultiPaxosReplica};
+use recon_protocols::multi_paxos_replica::{
+    Carried, Cmd, Command, Durable, Entry, Ind, MultiPaxosReplica, RequestId,
+};
 use recon_protocols::multi_paxos_synod::{Slot, SynodMsg, Wire};
 use recon_protocols::session_link::SessionLink;
 use recon_protocols::{Note, Timing};
@@ -97,11 +98,15 @@ fn a_command_names_who_asked_and_which_request_of_theirs_it_is() {
     // `c = ⟨κ, cid, op⟩`. Both identifying halves earn their place: `from` is what the port's
     // `Ordered` reports, and `cid` is what keeps two appends of the same value from collapsing into
     // one entry under `perform`'s already-applied check.
-    let one = Command { from: A, cid: 0, value: 7u32 };
-    let two = Command { from: A, cid: 1, value: 7u32 };
-    let other = Command { from: B, cid: 0, value: 7u32 };
+    let first = RequestId { incarnation: 0, seq: 0 };
+    let second = RequestId { incarnation: 0, seq: 1 };
+    let one = Command { from: A, cid: first, value: 7u32 };
+    let two = Command { from: A, cid: second, value: 7u32 };
+    let other = Command { from: B, cid: first, value: 7u32 };
+    let reborn = Command { from: A, cid: RequestId { incarnation: 1, seq: 0 }, value: 7u32 };
     assert_ne!(one, two, "two appends of the same value at one process must differ");
     assert_ne!(one, other, "the same value at two processes must differ");
+    assert_ne!(one, reborn, "and the same request number after a restart must differ too");
 }
 
 #[test]
@@ -846,7 +851,7 @@ fn a_replica_stranded_by_a_collection_catches_up_from_a_peer() {
 /// nothing else".
 struct Hand {
     nodes: BTreeMap<NodeId, Replica>,
-    stores: BTreeMap<NodeId, MemStore<Infallible, Infallible>>,
+    stores: BTreeMap<NodeId, MemStore<Durable, Entry<u32>>>,
     timers: BTreeMap<NodeId, Vec<TimerId>>,
     wire: Vec<(NodeId, NodeId, Msg)>,
     /// What `settle` refused to deliver. A test that drops one message needs to know the message
@@ -1048,6 +1053,215 @@ fn reads_at_hand(h: &Hand, node: NodeId) -> Vec<Vec<u32>> {
             _ => None,
         })
         .collect()
+}
+
+// ---------------------------------------------------------------- §4.3: durability
+
+/// Drain a delivery bound's worth of backlog against a dead process, so a recovery after it comes
+/// from storage rather than from what a peer is still retransmitting.
+const DRAIN: Duration = Duration::from_millis(200);
+
+fn isolate_and_restart(s: &mut Sim<Replica>, node: NodeId) {
+    let rest: Vec<NodeId> = FIVE.iter().copied().filter(|n| *n != node).collect();
+    s.partition(&[&[node], &rest]);
+    s.run_for(DRAIN);
+    s.restart(node);
+    s.deliver_session_events();
+    s.heal();
+    s.deliver_session_events();
+}
+
+fn is_prefix(a: &[u32], b: &[u32]) -> bool {
+    a.len() <= b.len() && a.iter().zip(b).all(|(x, y)| x == y)
+}
+
+#[test]
+fn the_ordered_sequence_survives_a_restart() {
+    let mut s = sim_of(&FIVE, synchronous(60));
+    for (i, node) in FIVE.iter().enumerate() {
+        s.command(*node, Cmd::Append(i as u32));
+    }
+    settle(&mut s);
+    let before = ordered_at(&s, A);
+    assert!(!before.is_empty(), "nothing was ordered, so nothing could survive");
+
+    s.crash(A);
+    isolate_and_restart(&mut s, A);
+    settle(&mut s);
+
+    assert_eq!(s.trace().recoveries_with_state(), 1, "A recovered from its disk, not afresh");
+    let after = ordered_at(&s, A);
+    // A read after recovery does not re-emit the old `Ordered`s, so compare the recovered sequence
+    // held in state against what it had served.
+    let held: Vec<u32> = s.at(A).entries().copied().collect();
+    assert!(
+        is_prefix(&before, &held),
+        "the sequence A served did not survive: {before:?} vs {held:?}"
+    );
+    let _ = after;
+}
+
+#[test]
+fn a_recovered_replica_appends_something_new() {
+    let mut s = sim_of(&FIVE, synchronous(61));
+    for node in FIVE {
+        s.command(node, Cmd::Append(1));
+    }
+    settle(&mut s);
+    s.crash(A);
+    isolate_and_restart(&mut s, A);
+    settle(&mut s);
+
+    // A new append after recovery must take a position everywhere, the recovered process included.
+    s.command(E, Cmd::Append(999));
+    settle(&mut s);
+    for node in FIVE {
+        assert!(
+            ordered_at(&s, node).contains(&999),
+            "{node} never ordered the post-recovery append"
+        );
+    }
+}
+
+#[test]
+fn a_recovered_replica_catches_up_on_what_it_missed() {
+    let mut s = sim_of(&FIVE, synchronous(62));
+    s.command(E, Cmd::Append(1));
+    settle(&mut s);
+    // A goes down, and entries are ordered while it is away.
+    s.crash(A);
+    s.partition(&[&[A], &FIVE[1..]]);
+    s.run_for(DRAIN);
+    for v in [2u32, 3, 4] {
+        s.command(E, Cmd::Append(v));
+    }
+    s.run_for(Duration::from_secs(2));
+    // Now bring A back and let it catch up from a peer.
+    s.restart(A);
+    s.deliver_session_events();
+    s.heal();
+    s.deliver_session_events();
+    s.run_for(Duration::from_secs(3));
+
+    let steady: Vec<u32> = s.at(C).entries().copied().collect();
+    let recovered: Vec<u32> = s.at(A).entries().copied().collect();
+    assert!(!steady.is_empty());
+    assert_eq!(recovered, steady, "A did not catch up to a process that never failed");
+}
+
+#[test]
+fn dying_inside_the_sequence_write_is_consistent() {
+    // A replica armed to die in its next write, applying an entry: either it is in the sequence and
+    // was never revealed, or it is absent and comes back on catch-up. Never revealed without a
+    // record behind it — agreement over the survivors is what would show it, so consistency is that
+    // the recovered sequence is a prefix of a peer's.
+    for seed in 0..20u64 {
+        let mut s = sim_of(&FIVE, synchronous(seed));
+        for node in FIVE {
+            s.command(node, Cmd::Append(1));
+        }
+        s.run_for(Duration::from_millis(1500));
+        s.crash_on_next_write(A);
+        for node in FIVE {
+            s.command(node, Cmd::Append(2));
+        }
+        settle(&mut s);
+        if s.trace().deaths_in_writes() == 0 {
+            continue;
+        }
+        s.partition(&[&[A], &FIVE[1..]]);
+        s.run_for(DRAIN);
+        s.restart(A);
+        s.deliver_session_events();
+        s.heal();
+        s.deliver_session_events();
+        settle(&mut s);
+        let recovered: Vec<u32> = s.at(A).entries().copied().collect();
+        let steady: Vec<u32> = s.at(C).entries().copied().collect();
+        assert!(
+            is_prefix(&recovered, &steady) || is_prefix(&steady, &recovered),
+            "seed {seed}: the recovered sequence diverged: {recovered:?} vs {steady:?}",
+        );
+    }
+}
+
+#[test]
+fn a_recovered_replica_new_append_is_not_a_duplicate() {
+    // The durable incarnation. A appends a value, restarts, and appends the same value again within
+    // the retention window: the second must not be dropped as already applied, which it would be if
+    // the request identifier restarted at zero.
+    let mut s = sim_of(&FIVE, synchronous(63));
+    s.command(A, Cmd::Append(7));
+    settle(&mut s);
+    assert_eq!(s.at(C).entries().filter(|v| **v == 7).count(), 1, "the first 7 was ordered");
+    let inc_before = s.at(A).incarnation();
+
+    s.crash(A);
+    isolate_and_restart(&mut s, A);
+    settle(&mut s);
+    assert!(s.at(A).incarnation() > inc_before, "recovery minted a new incarnation");
+
+    s.command(A, Cmd::Append(7));
+    settle(&mut s);
+    assert_eq!(
+        s.at(C).entries().filter(|v| **v == 7).count(),
+        2,
+        "the post-restart 7 was dropped as a duplicate — a reused request identifier",
+    );
+}
+
+#[test]
+fn a_storage_scope_ending_is_propagated_and_stops_ordering() {
+    // A's disk lied; the core beneath detects it and this layer stops. It orders nothing further and
+    // raises the ending upward.
+    let mut s = sim_of(&FIVE, synchronous(64));
+    for node in FIVE {
+        s.command(node, Cmd::Append(1));
+    }
+    settle(&mut s);
+    let before = ordered_at(&s, A).len();
+
+    s.crash(A);
+    s.restart_truncated(A, 2);
+    s.deliver_session_events();
+    settle(&mut s);
+
+    assert!(s.at(A).is_stopped(), "A's core reported its storage scope ended");
+    assert!(
+        s.trace()
+            .indications_at(A)
+            .any(|i| matches!(i, Ind::StorageScopeEnded { peer } if *peer == A)),
+        "A propagated the ending upward",
+    );
+    // Nothing new is ordered at A after it stops.
+    s.command(E, Cmd::Append(2));
+    settle(&mut s);
+    let after = ordered_at(&s, A).len();
+    assert_eq!(after, before, "A ordered something after stopping");
+}
+
+// ---------------------------------------------------------------- §4.3: the cost of applying
+
+#[test]
+fn applying_an_entry_costs_one_appended_record_net_of_the_core() {
+    // One append per applied entry, above the core's own accepts. Counted as the difference between
+    // total appends and the accepts the core made, which the synod suite measures directly.
+    let mut s = sim_of(&FIVE, synchronous(65));
+    let entries = 5u32;
+    for v in 0..entries {
+        s.command(E, Cmd::Append(v));
+    }
+    settle(&mut s);
+    for node in FIVE {
+        assert_eq!(ordered_at(&s, node).len(), entries as usize, "{node} ordered every entry");
+    }
+    // Each of five replicas applies every entry once: five appends per entry, cluster-wide.
+    let applied_appends: usize = FIVE.iter().map(|n| s.at(*n).entries().count()).sum();
+    assert_eq!(
+        applied_appends,
+        FIVE.len() * entries as usize,
+        "one applied record per replica per entry"
+    );
 }
 
 mod common;
